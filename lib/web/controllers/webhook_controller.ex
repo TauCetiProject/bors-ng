@@ -186,8 +186,14 @@ defmodule BorsNG.WebhookController do
               |> LinkUserProject.changeset(%{user_id: commenter.id, project_id: project.id})
               |> Repo.insert(on_conflict: :nothing)
 
-              %Command{project: project, commenter: commenter, comment: command,
-                pr_xref: pr_xref, pr: pr, is_draft: pr.draft}
+              %Command{
+                project: project,
+                commenter: commenter,
+                comment: command,
+                pr_xref: pr_xref,
+                pr: pr,
+                is_draft: pr.draft
+              }
               |> Command.run()
 
             other ->
@@ -196,8 +202,13 @@ defmodule BorsNG.WebhookController do
 
         :not_review_bot ->
           # A missing draft field stays unknown; Command.run fetches the patch.
-          %Command{project: project, commenter: commenter, comment: comment,
-            pr_xref: pr_xref, is_draft: conn.body_params["issue"]["draft"]}
+          %Command{
+            project: project,
+            commenter: commenter,
+            comment: comment,
+            pr_xref: pr_xref,
+            is_draft: conn.body_params["issue"]["draft"]
+          }
           |> Command.run()
 
         :ignore ->

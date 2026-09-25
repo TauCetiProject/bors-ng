@@ -907,20 +907,33 @@ defmodule BorsNG.WebhookControllerTest do
   end
 
   test "review App commands require the current PR head and App identity", %{
-    conn: conn, project: project, user: user
+    conn: conn,
+    project: project,
+    user: user
   } do
     previous = System.get_env("TAUCETI_REVIEW_APP_ID")
     System.put_env("TAUCETI_REVIEW_APP_ID", "3947238")
+
     on_exit(fn ->
-      if previous, do: System.put_env("TAUCETI_REVIEW_APP_ID", previous),
+      if previous,
+        do: System.put_env("TAUCETI_REVIEW_APP_ID", previous),
         else: System.delete_env("TAUCETI_REVIEW_APP_ID")
     end)
 
     Repo.update!(Ecto.Changeset.change(project, name: "TauCetiProject/TauCeti"))
     head = String.duplicate("a", 40)
+
     GitHub.ServerMock.put_state(%{
       {{:installation, 31}, 13} => %{
-        pulls: %{1 => %Pr{number: 1, head_sha: head, state: :open, draft: false}},
+        pulls: %{
+          1 => %Pr{
+            number: 1,
+            head_sha: head,
+            state: :open,
+            draft: false,
+            user: %GitHub.User{id: 23, login: "ghost", avatar_url: "U"}
+          }
+        },
         comments: %{1 => []}
       }
     })
@@ -936,19 +949,28 @@ defmodule BorsNG.WebhookControllerTest do
       }
     }
 
-    conn |> put_req_header("x-github-event", "issue_comment")
+    conn
+    |> put_req_header("x-github-event", "issue_comment")
     |> post(webhook_path(conn, :webhook, "github"), base)
+
     assert Repo.get_by(LinkUserProject, project_id: project.id, user_id: user.id) == nil
 
-    forged = put_in(base, ["comment", "body"], "bors r- sha=#{head}")
+    forged =
+      put_in(base, ["comment", "body"], "bors r- sha=#{head}")
       |> put_in(["comment", "performed_via_github_app", "id"], 1)
-    conn |> put_req_header("x-github-event", "issue_comment")
+
+    conn
+    |> put_req_header("x-github-event", "issue_comment")
     |> post(webhook_path(conn, :webhook, "github"), forged)
+
     assert Repo.get_by(LinkUserProject, project_id: project.id, user_id: user.id) == nil
 
     valid = put_in(base, ["comment", "body"], "bors r- sha=#{head}")
-    conn |> put_req_header("x-github-event", "issue_comment")
+
+    conn
+    |> put_req_header("x-github-event", "issue_comment")
     |> post(webhook_path(conn, :webhook, "github"), valid)
+
     assert Repo.get_by!(LinkUserProject, project_id: project.id, user_id: user.id)
   end
 
