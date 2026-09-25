@@ -929,6 +929,10 @@ defmodule BorsNG.WebhookControllerTest do
           1 => %Pr{
             number: 1,
             head_sha: head,
+            base_ref: "master",
+            head_ref: "topic",
+            title: "Test review command",
+            body: "",
             state: :open,
             draft: false,
             user: %GitHub.User{id: 23, login: "ghost", avatar_url: "U"}
@@ -943,7 +947,7 @@ defmodule BorsNG.WebhookControllerTest do
       "action" => "created",
       "issue" => %{"number" => 1, "pull_request" => %{}},
       "comment" => %{
-        "body" => "bors r- sha=#{String.duplicate("b", 40)}",
+        "body" => "bors r+ single sha=#{String.duplicate("b", 40)}",
         "performed_via_github_app" => %{"id" => 3_947_238},
         "user" => %{"id" => 23, "login" => "ghost", "avatar_url" => "U"}
       }

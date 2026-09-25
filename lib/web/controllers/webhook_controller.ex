@@ -222,8 +222,8 @@ defmodule BorsNG.WebhookController do
 
     if project.name == "TauCetiProject/TauCeti" and app_id &&
          get_in(comment, ["performed_via_github_app", "id"]) == String.to_integer(app_id) do
-      case Regex.run(~r/\Abors r([+-]) sha=([0-9a-f]{40})\z/, comment["body"] || "") do
-        [_, sign, head] -> {:ok, "bors r#{sign}", head}
+      case Regex.run(~r/\Abors (r\+ single|r\+|r-) sha=([0-9a-f]{40})\z/, comment["body"] || "") do
+        [_, command, head] -> {:ok, "bors #{command}", head}
         _ -> :ignore
       end
     else
