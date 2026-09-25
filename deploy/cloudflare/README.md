@@ -28,10 +28,15 @@ Workers Paid is active. The queues `tauceti-bors-webhooks` and
    `/webhook/github`, and OAuth callback is `/auth/github/callback`. GitHub may
    report a failed initial ping before the Worker is deployed.
 3. Authorize the Cloudflare Workers Builds GitHub connection for the fork
-   `TauCetiProject/bors-ng` only. Create a Worker project named `tauceti-bors`
-   on the `tauceti` account, with repository root `/`, build command `npm ci`,
-   and deploy command `npx wrangler deploy`. Set its production branch to the
-   reviewed deployment branch. Workers Builds has Docker available for the
+   `TauCetiProject/bors-ng` only. A bootstrap Worker project named
+   `tauceti-bors` already exists. Provide a user-scoped Cloudflare API token
+   with Workers Builds Configuration Edit and Workers Scripts Read in a local
+   private file. Create one Worker build token in Settings > Builds > API token,
+   then run `python3 deploy/cloudflare/configure_builds.py --token-file PATH`
+   to check prerequisites, followed by the same command with `--apply`.
+   The script configures the reviewed `master` branch, repository root `/`,
+   build command `npm ci`, and deploy command `npx wrangler deploy`; it does
+   not start the first build. Workers Builds has Docker available for the
    Dockerfile image; `wrangler deploy` on this host cannot build it because this
    host has no usable Docker daemon.
 4. Put these Worker secrets in the Cloudflare dashboard (or `wrangler secret
