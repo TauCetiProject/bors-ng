@@ -14,12 +14,14 @@ Workers Paid is active. The queues `tauceti-bors-webhooks` and
 
 ## Remaining one-time setup
 
-1. Create a Neon organization on the Scale plan with billing, and provide a
-   temporary organization API key through a local private file. The project
-   should be in AWS `us-east-1`, with one primary PostgreSQL compute at 0.25 CU,
-   scale-to-zero disabled, and 30-day history retention. The deployment uses a
-   direct TLS connection string (not Neon's transaction pooler); bors uses its
-   own small connection pool.
+1. Create a Neon organization on the Scale plan with billing, and provide its
+   organization ID and a temporary API key through a local private file. Run
+   `python3 deploy/cloudflare/provision_neon.py --token-file PATH --org-id ID
+   --database-url-file PATH` to inspect the proposed project, then repeat with
+   `--apply`. The script creates one AWS `us-east-1` PostgreSQL 17 project at
+   fixed 0.25 CU, disables scale-to-zero, sets 30-day history retention, and
+   saves its direct TLS connection string to a mode-0600 file. Bors uses its
+   own small connection pool instead of Neon's transaction pooler.
 2. Register an organization-owned GitHub App using the prefilled URL printed by
    `node deploy/cloudflare/github-app-url.mjs`. Set a randomly generated webhook
    secret in the App UI; URL parameters cannot prefill it. Generate a private
