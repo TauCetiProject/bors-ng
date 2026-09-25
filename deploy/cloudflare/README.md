@@ -39,12 +39,13 @@ Workers Paid is active. The queues `tauceti-bors-webhooks` and
    not start the first build. Workers Builds has Docker available for the
    Dockerfile image; `wrangler deploy` on this host cannot build it because this
    host has no usable Docker daemon.
-4. Put these Worker secrets in the Cloudflare dashboard (or `wrangler secret
-   put`), never in Git: `DATABASE_URL`, `SECRET_KEY_BASE`,
-   `GITHUB_WEBHOOK_SECRET`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`,
-   `GITHUB_INTEGRATION_ID`, and `GITHUB_INTEGRATION_PEM`. The PEM value is the
-   base64 encoding of the downloaded GitHub private key. `SECRET_KEY_BASE` is
-   a random 64-byte value. The webhook secret must match the GitHub App UI.
+4. Put the database URL, webhook secret, client secret, and GitHub App private
+   key in separate local private files, outside the repository. Run
+   `python3 deploy/cloudflare/upload_secrets.py --help` for the upload command's
+   arguments. It creates a reusable random `SECRET_KEY_BASE` file with mode
+   0600 and sends all seven Worker secrets to Wrangler over stdin. It encodes
+   the downloaded PEM as required by bors. The webhook secret must match the
+   GitHub App UI. No secret belongs in Git.
 
 Do not enable bors merge authority or set `MERGE_BACKEND=bors` until the
 container is healthy, the App receives webhooks, staging CI succeeds on a
