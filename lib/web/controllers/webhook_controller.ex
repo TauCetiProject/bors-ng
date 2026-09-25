@@ -72,6 +72,7 @@ defmodule BorsNG.WebhookController do
   alias BorsNG.Database.Batch
   alias BorsNG.Database.Context.Permission
   alias BorsNG.Database.Installation
+  alias BorsNG.Database.LinkUserProject
   alias BorsNG.Database.Patch
   alias BorsNG.Database.Project
   alias BorsNG.Database.Repo
@@ -170,16 +171,63 @@ defmodule BorsNG.WebhookController do
 
       comment = conn.body_params["comment"]["body"]
 
-      # Raw, not `== true`: a missing field stays `nil` ("unknown"), so
-      # `Command.run/1` falls back to the patch instead of assuming otherwise.
-      %Command{
-        project: project,
-        commenter: commenter,
-        comment: comment,
-        pr_xref: conn.body_params["issue"]["number"],
-        is_draft: conn.body_params["issue"]["draft"]
-      }
-      |> Command.run()
+      pr_xref = conn.body_params["issue"]["number"]
+
+      case review_bot_command(conn.body_params["comment"], project) do
+        {:ok, command, head} ->
+          repo_conn = Project.installation_connection(project.repo_xref, Repo)
+
+          case GitHub.get_pr(repo_conn, pr_xref) do
+            {:ok, %{head_sha: ^head, state: :open} = pr} ->
+              # GitHub authenticates the issuing App in performed_via_github_app.
+              # Grant only this installation's review bot authority to issue
+              # head-bound commands, and only for TauCeti.
+              %LinkUserProject{}
+              |> LinkUserProject.changeset(%{user_id: commenter.id, project_id: project.id})
+              |> Repo.insert(on_conflict: :nothing)
+
+              %Command{
+                project: project,
+                commenter: commenter,
+                comment: command,
+                pr_xref: pr_xref,
+                pr: pr,
+                is_draft: pr.draft
+              }
+              |> Command.run()
+
+            other ->
+              Logger.warning("ignored stale review bot command on ##{pr_xref}: #{inspect(other)}")
+          end
+
+        :not_review_bot ->
+          # A missing draft field stays unknown; Command.run fetches the patch.
+          %Command{
+            project: project,
+            commenter: commenter,
+            comment: comment,
+            pr_xref: pr_xref,
+            is_draft: conn.body_params["issue"]["draft"]
+          }
+          |> Command.run()
+
+        :ignore ->
+          :ok
+      end
+    end
+  end
+
+  defp review_bot_command(comment, project) do
+    app_id = System.get_env("TAUCETI_REVIEW_APP_ID")
+
+    if project.name == "TauCetiProject/TauCeti" and app_id &&
+         get_in(comment, ["performed_via_github_app", "id"]) == String.to_integer(app_id) do
+      case Regex.run(~r/\Abors (r\+ single|r\+|r-) sha=([0-9a-f]{40})\z/, comment["body"] || "") do
+        [_, command, head] -> {:ok, "bors #{command}", head}
+        _ -> :ignore
+      end
+    else
+      :not_review_bot
     end
   end
 

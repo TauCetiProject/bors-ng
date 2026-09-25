@@ -1220,6 +1220,7 @@ defmodule BorsNG.Worker.Batcher do
               else
                 GitHub.force_push!(repo_conn, head, batch.project.staging_branch)
                 setup_statuses(batch, toml)
+                dispatch_staging(batch, repo_conn, head, base.commit)
                 {:running, head}
               end
           end
@@ -1245,6 +1246,7 @@ defmodule BorsNG.Worker.Batcher do
             )
 
           setup_statuses(batch, toml)
+          dispatch_staging(batch, repo_conn, head, base.commit)
           {:running, head}
         end
 
@@ -1253,6 +1255,14 @@ defmodule BorsNG.Worker.Batcher do
         send_message(repo_conn, patches, {:config, message})
         {:error, nil}
     end
+  end
+
+  defp dispatch_staging(batch, repo_conn, head, base) do
+    if System.get_env("BORS_STAGE_DISPATCH_PROJECT") == batch.project.name do
+      :ok = GitHub.dispatch_staging(repo_conn, batch.project.name, head, base, batch.id)
+    end
+
+    :ok
   end
 
   defp start_waiting_merged_batch(batch, patch_links, _base, :conflict) do

@@ -2,6 +2,7 @@ defmodule BorsNG.WebhookControllerTest do
   use BorsNG.ConnCase
 
   alias BorsNG.Database.Installation
+  alias BorsNG.Database.LinkUserProject
   alias BorsNG.Database.Attempt
   alias BorsNG.Database.Patch
   alias BorsNG.Database.PatchBundle
@@ -903,6 +904,78 @@ defmodule BorsNG.WebhookControllerTest do
   defp pr_comments(pr_xref) do
     GitHub.ServerMock.get_state()
     |> get_in([{{:installation, 31}, 13}, :comments, pr_xref])
+  end
+
+  test "review App commands require the current PR head and App identity", %{
+    conn: conn,
+    project: project,
+    user: user
+  } do
+    previous = System.get_env("TAUCETI_REVIEW_APP_ID")
+    System.put_env("TAUCETI_REVIEW_APP_ID", "3947238")
+
+    on_exit(fn ->
+      if previous,
+        do: System.put_env("TAUCETI_REVIEW_APP_ID", previous),
+        else: System.delete_env("TAUCETI_REVIEW_APP_ID")
+    end)
+
+    Repo.update!(Ecto.Changeset.change(project, name: "TauCetiProject/TauCeti"))
+    head = String.duplicate("a", 40)
+
+    GitHub.ServerMock.put_state(%{
+      {{:installation, 31}, 13} => %{
+        pulls: %{
+          1 => %Pr{
+            number: 1,
+            head_sha: head,
+            base_ref: "master",
+            head_ref: "topic",
+            title: "Test review command",
+            body: "",
+            state: :open,
+            draft: false,
+            user: %GitHub.User{id: 23, login: "ghost", avatar_url: "U"}
+          }
+        },
+        comments: %{1 => []}
+      }
+    })
+
+    base = %{
+      "repository" => %{"id" => 13},
+      "action" => "created",
+      "issue" => %{"number" => 1, "pull_request" => %{}},
+      "comment" => %{
+        "body" => "bors r+ single sha=#{String.duplicate("b", 40)}",
+        "performed_via_github_app" => %{"id" => 3_947_238},
+        "user" => %{"id" => 23, "login" => "ghost", "avatar_url" => "U"}
+      }
+    }
+
+    conn
+    |> put_req_header("x-github-event", "issue_comment")
+    |> post(webhook_path(conn, :webhook, "github"), base)
+
+    assert Repo.get_by(LinkUserProject, project_id: project.id, user_id: user.id) == nil
+
+    forged =
+      put_in(base, ["comment", "body"], "bors r- sha=#{head}")
+      |> put_in(["comment", "performed_via_github_app", "id"], 1)
+
+    conn
+    |> put_req_header("x-github-event", "issue_comment")
+    |> post(webhook_path(conn, :webhook, "github"), forged)
+
+    assert Repo.get_by(LinkUserProject, project_id: project.id, user_id: user.id) == nil
+
+    valid = put_in(base, ["comment", "body"], "bors r- sha=#{head}")
+
+    conn
+    |> put_req_header("x-github-event", "issue_comment")
+    |> post(webhook_path(conn, :webhook, "github"), valid)
+
+    assert Repo.get_by!(LinkUserProject, project_id: project.id, user_id: user.id)
   end
 
   test "an r+ in an issue comment on a draft PR is refused with a warning", %{

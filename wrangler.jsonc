@@ -1,0 +1,31 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "tauceti-bors",
+  "account_id": "ec2169bdf033f56b009956d4b64ba8ef",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-25",
+  "routes": [{ "pattern": "bors.taucetiproject.org", "custom_domain": true }],
+  "containers": [{
+    "class_name": "BorsContainer",
+    "image": "./Dockerfile",
+    "max_instances": 1,
+    "instance_type": "basic",
+    "constraints": { "regions": ["ENAM"] }
+  }],
+  "durable_objects": {
+    "bindings": [{ "name": "BORS", "class_name": "BorsContainer" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["BorsContainer"] }],
+  "triggers": { "crons": ["* * * * *"] },
+  "queues": {
+    "producers": [{ "binding": "WEBHOOKS", "queue": "tauceti-bors-webhooks" }],
+    "consumers": [{
+      "queue": "tauceti-bors-webhooks",
+      "max_batch_size": 1,
+      "max_concurrency": 1,
+      "max_retries": 20,
+      "dead_letter_queue": "tauceti-bors-webhooks-dlq"
+    }]
+  },
+  "r2_buckets": [{ "binding": "WEBHOOK_BODIES", "bucket_name": "tauceti-bors-webhooks" }]
+}

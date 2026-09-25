@@ -161,6 +161,12 @@ defmodule BorsNG.GitHub do
     )
   end
 
+  @doc "Dispatch a trusted default-branch workflow for an immutable staging commit."
+  @spec dispatch_staging(tconn, binary, binary, binary, integer) :: :ok | {:error, term}
+  def dispatch_staging(repo_conn, repo_name, head_sha, base_sha, batch_id) do
+    call_with_retry(:dispatch_staging, repo_conn, {repo_name, head_sha, base_sha, batch_id})
+  end
+
   @spec get_branch!(tconn, binary) :: %{commit: bitstring, tree: bitstring}
   def get_branch!(repo_conn, from) do
     {:ok, commit} = call_with_retry(:get_branch, repo_conn, {from}, 500, 4_000)

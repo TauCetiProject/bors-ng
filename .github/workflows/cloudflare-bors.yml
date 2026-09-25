@@ -1,0 +1,69 @@
+name: Cloudflare bors build
+
+on:
+  push:
+    branches: [master, feat/cloudflare-bors]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  webhook-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: Postgres1234
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      BORS_DATABASE: postgresql
+      DATABASE_URL_TEST: postgresql://postgres:Postgres1234@localhost/bors_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: '27'
+          elixir-version: '1.17.3'
+      - run: mix local.hex --force && mix local.rebar --force
+      - run: mix deps.get
+      - run: mix format lib/github/github.ex lib/github/github/server.ex lib/worker/batcher.ex lib/web/controllers/webhook_controller.ex test/controllers/webhook_controller_test.exs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: elixir-formatted-sources
+          path: |
+            lib/github/github.ex
+            lib/github/github/server.ex
+            lib/worker/batcher.ex
+            lib/web/controllers/webhook_controller.ex
+            test/controllers/webhook_controller_test.exs
+      - run: mix test test/controllers/webhook_controller_test.exs
+      - run: git diff --exit-code
+
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the production release image
+        run: docker build --tag tauceti-bors:test .
+
+  worker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: node --check src/index.js
+      - run: npx wrangler deploy --dry-run --containers-rollout=none
