@@ -34,8 +34,18 @@ jobs:
           elixir-version: '1.17.3'
       - run: mix local.hex --force && mix local.rebar --force
       - run: mix deps.get
-      - run: mix format --check-formatted lib/github/github.ex lib/github/github/server.ex lib/worker/batcher.ex lib/web/controllers/webhook_controller.ex test/controllers/webhook_controller_test.exs
+      - run: mix format lib/github/github.ex lib/github/github/server.ex lib/worker/batcher.ex lib/web/controllers/webhook_controller.ex test/controllers/webhook_controller_test.exs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: elixir-formatted-sources
+          path: |
+            lib/github/github.ex
+            lib/github/github/server.ex
+            lib/worker/batcher.ex
+            lib/web/controllers/webhook_controller.ex
+            test/controllers/webhook_controller_test.exs
       - run: mix test test/controllers/webhook_controller_test.exs
+      - run: git diff --exit-code
 
   container:
     runs-on: ubuntu-latest
