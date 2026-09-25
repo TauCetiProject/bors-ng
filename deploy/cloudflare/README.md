@@ -46,8 +46,9 @@ container is healthy, the App receives webhooks, staging CI succeeds on a
 pilot batch, and its exact revision cache is public. The existing merge queue
 continues running while the code and infrastructure are staged.
 
-The review App (`3947238`) writes exact-head `bors r+ sha=<head>` or
-`bors r- sha=<head>` comments only when `MERGE_BACKEND=bors`. The bors webhook
+The review App (`3947238`) writes exact-head `bors r+ sha=<head>` (or
+`bors r+ single sha=<head>` for Lake pin changes) and `bors r- sha=<head>`
+comments only when `MERGE_BACKEND=bors`. The bors webhook
 checks GitHub's issuing App ID and re-fetches the live PR head before granting
 reviewer authority. The fork dispatches staging commits to TauCeti's trusted
 `pr-build` workflow. Bors then waits for `build`, `bump-guard`, and `scope` on
