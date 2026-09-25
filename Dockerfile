@@ -1,7 +1,12 @@
+FROM node:22-bookworm AS node
+
 FROM elixir:1.17.3 AS build
 
 ENV MIX_ENV=prod LANG=C.UTF-8
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential git nodejs npm ca-certificates \
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 RUN mix local.hex --force && mix local.rebar --force
 
