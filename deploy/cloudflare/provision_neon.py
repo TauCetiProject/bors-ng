@@ -36,7 +36,7 @@ def main():
     parser.add_argument("--token-file", type=pathlib.Path, required=True)
     parser.add_argument("--database-url-file", type=pathlib.Path, required=True)
     parser.add_argument("--org-id", required=True,
-                        help="the billed Neon Scale organization, never a personal project")
+                        help="a billed Neon Launch or Scale organization, never a personal project")
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()
     token = args.token_file.read_text().strip()
@@ -48,8 +48,8 @@ def main():
         raise SystemExit(f"Output directory does not exist: {args.database_url_file.parent}")
     organization = request(token, f"/organizations/{args.org_id}")
     organization = organization.get("organization", organization)
-    if organization.get("id") != args.org_id or "scale" not in organization.get("plan", "").lower():
-        raise SystemExit("Neon organization ID or Scale plan does not match; refusing to create project")
+    if organization.get("id") != args.org_id or organization.get("plan", "").lower() not in ("launch", "scale"):
+        raise SystemExit("Neon organization ID or paid plan does not match; refusing to create project")
     query = "/projects?limit=100&search=" + NAME
     query += "&org_id=" + args.org_id
     existing = [project for project in request(token, query)["projects"]
@@ -62,7 +62,7 @@ def main():
         "name": NAME,
         "region_id": "aws-us-east-1",
         "pg_version": 17,
-        "history_retention_seconds": 30 * 24 * 3600,
+        "history_retention_seconds": 7 * 24 * 3600,
         "default_endpoint_settings": {
             "autoscaling_limit_min_cu": 0.25,
             "autoscaling_limit_max_cu": 0.25,
@@ -71,7 +71,7 @@ def main():
     }
     project["org_id"] = args.org_id
     print("Ready to create tauceti-bors in AWS us-east-1: PostgreSQL 17, "
-          "0.25 CU fixed, always active, 30-day history.")
+          "0.25 CU fixed, always active, seven-day history.")
     if not args.apply:
         print("Read-only check; pass --apply to provision it.")
         return

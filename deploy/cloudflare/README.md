@@ -14,16 +14,22 @@ Workers Paid is active. The queues `tauceti-bors-webhooks` and
 An existing Neon direct endpoint was supplied on 2026-09-27. Its credentials
 successfully connected over verified TLS to PostgreSQL 18. The direct URI,
 without libpq-only query parameters, is installed as the bootstrap Worker's
-`DATABASE_URL` secret. Its organization plan and retention settings await the
-Neon organization ID. Do not create another Neon project for this deployment.
+`DATABASE_URL` secret. The Neon organization `TauCetiProject`
+(`org-summer-darkness-64936821`) is currently Free. Its existing project
+`dawn-wildflower-89938913` has six-hour history and scale-to-zero enabled.
+Do not create another Neon project for this deployment.
 
 ## Remaining one-time setup
 
-1. Provide the Neon organization ID so the supplied project's plan, compute,
-   and history retention can be verified with the API key. Bors uses its own
-   small connection pool instead of Neon's transaction pooler. The
-   `provision_neon.py` script is retained for a future clean installation;
-   it must not be run for the already-supplied database.
+1. Upgrade the existing Neon organization to Launch. Once active, set the
+   project's restore history to seven days. Keep the existing 0.25–2 CU
+   autoscaling range for the pilot, and disable scale-to-zero so bors can keep
+   its database connections warm. Launch supports these settings; Scale is
+   needed only if a 30-day restore window or its other production features
+   become requirements. Bors uses its own small connection pool instead of
+   Neon's transaction pooler. The `provision_neon.py` script is retained for
+   a future clean installation; it must not be run for the already-supplied
+   database.
 2. Register an organization-owned GitHub App using the prefilled URL printed by
    `node deploy/cloudflare/github-app-url.mjs`. Set a randomly generated webhook
    secret in the App UI; URL parameters cannot prefill it. Generate a private
