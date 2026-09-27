@@ -12,6 +12,7 @@ import os
 import pathlib
 import secrets
 import subprocess
+import urllib.parse
 
 
 def read(path):
@@ -41,10 +42,20 @@ def main():
     args = parser.parse_args()
 
     database_url = read(args.database_url_file)
-    if not database_url.startswith("postgresql://") and not database_url.startswith("postgres://"):
+    parsed = urllib.parse.urlsplit(database_url)
+    if parsed.scheme not in ("postgresql", "postgres") or not parsed.hostname:
         parser.error("database URL must be a PostgreSQL URI")
-    if "-pooler." in database_url:
+    if "-pooler." in parsed.hostname:
         parser.error("use Neon's direct endpoint, not its transaction pooler")
+    # Neon emits libpq-specific URL parameters. Ecto/Postgrex receives TLS
+    # through DATABASE_USE_SSL=true in src/index.js, so do not pass those
+    # parameters to an Elixir driver that does not interpret them as libpq.
+    params = urllib.parse.parse_qs(parsed.query, strict_parsing=True)
+    if params and (params.get("sslmode") != ["require"] or
+                   set(params) - {"sslmode", "channel_binding"} or
+                   params.get("channel_binding", ["require"]) != ["require"]):
+        parser.error("database URL has unsupported query parameters")
+    database_url = parsed._replace(query="", fragment="").geturl()
     pem = args.github_private_key_file.read_bytes()
     if b"-----BEGIN RSA PRIVATE KEY-----" not in pem and b"-----BEGIN PRIVATE KEY-----" not in pem:
         parser.error("GitHub private key file is not PEM")

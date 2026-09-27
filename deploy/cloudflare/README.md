@@ -11,17 +11,19 @@ are in `wrangler.jsonc`.
 Workers Paid is active. The queues `tauceti-bors-webhooks` and
 `tauceti-bors-webhooks-dlq`, and the R2 bucket `tauceti-bors-webhooks` with
 14-day payload and marker expiration, have been created in that account.
+An existing Neon direct endpoint was supplied on 2026-09-27. Its credentials
+successfully connected over verified TLS to PostgreSQL 18. The direct URI,
+without libpq-only query parameters, is installed as the bootstrap Worker's
+`DATABASE_URL` secret. Its organization plan and retention settings await the
+Neon organization ID. Do not create another Neon project for this deployment.
 
 ## Remaining one-time setup
 
-1. Create a Neon organization on the Scale plan with billing, and provide its
-   organization ID and a temporary API key through a local private file. Run
-   `python3 deploy/cloudflare/provision_neon.py --token-file PATH --org-id ID
-   --database-url-file PATH` to inspect the proposed project, then repeat with
-   `--apply`. The script creates one AWS `us-east-1` PostgreSQL 17 project at
-   fixed 0.25 CU, disables scale-to-zero, sets 30-day history retention, and
-   saves its direct TLS connection string to a mode-0600 file. Bors uses its
-   own small connection pool instead of Neon's transaction pooler.
+1. Provide the Neon organization ID so the supplied project's plan, compute,
+   and history retention can be verified with the API key. Bors uses its own
+   small connection pool instead of Neon's transaction pooler. The
+   `provision_neon.py` script is retained for a future clean installation;
+   it must not be run for the already-supplied database.
 2. Register an organization-owned GitHub App using the prefilled URL printed by
    `node deploy/cloudflare/github-app-url.mjs`. Set a randomly generated webhook
    secret in the App UI; URL parameters cannot prefill it. Generate a private
@@ -41,8 +43,9 @@ Workers Paid is active. The queues `tauceti-bors-webhooks` and
    not start the first build. Workers Builds has Docker available for the
    Dockerfile image; `wrangler deploy` on this host cannot build it because this
    host has no usable Docker daemon.
-4. Put the database URL, webhook secret, client secret, and GitHub App private
-   key in separate local private files, outside the repository. Run
+4. Put the webhook secret, client secret, and GitHub App private key in separate
+   local private files, outside the repository. The database URL is already
+   installed and should be supplied in a private file for repeatable uploads. Run
    `python3 deploy/cloudflare/upload_secrets.py --help` for the upload command's
    arguments. It creates a reusable random `SECRET_KEY_BASE` file with mode
    0600 and sends all seven Worker secrets to Wrangler over stdin. It encodes
