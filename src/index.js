@@ -92,10 +92,6 @@ export default {
     for (const message of batch.messages) {
       const item = message.body;
       const processedKey = `processed/${item.delivery}`;
-      if (await env.WEBHOOK_BODIES.head(processedKey)) {
-        message.ack();
-        continue;
-      }
       let body;
       if (item.object) {
         const object = await env.WEBHOOK_BODIES.get(item.object);
@@ -106,6 +102,10 @@ export default {
       }
       if (!needsBors(item.event, body)) {
         if (item.object) await env.WEBHOOK_BODIES.delete(item.object);
+        message.ack();
+        continue;
+      }
+      if (await env.WEBHOOK_BODIES.head(processedKey)) {
         message.ack();
         continue;
       }
