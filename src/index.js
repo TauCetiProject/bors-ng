@@ -15,6 +15,10 @@ export class BorsContainer extends Container {
     PUBLIC_HOST: "bors.taucetiproject.org",
     PUBLIC_PROTOCOL: "https",
     PUBLIC_PORT: "443",
+    // TLS terminates at Cloudflare; the Container port serves plain HTTP.
+    // Phoenix's FORCE_SSL redirect would make Cloudflare's readiness probe
+    // follow an HTTPS URL on that port, which Containers do not support.
+    FORCE_SSL: "false",
     DATABASE_AUTO_MIGRATE: "true",
     DATABASE_URL: workerEnv.DATABASE_URL,
     DATABASE_USE_SSL: "true",
