@@ -3,8 +3,8 @@
 
 The Cloudflare GitHub App must first be authorized for TauCetiProject/bors-ng.
 The token is read from a private file so it is never passed on a command line.
-This script deliberately does not trigger a deployment: runtime secrets and
-the reviewed production branch must be ready before that step.
+For an existing connection, update its branch filter instead of creating a
+duplicate trigger. The script deliberately does not start a build.
 """
 
 import argparse
@@ -51,7 +51,7 @@ def main():
     parser.add_argument("--branch", default="master",
                         help="reviewed production branch (default: master)")
     parser.add_argument("--apply", action="store_true",
-                        help="create the repo connection and production trigger")
+                        help="create or update the production trigger")
     args = parser.parse_args()
     token = args.token_file.read_text().strip()
     if not token:
@@ -66,11 +66,26 @@ def main():
     worker_tag = worker["tag"]
     tokens = cloudflare(token, "/builds/tokens")
     triggers = cloudflare(token, f"/builds/workers/{worker_tag}/triggers")
-    production = next((trigger for trigger in triggers
-                       if args.branch in trigger.get("branch_includes", [])), None)
-    if production:
-        print(f"Production trigger already exists: {production['trigger_uuid']}")
+    connected = [trigger for trigger in triggers if
+                 (trigger.get("repo_connection") or {}).get("repo_id") == str(repo_id)
+                 and (trigger.get("repo_connection") or {}).get("provider_account_name") == OWNER]
+    if len(connected) > 1:
+        raise SystemExit("Multiple triggers for the bors repo exist; review them before editing.")
+    if connected:
+        trigger = connected[0]
+        current = trigger.get("branch_includes", [])
+        print(f"Existing trigger {trigger['trigger_uuid']}: {current}")
+        if current == [args.branch]:
+            print("Branch filter is already current.")
+        elif args.apply:
+            cloudflare(token, f"/builds/triggers/{trigger['trigger_uuid']}",
+                       method="PATCH", data={"branch_includes": [args.branch]})
+            print(f"Updated branch filter to {args.branch}; no build was started.")
+        else:
+            print(f"Pass --apply to move this trigger to {args.branch}.")
         return
+    if triggers:
+        raise SystemExit("Worker has a trigger for another repository; review it before creating one.")
     if not tokens:
         raise SystemExit("No Workers build token exists. Create one in Worker Settings > Builds > API token.")
     if len(tokens) != 1:

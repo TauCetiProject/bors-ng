@@ -27,43 +27,32 @@ these settings were applied. The previous settings are saved locally in
 `/home/kim/.config/tauceti-bors/neon-settings-before-launch.json`.
 Do not create another Neon project for this deployment.
 
-## Remaining one-time setup
+## Pilot status and next steps
 
-1. Neon is ready. Bors uses its own small connection pool instead of Neon's
-   transaction pooler. The `provision_neon.py` script is retained for a future
-   clean installation; it must not be run for the already-supplied database.
-2. Open `https://tauceti-bors.tauceti-ec2.workers.dev/github-app/setup` and
-   register the private App under TauCetiProject. The temporary setup Worker
-   displays a one-time code after GitHub redirects back. Within one hour, pass
-   that code on stdin to
-   `python3 deploy/cloudflare/exchange_github_manifest.py`; the script stores
-   the App ID, client secret, PEM key, and GitHub-generated webhook secret in
-   local mode-0600 files. Install the App **only** on `TauCetiProject/TauCeti`
-   for the pilot, using the URL the script prints. Its URL is
-   `https://bors.taucetiproject.org/`, webhook is `/webhook/github`, and OAuth
-   callback is `/auth/github/callback`. GitHub may report a failed initial ping
-   before the bors Container is deployed. The older manual App setup URL from
-   `github-app-url.mjs` remains a fallback.
-3. Authorize the Cloudflare Workers Builds GitHub connection for the fork
-   `TauCetiProject/bors-ng` only. A bootstrap Worker project named
-   `tauceti-bors` already exists. Provide a user-scoped Cloudflare API token
-   with Workers Builds Configuration Edit and Workers Scripts Read in a local
-   private file. Create one Worker build token in Settings > Builds > API token,
-   then run `python3 deploy/cloudflare/configure_builds.py --token-file PATH`
-   to check prerequisites, followed by the same command with `--apply`.
-   The script configures the reviewed `master` branch, repository root `/`,
-   build command `npm ci`, and deploy command `npx wrangler deploy`; it does
-   not start the first build. Workers Builds has Docker available for the
-   Dockerfile image; `wrangler deploy` on this host cannot build it because this
-   host has no usable Docker daemon.
-4. Put the webhook secret, client secret, and GitHub App private key in separate
-   local private files, outside the repository. The database URL is already
-   installed and should be supplied in a private file for repeatable uploads. Run
-   `python3 deploy/cloudflare/upload_secrets.py --help` for the upload command's
-   arguments. It creates a reusable random `SECRET_KEY_BASE` file with mode
-   0600 and sends all seven Worker secrets to Wrangler over stdin. It encodes
-   the downloaded PEM as required by bors. The webhook secret must match the
-   GitHub App UI. No secret belongs in Git.
+Neon is ready. Bors uses its own small connection pool instead of Neon's
+transaction pooler. The `provision_neon.py` script is retained for a future
+clean installation; it must not be run for the already-supplied database.
+
+The private GitHub App `tau-ceti-bors` is registered and installed only on
+`TauCetiProject/TauCeti`. Its App ID is `5172678`; the webhook URL is
+`https://bors.taucetiproject.org/webhook/github`. All seven Worker secrets
+have been installed. Their source files and the Cloudflare Builds API token
+are under `/home/kim/.config/tauceti-bors/` with private permissions.
+
+Cloudflare Builds is connected to `TauCetiProject/bors-ng` and automatically
+builds pushes to `feat/cloudflare-bors`, the branch of draft PR #1. The build
+command is `npm ci`, the deploy command is `npx wrangler deploy`, and the root
+directory is `/`. Workers Builds has Docker available for the image;
+`wrangler deploy` on this host cannot build it because this host has no usable
+Docker daemon. After PR #1 is reviewed and merged, move the existing Builds
+trigger to `master` with
+`python3 deploy/cloudflare/configure_builds.py --token-file /home/kim/.config/tauceti-bors/cloudflare-builds-token --branch master --apply`.
+The script updates the existing trigger instead of creating a second one.
+
+GitHub webhook delivery to the Worker has returned HTTP 202. The public
+health route and end-to-end webhook processing are still being verified.
+Then test a staging batch and its exact revision cache before switching the
+review App or changing `MERGE_BACKEND`.
 
 Do not enable bors merge authority or set `MERGE_BACKEND=bors` until the
 container is healthy, the App receives webhooks, staging CI succeeds on a
