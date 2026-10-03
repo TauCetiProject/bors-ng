@@ -49,10 +49,24 @@ trigger to `master` with
 `python3 deploy/cloudflare/configure_builds.py --token-file /home/kim/.config/tauceti-bors/cloudflare-builds-token --branch master --apply`.
 The script updates the existing trigger instead of creating a second one.
 
-GitHub webhook delivery to the Worker has returned HTTP 202. The public
-health route and end-to-end webhook processing are still being verified.
-Then test a staging batch and its exact revision cache before switching the
-review App or changing `MERGE_BACKEND`.
+The public `/health/` route returns HTTP 200. A signed `ping` delivered to the
+public Worker returned HTTP 202 and later had its exact delivery marker in R2,
+confirming the Worker, Queue, bors Container, and R2 processing path. An
+installation resync registered `TauCetiProject/TauCeti` in PostgreSQL with the
+default `staging` and `trying` branches; the database's open patch count
+matched GitHub's 111 open PRs on 2026-10-03.
+
+One Queue consumer handles batches of ten. It forwards only completed check
+runs and check suites on branches with `staging` or `trying` prefixes; the same
+filter prevents new unrelated check events from entering the Queue. If the
+bors project branch names change, update `src/webhook-filter.mjs` with them.
+The dead letter queue retains 244 deliveries from the initial failed startup;
+do not replay old approval comments blindly. The synthetic installation
+resync restored repository and open PR state without replaying them.
+
+Next, review and merge draft bors PR #1 and TauCeti staging CI PR #8935, then
+test a pilot batch and its exact revision cache before switching the review
+App or changing `MERGE_BACKEND`.
 
 Do not enable bors merge authority or set `MERGE_BACKEND=bors` until the
 container is healthy, the App receives webhooks, staging CI succeeds on a
