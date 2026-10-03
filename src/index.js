@@ -112,7 +112,11 @@ export default {
         },
         body,
       }));
-      if (!response.ok) throw new Error(`Bors webhook returned ${response.status}`);
+      // Bors responds 404 for GitHub event types it does not use. Retrying
+      // those deliveries only fills the queue with permanent failures.
+      if (!response.ok && response.status !== 404) {
+        throw new Error(`Bors webhook returned ${response.status}`);
+      }
       await env.WEBHOOK_BODIES.put(processedKey, "1");
       if (item.object) await env.WEBHOOK_BODIES.delete(item.object);
       message.ack();
