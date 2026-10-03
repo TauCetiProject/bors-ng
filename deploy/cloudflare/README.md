@@ -40,12 +40,11 @@ have been installed. Their source files and the Cloudflare Builds API token
 are under `/home/kim/.config/tauceti-bors/` with private permissions.
 
 Cloudflare Builds is connected to `TauCetiProject/bors-ng` and automatically
-builds pushes to `feat/cloudflare-bors`, the branch of draft PR #1. The build
-command is `npm ci`, the deploy command is `npx wrangler deploy`, and the root
-directory is `/`. Workers Builds has Docker available for the image;
-`wrangler deploy` on this host cannot build it because this host has no usable
-Docker daemon. After PR #1 is reviewed and merged, move the existing Builds
-trigger to `master` with
+builds pushes to `master`. Bors PR #1 merged on 2026-10-03 at
+`ddddbc77b6357796d656b638d2ce6c8f562f8d08`. The build command is `npm ci`,
+the deploy command is `npx wrangler deploy`, and the root directory is `/`.
+Workers Builds has Docker available for the image; this host has no usable
+Docker daemon. To repair the existing trigger, use
 `python3 deploy/cloudflare/configure_builds.py --token-file /home/kim/.config/tauceti-bors/cloudflare-builds-token --branch master --apply`.
 The script updates the existing trigger instead of creating a second one.
 
@@ -64,14 +63,45 @@ The dead letter queue retains 244 deliveries from the initial failed startup;
 do not replay old approval comments blindly. The synthetic installation
 resync restored repository and open PR state without replaying them.
 
-Next, review and merge draft bors PR #1 and TauCeti staging CI PR #8935, then
-test a pilot batch and its exact revision cache before switching the review
-App or changing `MERGE_BACKEND`.
+TauCeti staging CI PR #8935 also merged. The trusted staging workflow and
+public cache pilot passed on 2026-10-03:
+[run 37121450575](https://github.com/TauCetiProject/TauCeti/actions/runs/37121450575)
+tested staging SHA `e6df9b1c64087b269c93f4bc73cdcb217d22b676`. Anonymous
+readback returned HTTP 200 for the revision map (10,025 mappings) and a
+referenced artifact. The publisher checked the public map against its staged
+outputs. This pilot assembled staging with GitHub's merge API; it establishes
+the CI/cache path, not the bors batcher's merge behavior.
 
-Do not enable bors merge authority or set `MERGE_BACKEND=bors` until the
-container is healthy, the App receives webhooks, staging CI succeeds on a
-pilot batch, and its exact revision cache is public. The existing merge queue
-continues running while the code and infrastructure are staged.
+The full-library lint exposed three existing simp normal-form violations on
+main. [TauCeti PR #11336](https://github.com/TauCetiProject/TauCeti/pull/11336)
+repairs them; the successful pilot includes its functional repair. Its current
+head passed CI and all review rubrics. Admission to the existing merge queue
+is waiting for the reservation held by Mathlib bump PR #11090. The repair must
+land through the normal review pipeline before production batches use main.
+
+The actual bors batcher also passed an isolated test:
+[run 37123267072](https://github.com/TauCetiProject/TauCeti/actions/runs/37123267072).
+Diagnostic PRs #11346 and #11347 copied already-reviewed exact heads into a
+bundle targeting `bors-pilot-base`. Bors created one batch (database ID 1) at
+`8c4337f63aca7090e784300e7d8a906a9f4be673`, dispatched trusted CI, waited for
+all three statuses, advanced the isolated branch to that exact commit, and
+closed both diagnostic PRs. Anonymous readback confirmed its public revision
+map (10,027 mappings) and a referenced artifact. Build/audit took 7m38s;
+publication took 2m47s. These are pilot timings, not a capacity estimate.
+The temporary pilot branches were removed after verification; neither PR
+targeted main. This tests successful batching and merge completion. Failure
+bisection and sustained load have not been exercised in production.
+
+Production still uses GitHub's merge queue: `MERGE_BACKEND` is unset, and the
+bors App has no main-ruleset bypass. The queue's build concurrency was
+temporarily reduced from five to one for the pilot and restored to five after
+the batch finished.
+
+Before cutover, require a healthy Container, working webhooks, a successful
+actual bors batch, public exact-revision cache, and the lint repair on main.
+Then coordinate queue drainage, grant bors the required main update authority,
+and set `MERGE_BACKEND=bors` so approvals arrive from the review App. Verify
+the first production batch before retiring the old queue path.
 
 The review App (`3947238`) writes exact-head `bors r+ sha=<head>` (or
 `bors r+ single sha=<head>` for Lake pin changes) and `bors r- sha=<head>`
