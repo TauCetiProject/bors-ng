@@ -53,7 +53,14 @@ function container(env) {
 export default {
   async fetch(request, env) {
     const path = new URL(request.url).pathname;
-    if (path !== "/webhook/github") return container(env).fetch(request);
+    if (path !== "/webhook/github") {
+      const url = new URL(request.url);
+      const publicProtocol = url.protocol.slice(0, -1);
+      url.protocol = "http:";
+      const forwarded = new Request(url, request);
+      forwarded.headers.set("x-forwarded-proto", publicProtocol);
+      return container(env).fetch(forwarded);
+    }
     if (request.method !== "POST") return new Response("Method not allowed", { status: 405 });
 
     const body = await request.arrayBuffer();
