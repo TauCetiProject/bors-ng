@@ -1,4 +1,5 @@
 import { Container, getContainer } from "@cloudflare/containers";
+import { env as workerEnv } from "cloudflare:workers";
 
 const INSTANCE = "singleton";
 // JSON encodes a byte array at up to four characters per byte. Keep Queue
@@ -9,28 +10,25 @@ export class BorsContainer extends Container {
   defaultPort = 4000;
   sleepAfter = "24h";
 
-  get envVars() {
-    const env = this.env;
-    return {
-      PORT: "4000",
-      PUBLIC_HOST: "bors.taucetiproject.org",
-      PUBLIC_PROTOCOL: "https",
-      PUBLIC_PORT: "443",
-      DATABASE_AUTO_MIGRATE: "true",
-      DATABASE_URL: env.DATABASE_URL,
-      DATABASE_USE_SSL: "true",
-      POOL_SIZE: "10",
-      SECRET_KEY_BASE: env.SECRET_KEY_BASE,
-      GITHUB_WEBHOOK_SECRET: env.GITHUB_WEBHOOK_SECRET,
-      GITHUB_CLIENT_ID: env.GITHUB_CLIENT_ID,
-      GITHUB_CLIENT_SECRET: env.GITHUB_CLIENT_SECRET,
-      GITHUB_INTEGRATION_ID: env.GITHUB_INTEGRATION_ID,
-      GITHUB_INTEGRATION_PEM: env.GITHUB_INTEGRATION_PEM,
-      COMMAND_TRIGGER: "bors",
-      BORS_STAGE_DISPATCH_PROJECT: "TauCetiProject/TauCeti",
-      TAUCETI_REVIEW_APP_ID: "3947238",
-    };
-  }
+  envVars = {
+    PORT: "4000",
+    PUBLIC_HOST: "bors.taucetiproject.org",
+    PUBLIC_PROTOCOL: "https",
+    PUBLIC_PORT: "443",
+    DATABASE_AUTO_MIGRATE: "true",
+    DATABASE_URL: workerEnv.DATABASE_URL,
+    DATABASE_USE_SSL: "true",
+    POOL_SIZE: "10",
+    SECRET_KEY_BASE: workerEnv.SECRET_KEY_BASE,
+    GITHUB_WEBHOOK_SECRET: workerEnv.GITHUB_WEBHOOK_SECRET,
+    GITHUB_CLIENT_ID: workerEnv.GITHUB_CLIENT_ID,
+    GITHUB_CLIENT_SECRET: workerEnv.GITHUB_CLIENT_SECRET,
+    GITHUB_INTEGRATION_ID: workerEnv.GITHUB_INTEGRATION_ID,
+    GITHUB_INTEGRATION_PEM: workerEnv.GITHUB_INTEGRATION_PEM,
+    COMMAND_TRIGGER: "bors",
+    BORS_STAGE_DISPATCH_PROJECT: "TauCetiProject/TauCeti",
+    TAUCETI_REVIEW_APP_ID: "3947238",
+  };
 }
 
 function hexBytes(hex) {
