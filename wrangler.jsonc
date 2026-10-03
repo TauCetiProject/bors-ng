@@ -4,6 +4,7 @@
   "account_id": "ec2169bdf033f56b009956d4b64ba8ef",
   "main": "src/index.js",
   "compatibility_date": "2026-09-25",
+  "observability": { "enabled": true },
   "routes": [{ "pattern": "bors.taucetiproject.org", "custom_domain": true }],
   "containers": [{
     "class_name": "BorsContainer",
