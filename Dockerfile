@@ -20,7 +20,7 @@ COPY . .
 RUN npm run deploy --prefix assets && mix phx.digest && mix compile && mix release
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libssl3 libstdc++6 libncurses6 zlib1g \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libssl3 libstdc++6 libncurses6 zlib1g busybox \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=build /src/_build/prod/rel/bors ./
