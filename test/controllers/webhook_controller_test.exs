@@ -976,6 +976,21 @@ defmodule BorsNG.WebhookControllerTest do
     |> post(webhook_path(conn, :webhook, "github"), valid)
 
     assert Repo.get_by!(LinkUserProject, project_id: project.id, user_id: user.id)
+
+    # Exercise the accepted single-batch approval through the real parser.
+    # A draft must refuse the parsed approval, not report a malformed `single`.
+    state = GitHub.ServerMock.get_state()
+    state = put_in(state, [{{:installation, 31}, 13}, :pulls, 1, Access.key(:draft)], true)
+    GitHub.ServerMock.put_state(state)
+
+    single = put_in(base, ["comment", "body"], "bors r+ single sha=#{head}")
+
+    conn
+    |> put_req_header("x-github-event", "issue_comment")
+    |> post(webhook_path(conn, :webhook, "github"), single)
+
+    assert Enum.any?(pr_comments(1), &(&1 =~ "is a draft" and &1 =~ "single on"))
+    refute Enum.any?(pr_comments(1), &(&1 =~ "takes `on` or `off`"))
   end
 
   test "an r+ in an issue comment on a draft PR is refused with a warning", %{
