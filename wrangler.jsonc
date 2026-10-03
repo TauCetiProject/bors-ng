@@ -11,10 +11,6 @@
     "image": "./Dockerfile",
     "max_instances": 1,
     "instance_type": "basic",
-    "authorized_keys": [{
-      "name": "kim-setup",
-      "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGOtpF3DFV3K9zLMkABYI5Wn8Az/dZvTbBvSzOHGEDlO"
-    }],
     "constraints": { "regions": ["ENAM"] }
   }],
   "durable_objects": {
