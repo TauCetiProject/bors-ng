@@ -27,13 +27,18 @@ Do not create another Neon project for this deployment.
 1. Neon is ready. Bors uses its own small connection pool instead of Neon's
    transaction pooler. The `provision_neon.py` script is retained for a future
    clean installation; it must not be run for the already-supplied database.
-2. Register an organization-owned GitHub App using the prefilled URL printed by
-   `node deploy/cloudflare/github-app-url.mjs`. Set a randomly generated webhook
-   secret in the App UI; URL parameters cannot prefill it. Generate a private
-   key and client secret. Install the App **only** on `TauCetiProject/TauCeti`
-   for the pilot. Its URL is `https://bors.taucetiproject.org/`, webhook is
-   `/webhook/github`, and OAuth callback is `/auth/github/callback`. GitHub may
-   report a failed initial ping before the Worker is deployed.
+2. Open `https://tauceti-bors.tauceti-ec2.workers.dev/github-app/setup` and
+   register the private App under TauCetiProject. The temporary setup Worker
+   displays a one-time code after GitHub redirects back. Within one hour, pass
+   that code on stdin to
+   `python3 deploy/cloudflare/exchange_github_manifest.py`; the script stores
+   the App ID, client secret, PEM key, and GitHub-generated webhook secret in
+   local mode-0600 files. Install the App **only** on `TauCetiProject/TauCeti`
+   for the pilot, using the URL the script prints. Its URL is
+   `https://bors.taucetiproject.org/`, webhook is `/webhook/github`, and OAuth
+   callback is `/auth/github/callback`. GitHub may report a failed initial ping
+   before the bors Container is deployed. The older manual App setup URL from
+   `github-app-url.mjs` remains a fallback.
 3. Authorize the Cloudflare Workers Builds GitHub connection for the fork
    `TauCetiProject/bors-ng` only. A bootstrap Worker project named
    `tauceti-bors` already exists. Provide a user-scoped Cloudflare API token
