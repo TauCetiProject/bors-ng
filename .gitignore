@@ -12,6 +12,7 @@ erl_crash.dump
 # Static artifacts
 /node_modules
 /assets/node_modules
+**/__pycache__/
 
 # Generated documentation
 /doc
@@ -25,6 +26,9 @@ erl_crash.dump
 /*.iml
 /projectFilesBackup
 /projectFilesBackup1
+
+# Local asdf pins are copied from .tool-versions.dev when needed.
+/.tool-versions
 
 # Deploy examples
 /deploy/**/*.tgz

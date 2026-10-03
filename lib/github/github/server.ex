@@ -235,6 +235,26 @@ defmodule BorsNG.GitHub.Server do
     end
   end
 
+  def do_handle_call(
+        :dispatch_staging,
+        {{:raw, token}, _repo_xref},
+        {repo_name, head_sha, base_sha, batch_id}
+      ) do
+    body =
+      Jason.encode!(%{
+        event_type: "tauceti-bors-staging",
+        client_payload: %{head_sha: head_sha, base_sha: base_sha, batch_id: batch_id}
+      })
+
+    "token #{token}"
+    |> tesla_client(@content_type)
+    |> Tesla.post!("/repos/#{repo_name}/dispatches", body)
+    |> case do
+      %{status: 204} -> :ok
+      %{status: status, body: response} -> {:error, :dispatch_staging, status, response}
+    end
+  end
+
   def do_handle_call(:get_branch, repo_conn, {branch}) do
     case get!(repo_conn, "branches/#{branch}") do
       %{body: raw, status: 200} ->

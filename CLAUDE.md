@@ -19,10 +19,12 @@ queuing, batching, and automatic merging via the GitHub API.
 
 ### Preferred: asdf
 
-The repo includes a `.tool-versions` file pinning Erlang and Elixir. With
+The repo includes `.tool-versions.dev` pinning Erlang and Elixir. Copy it to
+`.tool-versions` for local asdf use. With
 [asdf](https://asdf-vm.com/) installed:
 
 ```bash
+cp .tool-versions.dev .tool-versions
 asdf plugin add erlang
 asdf plugin add elixir
 asdf install          # reads .tool-versions automatically
@@ -189,7 +191,7 @@ When bumping versions, update all of these files consistently:
 
 | File | What to change |
 |------|---------------|
-| `.tool-versions` | Local dev versions (asdf) |
+| `.tool-versions.dev` | Local dev versions (asdf) |
 | `.github/workflows/main.yml` | `matrix.elixir`, `matrix.otp_release`, `exfmt` job |
 | `elixir_buildpack.config` | Heroku buildpack versions |
 | `phoenix_static_buildpack.config` | Node version (if needed) |

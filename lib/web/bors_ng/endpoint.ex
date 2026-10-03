@@ -29,6 +29,11 @@ defmodule BorsNG.Endpoint do
     plug(Phoenix.CodeReloader)
   end
 
+  # The Cloudflare Containers SDK probes GET / with these internal hostnames.
+  # Answer before the login redirect, which the SDK would follow over HTTPS
+  # on the Container's HTTP-only port.
+  plug(BorsNG.ContainerProbePlug)
+
   plug(Plug.RequestId)
   plug(Plug.Logger)
 

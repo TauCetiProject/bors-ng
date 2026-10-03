@@ -101,14 +101,16 @@ You can install Erlang and Elixir as you prefer, one way to do it without
 affecting other development environments is with [asdf](https://asdf-vm.com/#/). The following shows you how to use asdf. If you already have Erlang and Elixir installed
 or prefer to install them in another way just skip to the next section.
 
-**NOTE**: check `.tool-versions` and `.github/workflows/main.yml` for the currently supported Erlang and Elixir versions.
+**NOTE**: check `.tool-versions.dev` and `.github/workflows/main.yml` for the currently supported Erlang and Elixir versions.
 
 ### Installing Erlang and Elixir with asdf
 
-The repo includes a `.tool-versions` file with the pinned versions. With
+The repo includes `.tool-versions.dev` with the pinned versions. Copy it to
+`.tool-versions` for local asdf use. With
 [asdf](https://asdf-vm.com/) installed:
 
 ```sh
+cp .tool-versions.dev .tool-versions
 asdf plugin add erlang
 asdf plugin add elixir
 asdf install   # reads .tool-versions automatically
@@ -116,7 +118,7 @@ mix local.hex --force
 mix local.rebar --force
 ```
 
-**NOTE**: check `.tool-versions` and `.github/workflows/main.yml` for the
+**NOTE**: check `.tool-versions.dev` and `.github/workflows/main.yml` for the
 currently supported Erlang and Elixir versions.
 
 ### Running tests locally
