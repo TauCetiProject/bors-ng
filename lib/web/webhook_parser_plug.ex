@@ -37,13 +37,17 @@ defmodule BorsNG.WebhookParserPlug do
 
   defp valid_signature?(conn, key, body) do
     case get_req_header(conn, "x-hub-signature-256") do
-      ["sha256=" <> hex] -> compare_mac(hex, :sha256, key, body)
+      ["sha256=" <> hex] ->
+        compare_mac(hex, :sha256, key, body)
+
       [] ->
         case get_req_header(conn, "x-hub-signature") do
           ["sha1=" <> hex] -> compare_mac(hex, :sha, key, body)
           _ -> false
         end
-      _ -> false
+
+      _ ->
+        false
     end
   end
 
@@ -53,7 +57,8 @@ defmodule BorsNG.WebhookParserPlug do
         mac = :crypto.mac(:hmac, algorithm, key, body)
         byte_size(mac) == byte_size(signature) and Plug.Crypto.secure_compare(mac, signature)
 
-      :error -> false
+      :error ->
+        false
     end
   end
 end
