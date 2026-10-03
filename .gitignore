@@ -26,5 +26,8 @@ erl_crash.dump
 /projectFilesBackup
 /projectFilesBackup1
 
+# Local asdf pins are copied from .tool-versions.dev when needed.
+/.tool-versions
+
 # Deploy examples
 /deploy/**/*.tgz

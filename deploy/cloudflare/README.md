@@ -6,6 +6,11 @@ webhook payloads and delivery markers for 14 days. The account is
 `tauceti` (`ec2169bdf033f56b009956d4b64ba8ef`); the Worker name and domain
 are in `wrangler.jsonc`.
 
+Cloudflare Builds cannot install Erlang and Elixir from a root `.tool-versions`.
+Their asdf pins live in `.tool-versions.dev`; local developers copy that file
+to the ignored `.tool-versions`. The Container's Dockerfile pins the production
+toolchain separately.
+
 ## Provisioning status
 
 Workers Paid is active. The queues `tauceti-bors-webhooks` and
