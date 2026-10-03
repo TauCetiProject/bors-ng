@@ -66,4 +66,5 @@ jobs:
           cache: npm
       - run: npm ci
       - run: node --check src/index.js
+      - run: node --test src/webhook-filter.test.mjs
       - run: npx wrangler deploy --dry-run --containers-rollout=none

@@ -1,5 +1,6 @@
 import { Container, getContainer } from "@cloudflare/containers";
 import { env as workerEnv } from "cloudflare:workers";
+import { needsBors } from "./webhook-filter.mjs";
 
 const INSTANCE = "singleton";
 // JSON encodes a byte array at up to four characters per byte. Keep Queue
@@ -73,6 +74,7 @@ export default {
     const delivery = request.headers.get("x-github-delivery");
     const event = request.headers.get("x-github-event");
     if (!delivery || !event) return new Response("Missing GitHub headers", { status: 400 });
+    if (!needsBors(event, body)) return new Response("Accepted", { status: 202 });
 
     const item = { delivery, event, signature };
     if (body.byteLength <= INLINE_LIMIT) {
@@ -101,6 +103,11 @@ export default {
         body = await object.arrayBuffer();
       } else {
         body = Uint8Array.from(item.body);
+      }
+      if (!needsBors(item.event, body)) {
+        if (item.object) await env.WEBHOOK_BODIES.delete(item.object);
+        message.ack();
+        continue;
       }
       const response = await backend.fetch(new Request("http://bors/webhook/github", {
         method: "POST",
