@@ -1380,7 +1380,16 @@ defmodule BorsNG.Worker.Batcher do
         Repo.all(LinkPatchBatch.from_batch(batch.id))
         |> Enum.map(&%{pr: &1.patch.pr_xref, head_sha: &1.head_sha})
 
-      :ok = GitHub.dispatch_staging(repo_conn, batch.project.name, head, base, batch.id, members)
+      :ok =
+        GitHub.dispatch_staging(
+          repo_conn,
+          batch.project.name,
+          head,
+          base,
+          batch.id,
+          members,
+          batch.into_branch
+        )
     end
 
     :ok

@@ -238,7 +238,7 @@ defmodule BorsNG.GitHub.Server do
   def do_handle_call(
         :dispatch_staging,
         {{:raw, token}, _repo_xref},
-        {repo_name, head_sha, base_sha, batch_id, members}
+        {repo_name, head_sha, base_sha, batch_id, members, base_ref}
       ) do
     body =
       Jason.encode!(%{
@@ -247,7 +247,8 @@ defmodule BorsNG.GitHub.Server do
           head_sha: head_sha,
           base_sha: base_sha,
           batch_id: batch_id,
-          members: members
+          members: members,
+          base_ref: base_ref
         }
       })
 

@@ -79,13 +79,25 @@ defmodule BorsNG.Worker.MergeReconciler do
         |> Enum.filter(fn {_, _, status} -> status in [:error, :conflict, :ok] end)
         |> MapSet.new(fn {pr, head, _} -> {pr, head} end)
 
+      holds =
+        Repo.all(
+          from(p in Patch,
+            where:
+              p.project_id == ^project.id and p.into_branch == "main" and
+                p.open and not is_nil(p.bundle_reviewer),
+            select: {p.pr_xref, p.commit}
+          )
+        )
+        |> MapSet.new()
+
       pending =
         Enum.filter(ready, fn p ->
           if snapshot.backend == "queue",
             do: not p.queued,
             else:
               not MapSet.member?(represented, {p.pr, p.head_sha}) and
-                not MapSet.member?(terminal, {p.pr, p.head_sha})
+                not MapSet.member?(terminal, {p.pr, p.head_sha}) and
+                not MapSet.member?(holds, {p.pr, p.head_sha})
         end)
 
       other_count =
@@ -105,6 +117,12 @@ defmodule BorsNG.Worker.MergeReconciler do
       state = %{state | observation: observation}
       now = System.monotonic_time(:second)
       due = is_nil(state.last_dispatch) or now - state.last_dispatch >= 300
+
+      signature =
+        {snapshot.backend, snapshot.updated_at, snapshot.github_count, length(batches),
+         Enum.map(pending, &{&1.pr, &1.head_sha}) |> Enum.sort()}
+
+      changed = Map.get(state, :last_wake_signature) != signature
 
       # Recover manual as well as review-bot holds after restarts. The
       # admission guard and preflight still recheck each held approval.
@@ -126,9 +144,9 @@ defmodule BorsNG.Worker.MergeReconciler do
         end
       end
 
-      if other_count == 0 and pending != [] and due do
+      if other_count == 0 and pending != [] and due and changed do
         case GitHub.dispatch_reconcile(conn) do
-          :ok -> %{state | last_dispatch: now}
+          :ok -> Map.merge(state, %{last_dispatch: now, last_wake_signature: signature})
           _ -> state
         end
       else

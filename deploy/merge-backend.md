@@ -21,7 +21,7 @@ Unsafe review decisions revoke approvals in both engines regardless of selection
 
 ## Liveness
 
-Cloudflare's existing minute cron observes queue counts and ready-to-merge labels. Labels are hints only: the trusted Review sweep rechecks CI, scope, exact head, merge base and every review rubric. When pending hinted work exists and the outgoing queue is empty, heartbeat dispatches `tauceti-merge-reconcile` at most once per five minutes. The hourly sweep remains a backstop. Held approvals are recovered after container restarts. Restarting the singleton can reset the cost throttle; it cannot grant queue ownership.
+Cloudflare's existing minute cron observes queue counts and ready-to-merge labels. Labels are hints only: the trusted Review sweep rechecks CI, scope, exact head, merge base and every review rubric. When pending hinted work exists and the outgoing queue is empty, heartbeat dispatches `tauceti-merge-reconcile` at most once per five minutes when pending heads or queue/setting state have changed. Unchanged pending sets use the hourly backstop. The hourly sweep remains a backstop. Held approvals are recovered after container restarts. Restarting the singleton can reset the cost throttle; it cannot grant queue ownership.
 
 The internal reconcile route uses the existing webhook secret and is blocked on the public Worker. Measurements are archived as immutable timestamped objects under `merge-observations/` in the existing R2 bucket. They do not control admission. `/api/merge-observations?day=YYYY-MM-DD` returns paginated public measurements for TauCetiCI.
 

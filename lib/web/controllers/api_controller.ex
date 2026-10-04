@@ -78,14 +78,22 @@ defmodule BorsNG.ApiController do
 
         held = Repo.all(held_query) |> Enum.map(&%{pr: &1.pr_xref, head_sha: &1.commit})
 
-        details =
-          Enum.map(active, fn b ->
-            members =
-              Repo.all(BorsNG.Database.LinkPatchBatch.from_batch(b.id))
-              |> Enum.map(&%{pr: &1.patch.pr_xref, head_sha: &1.head_sha})
+        details = Enum.map(active, &batch_detail/1)
 
-            %{id: b.id, base: b.into_branch, state: b.state, head_sha: b.commit, members: members}
-          end)
+        requested =
+          case Integer.parse(params["batch_id"] || "") do
+            {batch_id, ""} when batch_id > 0 ->
+              case Repo.get(Batch, batch_id) do
+                %Batch{project_id: project_id} = batch when project_id == project.id ->
+                  if is_nil(base) or batch.into_branch == base, do: batch_detail(batch), else: nil
+
+                _ ->
+                  nil
+              end
+
+            _ ->
+              nil
+          end
 
         conn
         |> put_resp_header("cache-control", "no-store")
@@ -97,6 +105,7 @@ defmodule BorsNG.ApiController do
           batches: details,
           held: held,
           outcomes: outcomes,
+          requested_batch: requested,
           handoff:
             if(project.name == "TauCetiProject/TauCeti",
               do: BorsNG.Worker.MergeReconciler.observation(),
@@ -104,5 +113,19 @@ defmodule BorsNG.ApiController do
             )
         })
     end
+  end
+
+  defp batch_detail(batch) do
+    members =
+      Repo.all(BorsNG.Database.LinkPatchBatch.from_batch(batch.id))
+      |> Enum.map(&%{pr: &1.patch.pr_xref, head_sha: &1.head_sha})
+
+    %{
+      id: batch.id,
+      base: batch.into_branch,
+      state: batch.state,
+      head_sha: batch.commit,
+      members: members
+    }
   end
 end
