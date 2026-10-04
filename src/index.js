@@ -1,6 +1,7 @@
 import { Container, getContainer } from "@cloudflare/containers";
 import { env as workerEnv } from "cloudflare:workers";
 import { needsBors } from "./webhook-filter.mjs";
+import { readObservations, archiveObservation } from "./merge-observations.mjs";
 
 const INSTANCE = "singleton";
 // JSON encodes a byte array at up to four characters per byte. Keep Queue
@@ -56,6 +57,11 @@ function container(env) {
 export default {
   async fetch(request, env) {
     const path = new URL(request.url).pathname;
+    let normalizedPath;
+    try { normalizedPath = decodeURIComponent(path).replace(/\/+/g, "/"); }
+    catch { return new Response("Invalid path", { status: 400 }); }
+    if (normalizedPath.startsWith("/internal/")) return new Response("Not found", { status: 404 });
+    if (path === "/api/merge-observations") return readObservations(request, env.WEBHOOK_BODIES);
     if (path !== "/webhook/github") {
       const url = new URL(request.url);
       const publicProtocol = url.protocol.slice(0, -1);
@@ -133,5 +139,10 @@ export default {
   async scheduled(_event, env) {
     const response = await container(env).fetch(new Request("http://bors/health/"));
     if (!response.ok) throw new Error(`Bors health returned ${response.status}`);
+    const reconcile = await container(env).fetch(new Request("http://bors/internal/merge-reconcile", {
+      method: "POST", headers: { "x-bors-internal-secret": env.GITHUB_WEBHOOK_SECRET },
+    }));
+    if (!reconcile.ok) throw new Error(`Bors reconcile returned ${reconcile.status}`);
+    await archiveObservation(await reconcile.json(), env.WEBHOOK_BODIES);
   },
 };

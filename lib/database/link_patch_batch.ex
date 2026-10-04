@@ -13,6 +13,7 @@ defmodule BorsNG.Database.LinkPatchBatch do
     belongs_to(:patch, Patch)
     belongs_to(:batch, Batch)
     field(:reviewer, :string)
+    field(:head_sha, :string)
   end
 
   def from_batch(batch_id) do
@@ -27,7 +28,7 @@ defmodule BorsNG.Database.LinkPatchBatch do
   """
   def changeset(struct, params \\ %{}) do
     struct
-    |> cast(params, [:patch_id, :batch_id, :reviewer])
+    |> cast(params, [:patch_id, :batch_id, :reviewer, :head_sha])
     |> validate_required([:patch_id, :batch_id, :reviewer])
     |> unique_constraint(
       :patch_id,

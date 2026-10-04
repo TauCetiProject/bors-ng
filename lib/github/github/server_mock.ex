@@ -165,6 +165,18 @@ defmodule BorsNG.GitHub.ServerMock do
   # below is a mock-only shape, so a caller that only handles *it* looks
   # correct under test and raises in production. Reach for this knob when a
   # test needs a realistic failed read.
+  def do_handle_call(:merge_backend_snapshot, conn, {}, state) do
+    {get_in(state, [conn, :backend_snapshot]) || {:error, :unavailable}, state}
+  end
+
+  def do_handle_call(:merge_candidates, conn, {}, state) do
+    {get_in(state, [conn, :merge_candidates]) || {:error, :unavailable}, state}
+  end
+
+  def do_handle_call(:dispatch_reconcile, conn, {}, state) do
+    {:ok, put_in(state, [conn, :reconcile_dispatched], true)}
+  end
+
   def do_handle_call(
         :get_pr,
         repo_conn,

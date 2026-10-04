@@ -238,12 +238,18 @@ defmodule BorsNG.GitHub.Server do
   def do_handle_call(
         :dispatch_staging,
         {{:raw, token}, _repo_xref},
-        {repo_name, head_sha, base_sha, batch_id}
+        {repo_name, head_sha, base_sha, batch_id, members, base_ref}
       ) do
     body =
       Jason.encode!(%{
         event_type: "tauceti-bors-staging",
-        client_payload: %{head_sha: head_sha, base_sha: base_sha, batch_id: batch_id}
+        client_payload: %{
+          head_sha: head_sha,
+          base_sha: base_sha,
+          batch_id: batch_id,
+          members: members,
+          base_ref: base_ref
+        }
       })
 
     "token #{token}"
@@ -253,6 +259,48 @@ defmodule BorsNG.GitHub.Server do
       %{status: 204} -> :ok
       %{status: status, body: response} -> {:error, :dispatch_staging, status, response}
     end
+  end
+
+  def do_handle_call(:merge_backend_snapshot, {{:raw, token}, _} = conn, {}) do
+    variables = backend_variables(conn, 1, [])
+    variable = Enum.find(variables, &(&1["name"] == "MERGE_BACKEND"))
+    backend = if variable, do: variable["value"], else: "queue"
+
+    query =
+      ~s|{repository(owner:"TauCetiProject",name:"TauCeti"){mergeQueue(branch:"main"){entries(first:1){totalCount}}}}|
+
+    response =
+      "token #{token}"
+      |> tesla_client(@content_type)
+      |> Tesla.post!("/graphql", Jason.encode!(%{query: query}))
+
+    data = Jason.decode!(response.body)
+    count = get_in(data, ["data", "repository", "mergeQueue", "entries", "totalCount"])
+
+    if response.status == 200 and not Map.has_key?(data, "errors") and
+         backend in ["queue", "bors"] and is_integer(count) and count >= 0 do
+      {:ok,
+       %{backend: backend, updated_at: variable && variable["updated_at"], github_count: count}}
+    else
+      {:error, :invalid_backend_observation}
+    end
+  rescue
+    _ -> {:error, :backend_observation_failed}
+  end
+
+  def do_handle_call(:merge_candidates, {{:raw, token}, _}, {}) do
+    {:ok, merge_candidates(token, nil, [], MapSet.new())}
+  rescue
+    _ -> {:error, :merge_candidates_unavailable}
+  end
+
+  def do_handle_call(:dispatch_reconcile, conn, {}) do
+    case post!(conn, "dispatches", Jason.encode!(%{event_type: "tauceti-merge-reconcile"})) do
+      %{status: 204} -> :ok
+      _ -> {:error, :reconcile_dispatch_failed}
+    end
+  rescue
+    _ -> {:error, :reconcile_dispatch_failed}
   end
 
   def do_handle_call(:get_branch, repo_conn, {branch}) do
@@ -1015,6 +1063,61 @@ defmodule BorsNG.GitHub.Server do
         IO.inspect(error)
         {:error, :get_collaborators_by_repo}
     end
+  end
+
+  defp merge_candidates(token, cursor, acc, seen) do
+    query =
+      ~s|query($cursor:String){repository(owner:"TauCetiProject",name:"TauCeti"){pullRequests(first:100,after:$cursor,states:OPEN,baseRefName:"main"){pageInfo{hasNextPage endCursor}nodes{number headRefOid isDraft isInMergeQueue labels(first:100){nodes{name}pageInfo{hasNextPage}}}}}}|
+
+    response =
+      "token #{token}"
+      |> tesla_client(@content_type)
+      |> Tesla.post!("/graphql", Jason.encode!(%{query: query, variables: %{cursor: cursor}}))
+
+    data = Jason.decode!(response.body)
+    if response.status != 200 or data["errors"], do: raise("candidate query failed")
+    connection = get_in(data, ["data", "repository", "pullRequests"])
+
+    nodes =
+      Enum.map(connection["nodes"], fn p ->
+        if get_in(p, ["labels", "pageInfo", "hasNextPage"]), do: raise("labels truncated")
+        labels = MapSet.new(p["labels"]["nodes"], & &1["name"])
+
+        ready =
+          not p["isDraft"] and MapSet.member?(labels, "ready-to-merge") and
+            MapSet.disjoint?(labels, MapSet.new(["keep", "hold", "wip", "human", "do-not-close"]))
+
+        %{pr: p["number"], head_sha: p["headRefOid"], queued: p["isInMergeQueue"], ready: ready}
+      end)
+
+    page = connection["pageInfo"]
+    all = acc ++ nodes
+
+    if page["hasNextPage"] do
+      next = page["endCursor"]
+      if is_nil(next) or MapSet.member?(seen, next), do: raise("invalid pagination")
+      merge_candidates(token, next, all, MapSet.put(seen, next))
+    else
+      all
+    end
+  end
+
+  defp backend_variables(conn, page, acc) do
+    response = get!(conn, "actions/variables?per_page=100&page=#{page}")
+    data = Jason.decode!(response.body)
+
+    if response.status != 200 or not is_list(data["variables"]) or
+         not is_integer(data["total_count"]),
+       do: raise("variables unavailable")
+
+    if data["variables"] == [] and length(acc) < data["total_count"],
+      do: raise("variables truncated")
+
+    if Enum.any?(data["variables"], &(not is_binary(&1["name"]) or not is_binary(&1["value"]))),
+      do: raise("variables malformed")
+
+    all = acc ++ data["variables"]
+    if length(all) >= data["total_count"], do: all, else: backend_variables(conn, page + 1, all)
   end
 
   @spec post!(tconn, binary, binary, binary) :: map

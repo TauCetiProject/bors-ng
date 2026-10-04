@@ -74,4 +74,51 @@ defmodule BorsNG.ApiControllerTest do
 
     assert conn.status == 404
   end
+
+  test "main observation excludes pilots and preserves an approved head after a push", %{
+    conn: conn,
+    project1: project
+  } do
+    main = Repo.insert!(%Batch{project_id: project.id, into_branch: "main", state: :waiting})
+    pilot = Repo.insert!(%Batch{project_id: project.id, into_branch: "pilot", state: :running})
+
+    patch =
+      Repo.insert!(%BorsNG.Database.Patch{
+        project_id: project.id,
+        pr_xref: 42,
+        into_branch: "main",
+        commit: "new"
+      })
+
+    Repo.insert!(%BorsNG.Database.LinkPatchBatch{
+      batch_id: main.id,
+      patch_id: patch.id,
+      head_sha: "approved",
+      reviewer: "r"
+    })
+
+    Repo.insert!(%BorsNG.Database.LinkPatchBatch{
+      batch_id: pilot.id,
+      patch_id: patch.id,
+      reviewer: "r"
+    })
+
+    conn =
+      conn
+      |> put_req_header("accept", "application/json")
+      |> get("/repositories/#{project.id}/active-batches?base=main&batch_id=#{main.id}")
+
+    response = json_response(conn, 200)
+    assert response["batch_ids"] == [main.id]
+    assert response["requested_batch"]["id"] == main.id
+    assert response["requested_batch"]["members"] == [%{"pr" => 42, "head_sha" => "approved"}]
+    assert response["base"] == "main"
+    assert response["repo"] == project.name
+    assert hd(response["batches"])["members"] == [%{"pr" => 42, "head_sha" => "approved"}]
+    assert hd(response["outcomes"])["head_sha"] == "approved"
+    assert get_resp_header(conn, "cache-control") == ["no-store"]
+    [link] = Repo.all(BorsNG.Database.LinkPatchBatch.from_batch(main.id))
+    cloned = BorsNG.Worker.Batcher.Divider.clone_batch([link], project.id, "main")
+    assert Repo.one!(BorsNG.Database.LinkPatchBatch.from_batch(cloned.id)).head_sha == "approved"
+  end
 end

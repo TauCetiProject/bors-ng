@@ -49,6 +49,10 @@ defmodule BorsNG.Router do
     get("/", ServerController, :health)
   end
 
+  scope "/internal", BorsNG do
+    post("/merge-reconcile", ServerController, :merge_reconcile)
+  end
+
   scope "/batches", BorsNG do
     pipe_through(:browser_page)
     pipe_through(:browser_session)
