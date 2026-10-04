@@ -11,6 +11,8 @@ gh variable set MERGE_BACKEND --repo TauCetiProject/TauCeti --body queue
 
 New admissions to the incoming queue wait for the outgoing queue's **waiting and running** work on `main` to disappear. Existing bors batches, retry children and rebuilds continue after selecting queue; their starts still wait for GitHub's queue to be empty. Build deadlines start with builds, not with backend waiting. Switching does not cancel work, change timeouts or stop ordinary CI/reviews.
 
+Keep the GitHub merge queue ruleset enabled while alternating; change only the variable. A missing queue is an unavailable observation, not evidence of drainage.
+
 There is no ownership record. Observations are checked immediately before admission and before a bors batch starts. A rare check/act race can overlap queues. Bors fast-forwards only its tested commit; an intervening main update makes it rebuild instead of overwriting main. Repeated switches while draining can delay progress; allow a handoff to finish for interpretable experiments.
 
 The live endpoint is `/repositories/1/active-batches?base=main`. It includes waiting/running batch IDs, immutable member heads, current-head outcomes, held approvals, and the latest heartbeat observation. Pilot/try branches and ordinary PR CI do not block handoffs. Missing or malformed observations defer admission.

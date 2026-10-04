@@ -62,11 +62,30 @@ defmodule BorsNG.Worker.MergeReconciler do
         )
         |> MapSet.new()
 
+      outcomes =
+        Repo.all(
+          from(l in BorsNG.Database.LinkPatchBatch,
+            join: p in assoc(l, :patch),
+            join: b in assoc(l, :batch),
+            where: b.project_id == ^project.id and b.into_branch == "main" and p.open,
+            order_by: [desc: b.id],
+            select: {p.pr_xref, l.head_sha, b.state}
+          )
+        )
+        |> Enum.uniq_by(fn {pr, head, _} -> {pr, head} end)
+
+      terminal =
+        outcomes
+        |> Enum.filter(fn {_, _, status} -> status in [:error, :conflict, :ok] end)
+        |> MapSet.new(fn {pr, head, _} -> {pr, head} end)
+
       pending =
         Enum.filter(ready, fn p ->
           if snapshot.backend == "queue",
             do: not p.queued,
-            else: not MapSet.member?(represented, {p.pr, p.head_sha})
+            else:
+              not MapSet.member?(represented, {p.pr, p.head_sha}) and
+                not MapSet.member?(terminal, {p.pr, p.head_sha})
         end)
 
       other_count =

@@ -86,4 +86,40 @@ defmodule BorsNG.MergeBackendTest do
     assert {:noreply, _} = Batcher.handle_info({:prerun_poll, 1, {"reviewer", patch}}, project.id)
     assert Repo.all(Batch.all_for_project(project.id)) == []
   end
+
+  test "heartbeat dispatch is throttled and outgoing work suppresses waking" do
+    installation = Repo.insert!(%Installation{installation_xref: 91})
+
+    project =
+      Repo.insert!(%Project{
+        name: "TauCetiProject/TauCeti",
+        repo_xref: 14,
+        installation_id: installation.id
+      })
+
+    conn = {{:installation, 91}, 14}
+
+    mock = %{
+      backend_snapshot: {:ok, %{backend: "queue", updated_at: nil, github_count: 0}},
+      merge_candidates: {:ok, [%{pr: 1, head_sha: "head", ready: true, queued: false}]}
+    }
+
+    GitHub.ServerMock.put_state(%{conn => mock})
+    state = %{last_dispatch: nil, observation: nil}
+    assert {:reply, _, dispatched} = BorsNG.Worker.MergeReconciler.handle_call(:tick, nil, state)
+    assert is_integer(dispatched.last_dispatch)
+    assert GitHub.ServerMock.get_state()[conn].reconcile_dispatched
+    GitHub.ServerMock.put_state(%{conn => mock})
+
+    assert {:reply, _, throttled} =
+             BorsNG.Worker.MergeReconciler.handle_call(:tick, nil, dispatched)
+
+    assert throttled.last_dispatch == dispatched.last_dispatch
+    refute Map.has_key?(GitHub.ServerMock.get_state()[conn], :reconcile_dispatched)
+    Repo.insert!(%Batch{project_id: project.id, into_branch: "main", state: :waiting})
+    assert {:reply, observation, _} = BorsNG.Worker.MergeReconciler.handle_call(:tick, nil, state)
+    assert observation.reason == "outgoing_not_drained"
+    refute Map.has_key?(GitHub.ServerMock.get_state()[conn], :reconcile_dispatched)
+    :persistent_term.put({BorsNG.Worker.MergeReconciler, :observation}, nil)
+  end
 end

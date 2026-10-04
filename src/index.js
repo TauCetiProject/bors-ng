@@ -57,7 +57,10 @@ function container(env) {
 export default {
   async fetch(request, env) {
     const path = new URL(request.url).pathname;
-    if (path.startsWith("/internal/")) return new Response("Not found", { status: 404 });
+    let normalizedPath;
+    try { normalizedPath = decodeURIComponent(path).replace(/\/+/g, "/"); }
+    catch { return new Response("Invalid path", { status: 400 }); }
+    if (normalizedPath.startsWith("/internal/")) return new Response("Not found", { status: 404 });
     if (path === "/api/merge-observations") return readObservations(request, env.WEBHOOK_BODIES);
     if (path !== "/webhook/github") {
       const url = new URL(request.url);
