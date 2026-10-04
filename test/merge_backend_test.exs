@@ -57,4 +57,33 @@ defmodule BorsNG.MergeBackendTest do
     refute MergeBackend.scoped?(%Project{name: "other/repo"}, "main")
     assert MergeBackend.allow(%Project{name: "other/repo"}, "main", :admit) == :ok
   end
+
+  test "revoked and moved-head delayed approvals cannot activate" do
+    installation = Repo.insert!(%Installation{installation_xref: 91})
+
+    project =
+      Repo.insert!(%Project{
+        name: "TauCetiProject/TauCeti",
+        repo_xref: 14,
+        installation_id: installation.id
+      })
+
+    patch =
+      Repo.insert!(%BorsNG.Database.Patch{
+        project_id: project.id,
+        pr_xref: 1,
+        into_branch: "main",
+        commit: "old"
+      })
+
+    assert {:noreply, _} =
+             Batcher.handle_info({:prerun_poll, 1, {:held_approval, patch}}, project.id)
+
+    patch
+    |> BorsNG.Database.Patch.changeset(%{commit: "new", bundle_reviewer: "reviewer"})
+    |> Repo.update!()
+
+    assert {:noreply, _} = Batcher.handle_info({:prerun_poll, 1, {"reviewer", patch}}, project.id)
+    assert Repo.all(Batch.all_for_project(project.id)) == []
+  end
 end

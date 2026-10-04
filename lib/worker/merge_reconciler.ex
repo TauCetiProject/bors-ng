@@ -9,12 +9,16 @@ defmodule BorsNG.Worker.MergeReconciler do
 
   def start_link(_opts), do: GenServer.start_link(__MODULE__, nil, name: __MODULE__)
   def tick, do: GenServer.call(__MODULE__, :tick, 55_000)
-  def observation, do: GenServer.call(__MODULE__, :observation)
-  def init(_), do: {:ok, %{last_dispatch: nil, observation: nil}}
-  def handle_call(:observation, _, state), do: {:reply, state.observation, state}
+  def observation, do: :persistent_term.get({__MODULE__, :observation}, nil)
+
+  def init(_) do
+    :persistent_term.put({__MODULE__, :observation}, nil)
+    {:ok, %{last_dispatch: nil, observation: nil}}
+  end
 
   def handle_call(:tick, _, state) do
     next = reconcile(state)
+    :persistent_term.put({__MODULE__, :observation}, next.observation)
     {:reply, next.observation, next}
   end
 
@@ -87,7 +91,7 @@ defmodule BorsNG.Worker.MergeReconciler do
       # admission guard and preflight still recheck each held approval.
       if other_count == 0 and snapshot.backend == "bors" do
         held =
-          Repo.all(
+          Repo.exists?(
             from(p in Patch,
               where:
                 p.project_id == ^project.id and
@@ -95,10 +99,12 @@ defmodule BorsNG.Worker.MergeReconciler do
             )
           )
 
-        Enum.each(held, fn p ->
+        # Starting a missing batcher recovers its holds once. Re-casting r+
+        # every minute would duplicate pending preflight loops and comments.
+        if held do
           pid = Batcher.Registry.get(project.id)
-          Batcher.reviewed(pid, p.id, p.bundle_reviewer)
-        end)
+          send(pid, :recover_backend_holds)
+        end
       end
 
       if other_count == 0 and pending != [] and due do
