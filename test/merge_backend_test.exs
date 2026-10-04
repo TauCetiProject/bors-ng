@@ -122,4 +122,36 @@ defmodule BorsNG.MergeBackendTest do
     refute Map.has_key?(GitHub.ServerMock.get_state()[conn], :reconcile_dispatched)
     :persistent_term.put({BorsNG.Worker.MergeReconciler, :observation}, nil)
   end
+
+  test "a superseded timeout cannot revoke a renewed approval at the same head" do
+    installation = Repo.insert!(%Installation{installation_xref: 91})
+
+    project =
+      Repo.insert!(%Project{
+        name: "TauCetiProject/TauCeti",
+        repo_xref: 14,
+        installation_id: installation.id
+      })
+
+    patch =
+      Repo.insert!(%BorsNG.Database.Patch{
+        project_id: project.id,
+        pr_xref: 1,
+        into_branch: "main",
+        commit: "head",
+        bundle_reviewer: "r"
+      })
+
+    old = make_ref()
+    Process.put({:approval_pending, patch.id}, {patch.commit, make_ref()})
+
+    assert {:noreply, _} =
+             Batcher.handle_info({:prerun_poll, 1000, {{:held_approval, old}, patch}}, project.id)
+
+    assert {:noreply, _} =
+             Batcher.handle_info({:backend_retry, patch.id, patch.commit, "r", old}, project.id)
+
+    assert Repo.get!(BorsNG.Database.Patch, patch.id).bundle_reviewer == "r"
+    assert Repo.all(Batch.all_for_project(project.id)) == []
+  end
 end

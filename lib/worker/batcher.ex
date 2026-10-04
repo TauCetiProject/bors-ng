@@ -412,6 +412,14 @@ defmodule BorsNG.Worker.Batcher do
     end
   end
 
+  def handle_info({:backend_retry, patch_id, head, reviewer, generation}, project_id) do
+    if Process.get({:approval_pending, patch_id}) == {head, generation} do
+      handle_info({:backend_retry, patch_id, head, reviewer}, project_id)
+    else
+      {:noreply, project_id}
+    end
+  end
+
   def handle_info({:backend_retry, patch_id, head, reviewer}, project_id) do
     case Repo.get(Patch.all(:awaiting_review), patch_id) do
       %Patch{commit: ^head, bundle_reviewer: ^reviewer, open: true, is_draft: false} ->
@@ -442,28 +450,25 @@ defmodule BorsNG.Worker.Batcher do
       # The captured patch struct is stale: it may have been bundled,
       # retargeted, or pushed to since the poll was scheduled. Activate using
       # the current row, not the snapshot.
-      %Patch{commit: ^approved_head, bundle_reviewer: nil} when reviewer == :held_approval ->
-        Logger.info("Approval revoked; discarding delayed preflight")
-
       %Patch{commit: ^approved_head} = patch ->
-        case patch_preflight(repo_conn, patch) do
-          {:ok, max_batch_size} ->
-            case resolve_prerun_reviewer(reviewer, patch) do
-              nil ->
-                Logger.info("Patch #{patch.id} no longer holds an approval, exiting prerun poll")
+        case resolve_prerun_reviewer(reviewer, patch) do
+          nil ->
+            Logger.info("Approval revoked or superseded; discarding delayed preflight")
 
-              resolved ->
+          resolved ->
+            case patch_preflight(repo_conn, patch) do
+              {:ok, max_batch_size} ->
                 activate(resolved, patch, max_batch_size)
+
+              {:waiting, toml} ->
+                handle_waiting_preflight(repo_conn, reviewer, patch, try_num, toml)
+
+              :waiting ->
+                handle_waiting_preflight(repo_conn, reviewer, patch, try_num)
+
+              {:error, message} ->
+                send_message(repo_conn, [patch], {:preflight, message})
             end
-
-          {:waiting, toml} ->
-            handle_waiting_preflight(repo_conn, reviewer, patch, try_num, toml)
-
-          :waiting ->
-            handle_waiting_preflight(repo_conn, reviewer, patch, try_num)
-
-          {:error, message} ->
-            send_message(repo_conn, [patch], {:preflight, message})
         end
 
       _ ->
@@ -487,7 +492,7 @@ defmodule BorsNG.Worker.Batcher do
         )
 
       Enum.each(held, fn p ->
-        unless Process.get({:approval_pending, p.id}) == p.commit do
+        unless match?({head, _} when head == p.commit, Process.get({:approval_pending, p.id})) do
           do_handle_cast({:reviewed, p.id, p.bundle_reviewer}, project_id)
         end
       end)
@@ -582,9 +587,7 @@ defmodule BorsNG.Worker.Batcher do
           "merge_backend deferred pr=#{patch.pr_xref} head=#{patch.commit} reason=#{reason}"
         )
 
-        Bundles.hold_approval(patch, reviewer)
-        Process.put({:approval_pending, patch.id}, patch.commit)
-        Process.send_after(self(), {:backend_retry, patch.id, patch.commit, reviewer}, 60_000)
+        defer_approval(patch, reviewer)
     end
   end
 
@@ -808,7 +811,7 @@ defmodule BorsNG.Worker.Batcher do
 
       {:defer, _} ->
         Enum.each(members, fn p ->
-          Process.send_after(self(), {:backend_retry, p.id, p.commit, p.bundle_reviewer}, 60_000)
+          defer_approval(p, p.bundle_reviewer)
         end)
     end
   end
@@ -2175,14 +2178,33 @@ defmodule BorsNG.Worker.Batcher do
 
   # A poll armed for a member with a held approval reads the approval back
   # from the row when it fires. An r- during the wait ends the loop.
+  defp defer_approval(patch, reviewer) do
+    Bundles.hold_approval(patch, reviewer)
+    generation = make_ref()
+    Process.put({:approval_pending, patch.id}, {patch.commit, generation})
+
+    Process.send_after(
+      self(),
+      {:backend_retry, patch.id, patch.commit, reviewer, generation},
+      60_000
+    )
+  end
+
   defp hold_prerun_approval(project, patch, reviewer) do
     if BorsNG.MergeBackend.scoped?(project, patch.into_branch) do
       Bundles.hold_approval(patch, reviewer)
-      Process.put({:approval_pending, patch.id}, patch.commit)
-      :held_approval
+      generation = make_ref()
+      Process.put({:approval_pending, patch.id}, {patch.commit, generation})
+      {:held_approval, generation}
     else
       reviewer
     end
+  end
+
+  defp resolve_prerun_reviewer({:held_approval, generation}, patch) do
+    if Process.get({:approval_pending, patch.id}) == {patch.commit, generation},
+      do: patch.bundle_reviewer,
+      else: nil
   end
 
   defp resolve_prerun_reviewer(:held_approval, patch), do: patch.bundle_reviewer
@@ -2200,11 +2222,15 @@ defmodule BorsNG.Worker.Batcher do
 
     cond do
       prerun_timeout_sec == 0 ->
-        if reviewer == :held_approval, do: Bundles.drop_held_approval(patch.id)
+        if reviewer == :held_approval or is_tuple(reviewer),
+          do: Bundles.drop_held_approval(patch.id)
+
         send_message(repo_conn, [patch], {:preflight, :timeout})
 
       elapsed > prerun_timeout_ms ->
-        if reviewer == :held_approval, do: Bundles.drop_held_approval(patch.id)
+        if reviewer == :held_approval or is_tuple(reviewer),
+          do: Bundles.drop_held_approval(patch.id)
+
         send_message(repo_conn, [patch], {:preflight, :timeout})
 
       true ->
