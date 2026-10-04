@@ -106,10 +106,12 @@ defmodule BorsNG.ApiControllerTest do
     conn =
       conn
       |> put_req_header("accept", "application/json")
-      |> get("/repositories/#{project.id}/active-batches?base=main")
+      |> get("/repositories/#{project.id}/active-batches?base=main&batch_id=#{main.id}")
 
     response = json_response(conn, 200)
     assert response["batch_ids"] == [main.id]
+    assert response["requested_batch"]["id"] == main.id
+    assert response["requested_batch"]["members"] == [%{"pr" => 42, "head_sha" => "approved"}]
     assert response["base"] == "main"
     assert response["repo"] == project.name
     assert hd(response["batches"])["members"] == [%{"pr" => 42, "head_sha" => "approved"}]
