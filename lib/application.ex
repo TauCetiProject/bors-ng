@@ -152,6 +152,7 @@ defmodule BorsNG.Application do
         },
         id: BorsNG.Worker.LabelBackstopTimer
       },
+      {BorsNG.Worker.MergeReconciler, []},
       # The bors.toml config cache is an optional optimization the workers
       # tolerate missing (get_cached/2 falls back to an uncached read when its
       # ETS table is absent), so under rest_for_one it sits last: a restart of

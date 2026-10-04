@@ -1,0 +1,116 @@
+defmodule BorsNG.Worker.MergeReconciler do
+  @moduledoc "Minute heartbeat; hints wake trusted review policy, never grant approval."
+  use GenServer
+  import Ecto.Query
+  require Logger
+  alias BorsNG.Database.{Batch, Patch, Project, Repo}
+  alias BorsNG.GitHub
+  alias BorsNG.Worker.Batcher
+
+  def start_link(_opts), do: GenServer.start_link(__MODULE__, nil, name: __MODULE__)
+  def tick, do: GenServer.call(__MODULE__, :tick, 55_000)
+  def observation, do: GenServer.call(__MODULE__, :observation)
+  def init(_), do: {:ok, %{last_dispatch: nil, observation: nil}}
+  def handle_call(:observation, _, state), do: {:reply, state.observation, state}
+
+  def handle_call(:tick, _, state) do
+    next = reconcile(state)
+    {:reply, next.observation, next}
+  end
+
+  defp reconcile(state) do
+    case Repo.one(from(p in Project, where: p.name == "TauCetiProject/TauCeti")) do
+      nil -> state
+      project -> observe(project, state)
+    end
+  rescue
+    error ->
+      Logger.warning("merge_reconcile observation failed #{Exception.message(error)}")
+      %{state | observation: nil}
+  end
+
+  defp observe(project, state) do
+    conn = Project.installation_connection(project.repo_xref, Repo)
+
+    with {:ok, snapshot} <- GitHub.merge_backend_snapshot(conn),
+         {:ok, candidates} <- GitHub.merge_candidates(conn) do
+      batches =
+        Repo.all(
+          from(b in Batch.all_for_project(project.id, :incomplete),
+            where: b.into_branch == "main"
+          )
+        )
+
+      ready = Enum.filter(candidates, & &1.ready)
+
+      represented =
+        Repo.all(
+          from(p in Patch,
+            join: l in BorsNG.Database.LinkPatchBatch,
+            on: l.patch_id == p.id,
+            join: b in Batch,
+            on: b.id == l.batch_id,
+            where:
+              b.project_id == ^project.id and b.into_branch == "main" and
+                b.state in ^[:waiting, :running],
+            select: {p.pr_xref, l.head_sha}
+          )
+        )
+        |> MapSet.new()
+
+      pending =
+        Enum.filter(ready, fn p ->
+          if snapshot.backend == "queue",
+            do: not p.queued,
+            else: not MapSet.member?(represented, {p.pr, p.head_sha})
+        end)
+
+      other_count =
+        if snapshot.backend == "queue", do: length(batches), else: snapshot.github_count
+
+      observation =
+        Map.merge(snapshot, %{
+          observed_at: DateTime.to_iso8601(DateTime.utc_now()),
+          bors_count: length(batches),
+          eligible: ready,
+          pending: length(pending),
+          overlap: snapshot.github_count > 0 and batches != [],
+          reason: if(other_count == 0, do: "drained", else: "outgoing_not_drained")
+        })
+
+      Logger.info(Jason.encode!(Map.put(observation, :schema, "tauceti-merge.observation/v1")))
+      state = %{state | observation: observation}
+      now = System.monotonic_time(:second)
+      due = is_nil(state.last_dispatch) or now - state.last_dispatch >= 300
+
+      # Recover manual as well as review-bot holds after restarts. The
+      # admission guard and preflight still recheck each held approval.
+      if other_count == 0 and snapshot.backend == "bors" do
+        held =
+          Repo.all(
+            from(p in Patch,
+              where:
+                p.project_id == ^project.id and
+                  p.into_branch == "main" and p.open and not is_nil(p.bundle_reviewer)
+            )
+          )
+
+        Enum.each(held, fn p ->
+          pid = Batcher.Registry.get(project.id)
+          Batcher.reviewed(pid, p.id, p.bundle_reviewer)
+        end)
+      end
+
+      if other_count == 0 and pending != [] and due do
+        case GitHub.dispatch_reconcile(conn) do
+          :ok -> %{state | last_dispatch: now}
+          _ -> state
+        end
+      else
+        state
+      end
+    else
+      _ -> %{state | observation: nil}
+    end
+  end
+end

@@ -391,9 +391,22 @@ defmodule BorsNG.Worker.Batcher do
     end
   end
 
+  def handle_info({:backend_retry, patch_id, head, reviewer}, project_id) do
+    case Repo.get(Patch.all(:awaiting_review), patch_id) do
+      %Patch{commit: ^head, bundle_reviewer: ^reviewer, open: true, is_draft: false} ->
+        do_handle_cast({:reviewed, patch_id, reviewer}, project_id)
+
+      _ ->
+        :ok
+    end
+
+    {:noreply, project_id}
+  end
+
   def handle_info({:prerun_poll, try_num, args}, proj_id) do
     check_self(proj_id)
     {reviewer, patch} = args
+    approved_head = patch.commit
 
     Logger.info("Continue Poll Patch #{patch.id} prerun")
 
@@ -408,7 +421,7 @@ defmodule BorsNG.Worker.Batcher do
       # The captured patch struct is stale: it may have been bundled,
       # retargeted, or pushed to since the poll was scheduled. Activate using
       # the current row, not the snapshot.
-      patch ->
+      %Patch{commit: ^approved_head} = patch ->
         case patch_preflight(repo_conn, patch) do
           {:ok, max_batch_size} ->
             case resolve_prerun_reviewer(reviewer, patch) do
@@ -428,6 +441,9 @@ defmodule BorsNG.Worker.Batcher do
           {:error, message} ->
             send_message(repo_conn, [patch], {:preflight, message})
         end
+
+      _ ->
+        Logger.info("Patch head moved; discarding delayed approval")
     end
 
     {:noreply, proj_id}
@@ -448,7 +464,14 @@ defmodule BorsNG.Worker.Batcher do
     |> sort_batches()
     |> poll_batches()
 
-    if Enum.empty?(incomplete) do
+    held =
+      Repo.exists?(
+        from(p in Patch,
+          where: p.project_id == ^project_id and p.open and not is_nil(p.bundle_reviewer)
+        )
+      )
+
+    if Enum.empty?(incomplete) and not held do
       :stop
     else
       :again
@@ -472,9 +495,12 @@ defmodule BorsNG.Worker.Batcher do
     |> LinkPatchBatch.changeset(%{
       batch_id: batch.id,
       patch_id: patch.id,
-      reviewer: reviewer
+      reviewer: reviewer,
+      head_sha: patch.commit
     })
     |> Repo.insert!()
+
+    if patch.bundle_id == nil, do: Bundles.drop_held_approval(patch.id)
 
     # The patch is now on the queue (a :waiting batch); reflect that in the
     # labels. This also clears any lingering `awaiting-requeue` from a previous
@@ -498,6 +524,23 @@ defmodule BorsNG.Worker.Batcher do
   # one holds its approval on the patch row until every member of the bundle
   # is approved, then all members enter the same batch together (run_bundle/3).
   defp activate(reviewer, patch, max_batch_size) do
+    project = Repo.get!(Project, patch.project_id)
+
+    case BorsNG.MergeBackend.allow(project, patch.into_branch, :admit) do
+      :ok ->
+        activate_allowed(reviewer, patch, max_batch_size)
+
+      {:defer, reason} ->
+        Logger.info(
+          "merge_backend deferred pr=#{patch.pr_xref} head=#{patch.commit} reason=#{reason}"
+        )
+
+        Bundles.hold_approval(patch, reviewer)
+        Process.send_after(self(), {:backend_retry, patch.id, patch.commit, reviewer}, 60_000)
+    end
+  end
+
+  defp activate_allowed(reviewer, patch, max_batch_size) do
     case patch.bundle_id do
       nil ->
         run(reviewer, patch, max_batch_size)
@@ -711,6 +754,18 @@ defmodule BorsNG.Worker.Batcher do
   # single-patch path stays untouched. Changes to the sequence in either
   # function must be mirrored in the other.
   defp run_bundle(project, members, max_batch_size) do
+    case BorsNG.MergeBackend.allow(project, hd(members).into_branch, :admit) do
+      :ok ->
+        run_bundle_allowed(project, members, max_batch_size)
+
+      {:defer, _} ->
+        Enum.each(members, fn p ->
+          Process.send_after(self(), {:backend_retry, p.id, p.commit, p.bundle_reviewer}, 60_000)
+        end)
+    end
+  end
+
+  defp run_bundle_allowed(project, members, max_batch_size) do
     repo_conn = get_repo_conn(project)
     members = Bundles.stack_order(members)
     into_branch = hd(members).into_branch
@@ -737,7 +792,8 @@ defmodule BorsNG.Worker.Batcher do
           |> LinkPatchBatch.changeset(%{
             batch_id: batch.id,
             patch_id: p.id,
-            reviewer: p.bundle_reviewer
+            reviewer: p.bundle_reviewer,
+            head_sha: p.commit
           })
           |> Repo.insert!()
         end)
@@ -854,6 +910,17 @@ defmodule BorsNG.Worker.Batcher do
   end
 
   defp start_waiting_batch(batch) do
+    case BorsNG.MergeBackend.allow(batch.project, batch.into_branch, :start) do
+      :ok ->
+        start_waiting_batch_allowed(batch)
+
+      {:defer, reason} ->
+        Logger.info("merge_backend deferred batch=#{batch.id} reason=#{reason}")
+        Process.send_after(self(), {:poll, :once}, 60_000)
+    end
+  end
+
+  defp start_waiting_batch_allowed(batch) do
     project = batch.project
     repo_conn = get_repo_conn(project)
 
@@ -944,7 +1011,7 @@ defmodule BorsNG.Worker.Batcher do
           )
       }
 
-      do_merge_patch = fn %{patch: patch}, branch ->
+      do_merge_patch = fn %{patch: patch, head_sha: approved_head}, branch ->
         pr = GitHub.get_pr!(repo_conn, patch.pr_xref)
 
         case branch do
@@ -967,7 +1034,9 @@ defmodule BorsNG.Worker.Batcher do
           # without this live get_pr! check) would turn the gate's reliance on a
           # possibly-stale patch.commit into a real bypass. See
           # DELEGATION_INVALIDATION.md, "Known limitations — Missed-push window".
-          _ when pr.head_sha != patch.commit ->
+          _
+          when pr.head_sha != patch.commit or
+                 (approved_head != nil and approved_head != patch.commit) ->
             :race
 
           _ ->
@@ -1259,7 +1328,11 @@ defmodule BorsNG.Worker.Batcher do
 
   defp dispatch_staging(batch, repo_conn, head, base) do
     if System.get_env("BORS_STAGE_DISPATCH_PROJECT") == batch.project.name do
-      :ok = GitHub.dispatch_staging(repo_conn, batch.project.name, head, base, batch.id)
+      members =
+        Repo.all(LinkPatchBatch.from_batch(batch.id))
+        |> Enum.map(&%{pr: &1.patch.pr_xref, head_sha: &1.head_sha})
+
+      :ok = GitHub.dispatch_staging(repo_conn, batch.project.name, head, base, batch.id, members)
     end
 
     :ok

@@ -27,6 +27,18 @@ defmodule BorsNG.GitHub do
   @type tcollaborator :: %{user: tuser, perms: tuser_repo_perms}
   @type tcommitter :: %{name: bitstring, email: bitstring}
 
+  def merge_backend_snapshot(repo_conn) do
+    safe_genserver_call(:merge_backend_snapshot, repo_conn, {}, 15_000)
+  end
+
+  def dispatch_reconcile(repo_conn) do
+    safe_genserver_call(:dispatch_reconcile, repo_conn, {}, 15_000)
+  end
+
+  def merge_candidates(repo_conn) do
+    safe_genserver_call(:merge_candidates, repo_conn, {}, 30_000)
+  end
+
   @spec get_pr_files!(tconn, integer) :: [BorsNG.GitHub.File.t()]
   def get_pr_files!(repo_conn, pr_xref) do
     {:ok, pr} = get_pr_files(repo_conn, pr_xref)
@@ -163,8 +175,12 @@ defmodule BorsNG.GitHub do
 
   @doc "Dispatch a trusted default-branch workflow for an immutable staging commit."
   @spec dispatch_staging(tconn, binary, binary, binary, integer) :: :ok | {:error, term}
-  def dispatch_staging(repo_conn, repo_name, head_sha, base_sha, batch_id) do
-    call_with_retry(:dispatch_staging, repo_conn, {repo_name, head_sha, base_sha, batch_id})
+  def dispatch_staging(repo_conn, repo_name, head_sha, base_sha, batch_id, members \\ []) do
+    call_with_retry(
+      :dispatch_staging,
+      repo_conn,
+      {repo_name, head_sha, base_sha, batch_id, members}
+    )
   end
 
   @spec get_branch!(tconn, binary) :: %{commit: bitstring, tree: bitstring}

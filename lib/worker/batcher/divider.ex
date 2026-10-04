@@ -99,7 +99,8 @@ defmodule BorsNG.Worker.Batcher.Divider do
       &%{
         batch_id: batch.id,
         patch_id: &1.patch_id,
-        reviewer: &1.reviewer
+        reviewer: &1.reviewer,
+        head_sha: &1.head_sha
       }
     )
     |> Enum.map(&LinkPatchBatch.changeset(%LinkPatchBatch{}, &1))
