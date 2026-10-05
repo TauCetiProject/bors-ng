@@ -80,3 +80,50 @@ checks GitHub's issuing App ID and re-fetches the live PR head before granting
 reviewer authority. The fork dispatches staging commits to TauCeti's trusted
 `pr-build` workflow. Bors then waits for `build`, `bump-guard`, and `scope` on
 the combined staging SHA and bisects failures.
+
+## Timed merge-backend comparison
+
+The existing minute cron can run one 24-hour bors window followed by one 24-hour
+GitHub merge-queue window. Arm it with the TauCeti repository variable
+`MERGE_EXPERIMENT` containing:
+
+```json
+{"schema":"tauceti-merge.experiment/v1","id":"unique-experiment-id","duration_hours":24,"created_at":"CURRENT-UTC-ISO-TIME","enabled":true}
+```
+
+Use a unique ID and a creation time within the last fifteen minutes. Start with
+`MERGE_BACKEND=queue`. The Worker selects bors, waits for fresh evidence that the
+GitHub queue is empty, then starts the first clock. After 24 hours it selects
+queue, waits for bors to drain, and starts the second clock. It finishes with
+queue selected. Each handoff has a six-hour deadline; the absolute limit is
+72 hours from creation. Expiring a handoff selects queue and lets existing work
+drain through the normal admission gates; it does not cancel builds or shorten
+CI timeouts.
+
+State and write intents live in the existing singleton Durable Object's SQLite
+storage. The controller runs before the Container health check, so restoring
+queue does not require the Elixir process to be healthy. GitHub API failures
+are retried by later cron invocations. Restoration depends on GitHub API and
+Cloudflare cron availability. The existing GitHub App needs Variables: write;
+the Worker requests an installation token restricted to TauCeti and that
+permission. No new infrastructure or public mutation endpoint is needed.
+
+Read current state at `/api/merge-experiment`. Minute observation archives carry
+an `experiment` snapshot; TauCetiCI reports the measured windows and handoffs
+separately. Each clock starts with the first fresh archived observation proving
+that the outgoing queue is empty, at minute sampling resolution.
+
+Disable by setting `MERGE_EXPERIMENT` to `{"enabled":false}` or deleting it. The
+controller restores queue if it still owns the selection. Any change to
+`MERGE_BACKEND`, including a rewrite to the same value with a new `updated_at`,
+aborts automation and preserves that operator selection. Editing an active
+plan also cancels it. Two distinct fresh observations with work in both queues
+abort the experiment and restore queue when the selection is still owned.
+The API has no atomic compare-and-swap: the controller rechecks the setting
+immediately before writing, but a concurrent manual edit in that small interval
+can race the write. Completed/aborted IDs never restart; a new run needs a new ID.
+
+The controller leaves batching limits and CI timeouts as configured. Record
+those settings and runner sizes when arming a comparison. Compare completed
+windows using total recorded CI minutes, throughput, arrivals, backlog and
+coverage; a single pair of days cannot separate all workload changes.

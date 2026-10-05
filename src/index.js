@@ -2,6 +2,8 @@ import { Container, getContainer } from "@cloudflare/containers";
 import { env as workerEnv } from "cloudflare:workers";
 import { needsBors } from "./webhook-filter.mjs";
 import { readObservations, archiveObservation } from "./merge-observations.mjs";
+import { githubVariables } from "./experiment-github.mjs";
+import { tickExperiment } from "./merge-experiment.mjs";
 
 const INSTANCE = "singleton";
 // JSON encodes a byte array at up to four characters per byte. Keep Queue
@@ -9,6 +11,27 @@ const INSTANCE = "singleton";
 const INLINE_LIMIT = 30_000;
 
 export class BorsContainer extends Container {
+  constructor(ctx, env) {
+    super(ctx, env);
+    this.experimentStorage = ctx.storage;
+    this.experimentEnv = env;
+    this.experimentTail = Promise.resolve();
+  }
+
+  experimentTick() {
+    this.experimentTail = this.experimentTail.catch(() => {}).then(() =>
+      tickExperiment(this.experimentStorage, githubVariables(this.experimentEnv)));
+    return this.experimentTail;
+  }
+
+  async experimentStatus() {
+    return await this.experimentStorage.get("merge-experiment") || { phase: "inactive" };
+  }
+
+  async experimentObservation(observation) {
+    await this.experimentStorage.put("merge-experiment-observation", observation);
+  }
+
   defaultPort = 4000;
   sleepAfter = "24h";
 
@@ -62,6 +85,10 @@ export default {
     catch { return new Response("Invalid path", { status: 400 }); }
     if (normalizedPath.startsWith("/internal/")) return new Response("Not found", { status: 404 });
     if (path === "/api/merge-observations") return readObservations(request, env.WEBHOOK_BODIES);
+    if (path === "/api/merge-experiment") {
+      if (request.method !== "GET") return new Response("Method not allowed", { status: 405 });
+      return Response.json(await container(env).experimentStatus(), { headers: { "Cache-Control": "no-store" } });
+    }
     if (path !== "/webhook/github") {
       const url = new URL(request.url);
       const publicProtocol = url.protocol.slice(0, -1);
@@ -137,12 +164,20 @@ export default {
   },
 
   async scheduled(_event, env) {
+    // Deadline and restoration work runs even if the Elixir process is unhealthy.
+    // A GitHub outage must not suppress the independent observation heartbeat.
+    let experiment;
+    try { experiment = await container(env).experimentTick(); }
+    catch (error) { console.error("merge experiment tick failed", error.message); }
     const response = await container(env).fetch(new Request("http://bors/health/"));
     if (!response.ok) throw new Error(`Bors health returned ${response.status}`);
     const reconcile = await container(env).fetch(new Request("http://bors/internal/merge-reconcile", {
       method: "POST", headers: { "x-bors-internal-secret": env.GITHUB_WEBHOOK_SECRET },
     }));
     if (!reconcile.ok) throw new Error(`Bors reconcile returned ${reconcile.status}`);
-    await archiveObservation(await reconcile.json(), env.WEBHOOK_BODIES);
+    const observation = await reconcile.json();
+    await container(env).experimentObservation(observation);
+    if (experiment?.id) observation.experiment = experiment;
+    await archiveObservation(observation, env.WEBHOOK_BODIES);
   },
 };
