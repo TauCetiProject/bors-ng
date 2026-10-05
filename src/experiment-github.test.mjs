@@ -18,7 +18,7 @@ test('installation token is scoped and writes recheck live backend', async () =>
   const calls = [];
   globalThis.fetch = async (url, options) => {
     calls.push({url, options});
-    assert.equal(options.redirect,'error');
+    assert.equal(options.redirect,'manual');
     if (url.endsWith('/access_tokens')) {
       assert.deepEqual(JSON.parse(options.body),{repositories:['TauCeti'],permissions:{actions_variables:'write'}});
       return Response.json({token:'test-only-token',expires_at:new Date(Date.now()+3600000).toISOString(),permissions:{actions_variables:'write'}});
@@ -37,5 +37,19 @@ test('installation token is scoped and writes recheck live backend', async () =>
     assert.equal(selected.value,'bors');
     await assert.rejects(variables.select('queue',{value:'queue',updated_at:'old'}),/selection preserved/);
     assert.equal(calls.filter(c=>c.options.method==='PATCH').length,1);
+  } finally {globalThis.fetch=original;}
+});
+
+test('rejects API redirects without forwarding credentials', async () => {
+  const original=globalThis.fetch;
+  let calls=0;
+  globalThis.fetch=async (_url, options) => {
+    calls++;
+    assert.equal(options.redirect,'manual');
+    return new Response(null,{status:302,headers:{Location:'https://other.example/steal'}});
+  };
+  try {
+    await assert.rejects(githubVariables(environment('pkcs8')).get('MERGE_BACKEND'),/unexpected redirect/);
+    assert.equal(calls,1);
   } finally {globalThis.fetch=original;}
 });
