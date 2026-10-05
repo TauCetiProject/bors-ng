@@ -40,14 +40,12 @@ have been installed. Their source files and the Cloudflare Builds API token
 are under `/home/kim/.config/tauceti-bors/` with private permissions.
 
 Cloudflare Builds is connected to `TauCetiProject/bors-ng` and automatically
-builds pushes to `feat/cloudflare-bors`, the branch of draft PR #1. The build
-command is `npm ci`, the deploy command is `npx wrangler deploy`, and the root
-directory is `/`. Workers Builds has Docker available for the image;
-`wrangler deploy` on this host cannot build it because this host has no usable
-Docker daemon. After PR #1 is reviewed and merged, move the existing Builds
-trigger to `master` with
-`python3 deploy/cloudflare/configure_builds.py --token-file /home/kim/.config/tauceti-bors/cloudflare-builds-token --branch master --apply`.
-The script updates the existing trigger instead of creating a second one.
+builds pushes to `master`. The build command is `npm ci`, the deploy command is
+`npx wrangler deploy`, and the root directory is `/`. Workers Builds has Docker
+available for the image; local deployment requires a usable Docker daemon.
+Check the existing trigger with
+`python3 deploy/cloudflare/configure_builds.py --token-file /home/kim/.config/tauceti-bors/cloudflare-builds-token --branch master`.
+Use `--apply` only when the branch filter needs updating.
 
 The public `/health/` route returns HTTP 200. A signed `ping` delivered to the
 public Worker returned HTTP 202 and later had its exact delivery marker in R2,
@@ -64,14 +62,17 @@ The dead letter queue retains 244 deliveries from the initial failed startup;
 do not replay old approval comments blindly. The synthetic installation
 resync restored repository and open PR state without replaying them.
 
-Next, review and merge draft bors PR #1 and TauCeti staging CI PR #8935, then
-test a pilot batch and its exact revision cache before switching the review
-App or changing `MERGE_BACKEND`.
+Hosted pilots have completed successfully: batch 10 landed PRs 12062 and
+11953 together as tested commit `725ce1d2d7f645819e2075192b268de44ea6b9c9`,
+with staging CI and exact revision cache publication passing. The bors App has
+the required legacy and ruleset push allowances; build and bump-guard checks
+remain required. TauCeti PR 12207 (issue 12085) supports large batch lint
+comparison while preserving whole-library axiom and dot audits.
 
-Do not enable bors merge authority or set `MERGE_BACKEND=bors` until the
-container is healthy, the App receives webhooks, staging CI succeeds on a
-pilot batch, and its exact revision cache is public. The existing merge queue
-continues running while the code and infrastructure are staged.
+`MERGE_BACKEND` controls admission. Both queues observe the other queue and
+wait for its existing work to drain before admitting new work. A selected
+backend change does not cancel running batches. Timed comparisons below use
+this existing handoff mechanism.
 
 The review App (`3947238`) writes exact-head `bors r+ sha=<head>` (or
 `bors r+ single sha=<head>` for Lake pin changes) and `bors r- sha=<head>`
