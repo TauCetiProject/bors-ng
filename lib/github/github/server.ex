@@ -300,24 +300,6 @@ defmodule BorsNG.GitHub.Server do
     _ -> {:error, :eligibility_checks_unavailable}
   end
 
-  defp eligibility_checks(conn, head, page, acc) do
-    path =
-      "commits/#{head}/check-runs?check_name=merge%20eligibility&filter=all&per_page=100&page=#{page}"
-
-    %{status: 200, body: raw} = get!(conn, path)
-    %{"check_runs" => checks, "total_count" => total} = Jason.decode!(raw)
-    true = is_list(checks) and is_integer(total) and total >= 0
-    acc = acc ++ checks
-
-    if length(acc) >= total,
-      do: acc,
-      else:
-        (
-          true = checks != []
-          eligibility_checks(conn, head, page + 1, acc)
-        )
-  end
-
   def do_handle_call(:get_pr_merge_base, conn, {number, head}) do
     with %{status: 200, body: raw} <- get!(conn, "pulls/#{number}"),
          %{
@@ -1104,6 +1086,24 @@ defmodule BorsNG.GitHub.Server do
         IO.inspect(error)
         {:error, :get_collaborators_by_repo}
     end
+  end
+
+  defp eligibility_checks(conn, head, page, acc) do
+    path =
+      "commits/#{head}/check-runs?check_name=merge eligibility&filter=all&per_page=100&page=#{page}"
+
+    %{status: 200, body: raw} = get!(conn, path)
+    %{"check_runs" => checks, "total_count" => total} = Jason.decode!(raw)
+    true = is_list(checks) and is_integer(total) and total >= 0
+    acc = acc ++ checks
+
+    if length(acc) >= total,
+      do: acc,
+      else:
+        (
+          true = checks != []
+          eligibility_checks(conn, head, page + 1, acc)
+        )
   end
 
   defp merge_candidates(token, cursor, acc, seen) do

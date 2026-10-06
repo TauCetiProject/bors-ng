@@ -179,22 +179,37 @@ defmodule BorsNG.WebhookController do
 
           case GitHub.get_pr(repo_conn, pr_xref) do
             {:ok, %{head_sha: ^head, state: :open} = pr} ->
-              # GitHub authenticates the issuing App in performed_via_github_app.
-              # Grant only this installation's review bot authority to issue
-              # head-bound commands, and only for TauCeti.
-              %LinkUserProject{}
-              |> LinkUserProject.changeset(%{user_id: commenter.id, project_id: project.id})
-              |> Repo.insert(on_conflict: :nothing)
+              case GitHub.get_eligibility_checks(repo_conn, head) do
+                {:ok, checks} ->
+                  case BorsNG.Worker.MergeEligibility.latest(checks, pr_xref, head) do
+                    {:ok, nil} ->
+                      # Old pinned workflows may still finish during rollout.
+                      %LinkUserProject{}
+                      |> LinkUserProject.changeset(%{
+                        user_id: commenter.id,
+                        project_id: project.id
+                      })
+                      |> Repo.insert(on_conflict: :nothing)
 
-              %Command{
-                project: project,
-                commenter: commenter,
-                comment: command,
-                pr_xref: pr_xref,
-                pr: pr,
-                is_draft: pr.draft
-              }
-              |> Command.run()
+                      %Command{
+                        project: project,
+                        commenter: commenter,
+                        comment: command,
+                        pr_xref: pr_xref,
+                        pr: pr,
+                        is_draft: pr.draft
+                      }
+                      |> Command.run()
+
+                    _ ->
+                      # Once a check exists, delayed legacy comments only wake
+                      # its current decision; they cannot supersede it.
+                      Batcher.eligibility(Batcher.Registry.get(project.id), pr_xref)
+                  end
+
+                _ ->
+                  Logger.warning("deferred legacy review command; eligibility unavailable")
+              end
 
             other ->
               Logger.warning("ignored stale review bot command on ##{pr_xref}: #{inspect(other)}")

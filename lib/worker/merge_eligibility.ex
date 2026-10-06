@@ -36,7 +36,9 @@ defmodule BorsNG.Worker.MergeEligibility do
   # The highest ID is authoritative, irrespective of webhook delivery order.
   def latest(checks, pr, head) do
     checks
-    |> Enum.filter(&(trusted?(&1) and &1["head_sha"] == head and notification_pr(&1) == pr))
+    |> Enum.filter(
+      &(trusted?(&1) and &1["head_sha"] == head and notification_pr(&1) in [nil, pr])
+    )
     |> Enum.max_by(& &1["id"], fn -> nil end)
     |> decode(pr, head)
   end
@@ -44,7 +46,8 @@ defmodule BorsNG.Worker.MergeEligibility do
   defp decode(nil, _, _), do: {:ok, nil}
 
   defp decode(check, pr, head) do
-    with {:ok, data} <- Jason.decode(check["external_id"] || ""),
+    with true <- is_integer(check["id"]) and check["id"] > 0,
+         {:ok, data} <- Jason.decode(check["external_id"] || ""),
          @schema <- data["schema"],
          @repo <- data["repo"],
          ^pr <- data["pr"],
@@ -161,6 +164,7 @@ defmodule BorsNG.Worker.MergeEligibility do
 
   def preflight(conn, patch) do
     with {:ok, pr} <- GitHub.get_pr(conn, patch.pr_xref),
+         true <- patch.merge_eligibility["head_sha"] == patch.commit,
          true <-
            pr.state == :open and pr.base_ref == "main" and not pr.draft and
              pr.head_sha == patch.commit,

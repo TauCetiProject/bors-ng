@@ -94,6 +94,10 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
     assert {:ok, nil} = MergeEligibility.latest([Map.put(green, "app", %{"id" => 99})], 1, @head)
     assert {:ok, nil} = MergeEligibility.latest([green], 1, String.duplicate("c", 40))
     assert {:ok, nil} = MergeEligibility.latest([green], 2, @head)
+    malformed = green |> Map.put("id", 15) |> Map.put("external_id", "{bad")
+
+    assert {:error, :invalid_eligibility_check} =
+             MergeEligibility.latest([green, malformed], 1, @head)
 
     assert {:error, :invalid_eligibility_check} =
              MergeEligibility.latest([Map.put(green, "conclusion", "failure")], 1, @head)
