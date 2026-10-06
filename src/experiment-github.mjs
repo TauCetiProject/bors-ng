@@ -35,11 +35,15 @@ export async function appJwt(env, now = Date.now()) {
 }
 
 async function request(path, token, method = "GET", body) {
-  const response = await fetch(`${ROOT}${path}`, { method, redirect: "error",
+  const response = await fetch(`${ROOT}${path}`, { method, redirect: "manual",
     signal: AbortSignal.timeout(5000), headers: { Authorization: `Bearer ${token}`,
       Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28",
       "User-Agent": "TauCetiMergeExperiment/1.0", "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body) });
+  // Workers accepts follow/manual only. Never follow a redirect with an App token.
+  if (response.status >= 300 && response.status < 400) {
+    throw new Error(`GitHub experiment API ${method} ${path}: unexpected redirect`);
+  }
   if (response.status === 404 && method === "GET") return null;
   if (!response.ok) throw new Error(`GitHub experiment API ${method} ${path}: HTTP ${response.status}`);
   return response.status === 204 ? null : response.json();
