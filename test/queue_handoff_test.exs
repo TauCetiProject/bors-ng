@@ -1,6 +1,6 @@
 defmodule BorsNG.QueueHandoffTest do
   use BorsNG.Worker.TestCase
-  alias BorsNG.Database.{Batch, Installation, LinkPatchBatch, Patch, Project, Repo}
+  alias BorsNG.Database.{Batch, Installation, LinkPatchBatch, Patch, Project, Repo, Status}
   alias BorsNG.GitHub
   alias BorsNG.Worker.{Batcher, QueueHandoff}
 
@@ -165,19 +165,20 @@ defmodule BorsNG.QueueHandoffTest do
     patch = patch_link(project, waiting, 1)
     running = batch(project, :running, "staging")
     held_build = batch(project, :waiting, "old-staging")
+    Repo.update!(Batch.changeset(held_build, %{timeout_at: 42}))
     pilot = batch(project, :waiting, nil, "bors-pilot")
     mock({:ok, %{backend: "queue", github_count: 0}})
     Batcher.release_unstarted_batches(project)
     assert Repo.get!(Batch, waiting.id).state == :canceled
     assert Repo.get!(Batch, running.id).state == :running
-    assert Repo.get!(Batch, held_build.id).state == :waiting
+    assert Repo.get!(Batch, held_build.id).state == :canceled
     assert Repo.get!(Batch, pilot.id).state == :waiting
     preserved = Repo.get!(Patch, patch.id)
     assert preserved.bundle_reviewer == "r"
     assert preserved.merge_eligibility_id == 100
     assert preserved.merge_eligibility == patch.merge_eligibility
     assert Repo.one(LinkPatchBatch.from_batch(waiting.id)).head_sha == "head"
-    assert {"head", _} = Process.get({:approval_pending, patch.id})
+    assert Process.get({:approval_pending, patch.id}) == nil
 
     # A restart/repeated tick sees archived work, not another transfer.
     Batcher.release_unstarted_batches(project)
@@ -218,11 +219,52 @@ defmodule BorsNG.QueueHandoffTest do
     end
   end
 
+  test "restart between CI dispatch and running-state persistence cannot transfer the build" do
+    project = project()
+    armed = batch(project, :waiting, nil)
+    orphaned_status = batch(project, :waiting, nil)
+    Repo.update!(Batch.changeset(armed, %{timeout_at: 42}))
+    Repo.insert!(%Status{batch_id: orphaned_status.id, identifier: "build", state: :running})
+    mock({:ok, %{backend: "queue", github_count: 0}})
+    Batcher.release_unstarted_batches(project)
+    assert Repo.get!(Batch, armed.id).state == :waiting
+    assert Repo.get!(Batch, orphaned_status.id).state == :waiting
+  end
+
   test "other repositories do not transfer" do
     project = project("other/repo")
     waiting = batch(project, :waiting, nil)
     mock({:ok, %{backend: "queue", github_count: 0}})
     Batcher.release_unstarted_batches(project)
     assert Repo.get!(Batch, waiting.id).state == :waiting
+  end
+
+  test "dormant transferred approvals do not poll preflight under GitHub selection" do
+    project = project()
+    waiting = batch(project, :waiting, nil)
+    patch = patch_link(project, waiting, 1)
+    mock({:ok, %{backend: "queue", github_count: 0}})
+    Batcher.release_unstarted_batches(project)
+    # No pulls/eligibility/status/review fixtures exist: any preflight would fail.
+    assert {:noreply, _} = Batcher.handle_info(:wake_backend_holds, project.id)
+    assert {:noreply, _} = Batcher.handle_info(:recover_backend_holds, project.id)
+    assert Repo.get!(Patch, patch.id).bundle_reviewer == "r"
+    assert Process.get({:approval_pending, patch.id}) == nil
+    assert Repo.all(Batch.all_for_project(project.id, :incomplete)) == []
+  end
+
+  test "expired trim budget does not enqueue a mutation" do
+    snapshot = %{backend: "bors", updated_at: @selected_at, github_count: 39}
+
+    GitHub.ServerMock.put_state(%{
+      @conn => %{backend_snapshot: {:ok, snapshot}, handoff_results: [{:ok, %{pr: 39}}]}
+    })
+
+    assert QueueHandoff.trim(@conn, snapshot, System.monotonic_time(:millisecond) - 1) == []
+    assert length(GitHub.ServerMock.get_state()[@conn].handoff_results) == 1
+  end
+
+  test "deleted projects keep the existing clean-stop behavior" do
+    assert {:stop, :normal, -1} = Batcher.handle_info({:poll, :once}, -1)
   end
 end

@@ -112,6 +112,15 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
     assert recovered.state == :waiting
     assert Repo.one!(LinkPatchBatch.from_batch(recovered.id)).head_sha == @head
     assert Repo.get!(Patch, patch.id).merge_eligibility_id == patch.merge_eligibility_id
+
+    # Newly transferred holds must also wake after startup recovery already ran.
+    update_repo(:backend_snapshot, {:ok, %{backend: "queue", github_count: 0}})
+    Batcher.release_unstarted_batches(project)
+    update_repo(:backend_snapshot, {:ok, %{backend: "bors", github_count: 0}})
+    assert {:noreply, _} = Batcher.handle_info(:wake_backend_holds, project.id)
+    reawakened = Repo.one!(Batch.all_for_project(project.id, :incomplete))
+    assert reawakened.id != recovered.id
+    assert Repo.get!(Patch, patch.id).merge_eligibility_id == patch.merge_eligibility_id
   end
 
   test "newest authentic check wins; replay, forged App and wrong head cannot approve" do

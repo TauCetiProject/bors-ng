@@ -402,6 +402,8 @@ defmodule BorsNG.Worker.Batcher do
     end
   end
 
+  def handle_info(:wake_backend_holds, project_id), do: recover_backend_holds(project_id)
+
   def handle_info({:poll, repetition}, project_id) do
     check_self(project_id)
 
@@ -487,7 +489,8 @@ defmodule BorsNG.Worker.Batcher do
   defp recover_backend_holds(project_id) do
     project = Repo.get!(Project, project_id)
 
-    if BorsNG.MergeBackend.scoped?(project, "main") do
+    if BorsNG.MergeBackend.scoped?(project, "main") and
+         BorsNG.MergeBackend.allow(project, "main", :admit) == :ok do
       held =
         Repo.all(
           from(p in Patch.all(:awaiting_review),
@@ -499,6 +502,7 @@ defmodule BorsNG.Worker.Batcher do
 
       Enum.each(held, fn p ->
         unless match?({head, _} when head == p.commit, Process.get({:approval_pending, p.id})) do
+          Process.put({:approval_pending, p.id}, {p.commit, make_ref()})
           do_handle_cast({:reviewed, p.id, p.bundle_reviewer}, project_id)
         end
       end)
@@ -969,7 +973,11 @@ defmodule BorsNG.Worker.Batcher do
   end
 
   defp start_waiting_batch(batch) do
-    purpose = if is_nil(batch.commit), do: :start, else: :drain
+    started =
+      Repo.exists?(Status.all_for_batch(batch.id)) or
+        (is_nil(batch.commit) and (batch.timeout_at || 0) > 0)
+
+    purpose = if started, do: :drain, else: :start
 
     case BorsNG.MergeBackend.allow(batch.project, batch.into_branch, purpose) do
       :ok ->
@@ -982,15 +990,22 @@ defmodule BorsNG.Worker.Batcher do
   end
 
   # This runs inside the project's batcher, serialized with activation and CI
-  # dispatch. A waiting batch with a commit may have run before being paused;
-  # leave it draining. Retain archived links and exact-head approvals, so a
+  # dispatch. CI status rows or an unresolved armed start protect builds across
+  # restarts; a paused batch with abandoned CI may transfer. Retain archived
+  # links and exact-head approvals, so a
   # later switch back to bors recovers intent without replaying consumed checks.
+  def release_unstarted_batches(nil), do: :ok
+
   def release_unstarted_batches(project) do
     if BorsNG.MergeBackend.scoped?(project, "main") do
       waiting =
         Repo.all(
           from(b in Batch.all_for_project(project.id, :waiting),
-            where: b.into_branch == "main" and is_nil(b.commit)
+            left_join: s in Status,
+            on: s.batch_id == b.id,
+            where:
+              b.into_branch == "main" and is_nil(s.id) and
+                (is_nil(b.timeout_at) or b.timeout_at == 0 or not is_nil(b.commit))
           )
         )
 
@@ -1007,7 +1022,10 @@ defmodule BorsNG.Worker.Batcher do
                   batch |> Batch.changeset(%{state: :canceled}) |> Repo.update!()
 
                   Enum.each(links, fn link ->
-                    patch = link.patch
+                    patch =
+                      Repo.one!(
+                        from(p in Patch, where: p.id == ^link.patch_id, lock: "FOR UPDATE")
+                      )
 
                     if patch.open and not patch.is_draft and link.head_sha == patch.commit and
                          is_binary(link.head_sha) do
@@ -1019,9 +1037,11 @@ defmodule BorsNG.Worker.Batcher do
               Enum.each(links, fn link ->
                 patch = Repo.get!(Patch, link.patch_id)
 
-                if patch.bundle_reviewer == link.reviewer and patch.commit == link.head_sha do
-                  defer_approval(patch, link.reviewer)
-                end
+                # Stay dormant while GitHub is selected. The shared heartbeat
+                # wakes these holds once bors is selected and GitHub is drained.
+                # Do not create one full-preflight retry loop per transferred PR.
+                if patch.bundle_reviewer == link.reviewer and patch.commit == link.head_sha,
+                  do: Process.delete({:approval_pending, patch.id})
               end)
 
               Labeler.reconcile_queue(conn, "main", Enum.map(links, & &1.patch))
@@ -1411,8 +1431,10 @@ defmodule BorsNG.Worker.Batcher do
               if head == :conflict do
                 {:conflict, nil}
               else
-                GitHub.force_push!(repo_conn, head, batch.project.staging_branch)
+                # Persist start intent before any write that can trigger CI.
+                # A restart must not transfer this batch as unstarted work.
                 setup_statuses(batch, toml)
+                GitHub.force_push!(repo_conn, head, batch.project.staging_branch)
                 dispatch_staging(batch, repo_conn, head, base.commit)
                 {:running, head}
               end
@@ -1426,6 +1448,8 @@ defmodule BorsNG.Worker.Batcher do
               toml.commit_title
             )
 
+          setup_statuses(batch, toml)
+
           head =
             GitHub.synthesize_commit!(
               repo_conn,
@@ -1438,7 +1462,6 @@ defmodule BorsNG.Worker.Batcher do
               }
             )
 
-          setup_statuses(batch, toml)
           dispatch_staging(batch, repo_conn, head, base.commit)
           {:running, head}
         end

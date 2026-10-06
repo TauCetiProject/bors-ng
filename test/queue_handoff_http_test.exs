@@ -65,7 +65,19 @@ defmodule BorsNG.QueueHandoffHttpTest do
         {:ok, socket} = :gen_tcp.accept(listener, 5_000)
         request = read_request(socket, "")
         send(parent, {:request, request})
-        body = Jason.encode!(response)
+
+        body =
+          case response do
+            {:delay, ms, value} ->
+              Process.sleep(ms)
+              Jason.encode!(value)
+
+            {:raw, value} ->
+              value
+
+            value ->
+              Jason.encode!(value)
+          end
 
         :gen_tcp.send(
           socket,
@@ -103,7 +115,11 @@ defmodule BorsNG.QueueHandoffHttpTest do
     ])
 
     assert {:ok, %{pr: 39, head_sha: "head", entry_id: "entry-39"}} =
-             Server.do_handle_call(:release_queue_tail, @conn, {@selected_at})
+             Server.do_handle_call(
+               :release_queue_tail,
+               @conn,
+               {@selected_at, System.monotonic_time(:millisecond) + 10_000}
+             )
 
     assert_receive {:request, variables}
     assert variables =~ "GET /repositories/14/actions/variables"
@@ -124,7 +140,11 @@ defmodule BorsNG.QueueHandoffHttpTest do
     ])
 
     assert {:done, :already_started} =
-             Server.do_handle_call(:release_queue_tail, @conn, {@selected_at})
+             Server.do_handle_call(
+               :release_queue_tail,
+               @conn,
+               {@selected_at, System.monotonic_time(:millisecond) + 10_000}
+             )
 
     assert_receive :server_done
   end
@@ -133,26 +153,91 @@ defmodule BorsNG.QueueHandoffHttpTest do
     serve([selection(), tail(%{"headCommit" => %{"oid" => "staging"}})])
 
     assert {:done, :already_started} =
-             Server.do_handle_call(:release_queue_tail, @conn, {@selected_at})
+             Server.do_handle_call(
+               :release_queue_tail,
+               @conn,
+               {@selected_at, System.monotonic_time(:millisecond) + 10_000}
+             )
 
     assert_receive :server_done
   end
 
   test "a newer backend selection stops before reading or mutating the queue" do
     serve([selection("bors", "2026-10-06T01:00:00Z")])
-    assert {:error, _} = Server.do_handle_call(:release_queue_tail, @conn, {@selected_at})
+
+    assert {:error, _} =
+             Server.do_handle_call(
+               :release_queue_tail,
+               @conn,
+               {@selected_at, System.monotonic_time(:millisecond) + 10_000}
+             )
+
     assert_receive :server_done
   end
 
   test "GraphQL partial responses never permit a removal" do
     serve([selection(), Map.put(tail(), "errors", [%{"message" => "unavailable"}])])
-    assert {:error, _} = Server.do_handle_call(:release_queue_tail, @conn, {@selected_at})
+
+    assert {:error, _} =
+             Server.do_handle_call(
+               :release_queue_tail,
+               @conn,
+               {@selected_at, System.monotonic_time(:millisecond) + 10_000}
+             )
+
     assert_receive :server_done
   end
 
   test "a rejected removal is reported as an error" do
     serve([selection(), tail(), %{"errors" => [%{"message" => "not authorized"}]}])
-    assert {:error, _} = Server.do_handle_call(:release_queue_tail, @conn, {@selected_at})
+
+    assert {:error, _} =
+             Server.do_handle_call(
+               :release_queue_tail,
+               @conn,
+               {@selected_at, System.monotonic_time(:millisecond) + 10_000}
+             )
+
+    assert_receive :server_done
+  end
+
+  test "expired queued requests do not read or mutate GitHub" do
+    assert {:error, :queue_handoff_deferred} =
+             Server.do_handle_call(
+               :release_queue_tail,
+               @conn,
+               {@selected_at, System.monotonic_time(:millisecond) - 1}
+             )
+  end
+
+  test "deadline expiring during the tail read prevents the mutation" do
+    serve([selection(), {:delay, 600, tail()}])
+
+    assert {:error, :queue_handoff_deferred} =
+             Server.do_handle_call(
+               :release_queue_tail,
+               @conn,
+               {@selected_at, System.monotonic_time(:millisecond) + 500}
+             )
+
+    assert_receive :server_done
+  end
+
+  test "an unreadable mutation response is logged as ambiguous" do
+    serve([selection(), tail(), {:raw, "not JSON"}])
+
+    log =
+      ExUnit.CaptureLog.capture_log([level: :info], fn ->
+        assert {:error, :queue_handoff_ambiguous} =
+                 Server.do_handle_call(
+                   :release_queue_tail,
+                   @conn,
+                   {@selected_at, System.monotonic_time(:millisecond) + 10_000}
+                 )
+      end)
+
+    assert log =~ "ambiguous"
+    assert log =~ "entry-39"
     assert_receive :server_done
   end
 end

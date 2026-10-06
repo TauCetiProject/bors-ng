@@ -6,26 +6,22 @@ defmodule BorsNG.Worker.QueueHandoff do
   # Each removal rereads the setting and the current last entry. Removing from
   # the back cannot change the inputs of the builds ahead of it. Limit both
   # requests and elapsed time so the observation heartbeat remains responsive.
-  def trim(conn, %{backend: "bors", github_count: count, updated_at: selected_at})
+  def trim(conn, snapshot, read_deadline \\ nil)
+
+  def trim(conn, %{backend: "bors", github_count: count, updated_at: selected_at}, read_deadline)
       when count > 0 do
-    deadline = System.monotonic_time(:millisecond) + 10_000
+    deadline =
+      min(
+        read_deadline || System.monotonic_time(:millisecond) + 10_000,
+        System.monotonic_time(:millisecond) + 10_000
+      )
 
     Enum.reduce_while(1..16, [], fn _, removed ->
       if System.monotonic_time(:millisecond) >= deadline do
         {:halt, removed}
       else
-        case GitHub.release_queue_tail(conn, selected_at) do
+        case GitHub.release_queue_tail(conn, selected_at, deadline) do
           {:ok, entry} ->
-            Logger.info(
-              Jason.encode!(%{
-                schema: "tauceti-merge.handoff/v1",
-                from: "queue",
-                to: "bors",
-                selected_at: selected_at,
-                released: entry
-              })
-            )
-
             {:cont, [entry | removed]}
 
           {:error, reason} ->
@@ -40,7 +36,7 @@ defmodule BorsNG.Worker.QueueHandoff do
     |> Enum.reverse()
   end
 
-  def trim(_, _), do: []
+  def trim(_, _, _), do: []
 
   @doc "Only a complete observation of an unbuilt last entry permits removal."
   def queued_tail(%{

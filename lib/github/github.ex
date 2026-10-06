@@ -27,20 +27,30 @@ defmodule BorsNG.GitHub do
   @type tcollaborator :: %{user: tuser, perms: tuser_repo_perms}
   @type tcommitter :: %{name: bitstring, email: bitstring}
 
-  def merge_backend_snapshot(repo_conn) do
-    safe_genserver_call(:merge_backend_snapshot, repo_conn, {}, 15_000)
+  def merge_backend_snapshot(repo_conn, timeout \\ 15_000) do
+    safe_genserver_call(:merge_backend_snapshot, repo_conn, {}, timeout)
   end
 
   def dispatch_reconcile(repo_conn) do
     safe_genserver_call(:dispatch_reconcile, repo_conn, {}, 15_000)
   end
 
-  def merge_candidates(repo_conn) do
-    safe_genserver_call(:merge_candidates, repo_conn, {}, 30_000)
+  def merge_candidates(repo_conn, timeout \\ 30_000) do
+    safe_genserver_call(:merge_candidates, repo_conn, {}, timeout)
   end
 
-  def release_queue_tail(repo_conn, selected_at) do
-    safe_genserver_call(:release_queue_tail, repo_conn, {selected_at}, 10_000)
+  def release_queue_tail(repo_conn, selected_at, deadline) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    if remaining > 0,
+      do:
+        safe_genserver_call(
+          :release_queue_tail,
+          repo_conn,
+          {selected_at, deadline},
+          min(remaining, 10_000)
+        ),
+      else: {:error, :handoff_deadline}
   end
 
   def get_eligibility_checks(repo_conn, head) do

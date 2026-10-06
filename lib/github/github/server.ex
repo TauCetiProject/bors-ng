@@ -286,9 +286,11 @@ defmodule BorsNG.GitHub.Server do
     _ -> {:error, :backend_observation_failed}
   end
 
-  def do_handle_call(:release_queue_tail, {{:raw, token}, _} = conn, {selected_at}) do
-    # Never trim a newer selection, including a quick queue -> bors -> queue flip.
-    with {:ok, %{backend: "bors", updated_at: ^selected_at}} <- backend_selection(conn),
+  def do_handle_call(:release_queue_tail, {{:raw, token}, _} = conn, {selected_at, deadline}) do
+    # Check the absolute deadline inside the server too: a timed-out caller's
+    # request can remain in this GenServer's mailbox and execute later.
+    with true <- System.monotonic_time(:millisecond) < deadline,
+         {:ok, %{backend: "bors", updated_at: ^selected_at}} <- backend_selection(conn),
          %{status: 200, body: raw} <-
            "token #{token}"
            |> tesla_client(@content_type)
@@ -305,22 +307,8 @@ defmodule BorsNG.GitHub.Server do
            BorsNG.Worker.QueueHandoff.queued_tail(
              get_in(data, ["data", "repository", "mergeQueue", "entries"])
            ),
-         %{status: 200, body: response} <-
-           "token #{token}"
-           |> tesla_client(@content_type)
-           |> Tesla.post!(
-             "/graphql",
-             Jason.encode!(%{
-               query:
-                 "mutation($id:ID!,$mutationId:String!){dequeuePullRequest(input:{id:$id,clientMutationId:$mutationId}){clientMutationId}}",
-               variables: %{id: entry.node_id, mutationId: entry.entry_id}
-             })
-           ),
-         result <- Jason.decode!(response),
-         false <- Map.has_key?(result, "errors"),
-         id when id == entry.entry_id <-
-           get_in(result, ["data", "dequeuePullRequest", "clientMutationId"]) do
-      {:ok, Map.drop(entry, [:node_id])}
+         true <- System.monotonic_time(:millisecond) < deadline do
+      dequeue_tail(token, entry, selected_at)
     else
       {:done, reason} -> {:done, reason}
       _ -> {:error, :queue_handoff_deferred}
@@ -1182,6 +1170,50 @@ defmodule BorsNG.GitHub.Server do
     else
       all
     end
+  end
+
+  defp dequeue_tail(token, entry, selected_at) do
+    response =
+      "token #{token}"
+      |> tesla_client(@content_type)
+      |> Tesla.post!(
+        "/graphql",
+        Jason.encode!(%{
+          query:
+            "mutation($id:ID!,$mutationId:String!){dequeuePullRequest(input:{id:$id,clientMutationId:$mutationId}){clientMutationId}}",
+          variables: %{id: entry.node_id, mutationId: entry.entry_id}
+        })
+      )
+
+    result = Jason.decode!(response.body)
+
+    if response.status == 200 and not Map.has_key?(result, "errors") and
+         get_in(result, ["data", "dequeuePullRequest", "clientMutationId"]) == entry.entry_id do
+      # Log in the mutation owner even if its caller has already timed out.
+      log_queue_handoff(entry, selected_at, "released")
+      {:ok, Map.drop(entry, [:node_id])}
+    else
+      log_queue_handoff(entry, selected_at, "ambiguous")
+      {:error, :queue_handoff_ambiguous}
+    end
+  rescue
+    _ ->
+      log_queue_handoff(entry, selected_at, "ambiguous")
+      {:error, :queue_handoff_ambiguous}
+  end
+
+  defp log_queue_handoff(entry, selected_at, outcome) do
+    Logger.log(
+      if(outcome == "ambiguous", do: :warning, else: :info),
+      Jason.encode!(%{
+        schema: "tauceti-merge.handoff/v1",
+        from: "queue",
+        to: "bors",
+        selected_at: selected_at,
+        outcome: outcome,
+        entry: Map.drop(entry, [:node_id])
+      })
+    )
   end
 
   defp backend_selection(conn) do
