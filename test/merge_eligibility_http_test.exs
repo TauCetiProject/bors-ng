@@ -17,7 +17,7 @@ defmodule BorsNG.MergeEligibilityHttpTest do
 
     parent = self()
 
-    server =
+    _server =
       spawn_link(fn ->
         for page <- 1..2 do
           {:ok, socket} = :gen_tcp.accept(listener, 5_000)
@@ -32,6 +32,8 @@ defmodule BorsNG.MergeEligibilityHttpTest do
 
           :gen_tcp.close(socket)
         end
+
+        send(parent, :server_done)
       end)
 
     head = String.duplicate("a", 40)
@@ -52,6 +54,6 @@ defmodule BorsNG.MergeEligibilityHttpTest do
       assert query["filter"] == "all"
     end
 
-    refute Process.alive?(server)
+    assert_receive :server_done
   end
 end
