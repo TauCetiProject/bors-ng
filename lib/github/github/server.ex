@@ -311,14 +311,15 @@ defmodule BorsNG.GitHub.Server do
            |> Tesla.post!(
              "/graphql",
              Jason.encode!(%{
-               query: "mutation($id:ID!){dequeuePullRequest(input:{id:$id}){pullRequest{id}}}",
-               variables: %{id: entry.node_id}
+               query:
+                 "mutation($id:ID!,$mutationId:String!){dequeuePullRequest(input:{id:$id,clientMutationId:$mutationId}){clientMutationId}}",
+               variables: %{id: entry.node_id, mutationId: entry.entry_id}
              })
            ),
          result <- Jason.decode!(response),
          false <- Map.has_key?(result, "errors"),
-         id when id == entry.node_id <-
-           get_in(result, ["data", "dequeuePullRequest", "pullRequest", "id"]) do
+         id when id == entry.entry_id <-
+           get_in(result, ["data", "dequeuePullRequest", "clientMutationId"]) do
       {:ok, Map.drop(entry, [:node_id])}
     else
       {:done, reason} -> {:done, reason}

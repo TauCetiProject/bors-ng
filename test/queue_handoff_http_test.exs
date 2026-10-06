@@ -99,7 +99,7 @@ defmodule BorsNG.QueueHandoffHttpTest do
     serve([
       selection(),
       tail(),
-      %{"data" => %{"dequeuePullRequest" => %{"pullRequest" => %{"id" => "pr-39"}}}}
+      %{"data" => %{"dequeuePullRequest" => %{"clientMutationId" => "entry-39"}}}
     ])
 
     assert {:ok, %{pr: 39, head_sha: "head", entry_id: "entry-39"}} =
@@ -112,6 +112,8 @@ defmodule BorsNG.QueueHandoffHttpTest do
     assert_receive {:request, mutation}
     [_, body] = String.split(mutation, "\r\n\r\n", parts: 2)
     assert Jason.decode!(body)["variables"]["id"] == "pr-39"
+    assert Jason.decode!(body)["variables"]["mutationId"] == "entry-39"
+    assert Jason.decode!(body)["query"] =~ "clientMutationId"
     assert_receive :server_done
   end
 
