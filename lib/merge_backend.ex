@@ -6,8 +6,8 @@ defmodule BorsNG.MergeBackend do
 
   def scoped?(project, base), do: project.name == "TauCetiProject/TauCeti" and base == "main"
 
-  # Starting an existing batch (including a bisection child) must not require
-  # bors to remain selected: that would strand the outgoing queue forever.
+  # Previously started work may drain under either setting. New work starts
+  # only under bors; the batcher releases unstarted work when queue is selected.
   def allow(project, base, purpose) do
     if scoped?(project, base) do
       conn = Project.installation_connection(project.repo_xref, Repo)
@@ -22,7 +22,9 @@ defmodule BorsNG.MergeBackend do
   def decide({:ok, %{backend: backend, github_count: 0}}, :admit) when backend == "bors",
     do: :ok
 
-  def decide({:ok, %{backend: backend, github_count: 0}}, :start)
+  def decide({:ok, %{backend: "bors", github_count: 0}}, :start), do: :ok
+
+  def decide({:ok, %{backend: backend, github_count: 0}}, :drain)
       when backend in ["queue", "bors"],
       do: :ok
 

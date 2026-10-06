@@ -7,7 +7,8 @@ defmodule BorsNG.MergeBackendTest do
   test "incoming admissions wait, existing batches drain with either selection" do
     for mode <- ["queue", "bors"] do
       snapshot = {:ok, %{backend: mode, github_count: 0}}
-      assert MergeBackend.decide(snapshot, :start) == :ok
+      assert MergeBackend.decide(snapshot, :drain) == :ok
+      assert MergeBackend.decide(snapshot, :start) == :ok == (mode == "bors")
       assert MergeBackend.decide(snapshot, :admit) == :ok == (mode == "bors")
 
       assert {:defer, :github_not_drained} =

@@ -463,3 +463,40 @@ check ID, proof and held intent in Postgres, and recovered holds repeat prefligh
 Deploy this consumer (including its additive migration) before enabling the
 TauCetiReview publisher and updating TauCeti's policy pins. The review App needs
 Checks: write; no additional hosting resource or secret is needed.
+
+### Faster queue handoffs
+
+Changing `MERGE_BACKEND` also releases outgoing work whose CI has not started.
+For GitHub -> bors, the minute heartbeat removes entries from the back of the
+GitHub queue, only when their live state is `QUEUED` and `headCommit` is null.
+It rereads the backend selection and tail before each removal, limits each tick
+to 16 removals / 10 seconds, and stops on an active entry, changed setting or
+incomplete API response. The PR remains open and the shared review policy and
+eligibility checks determine its admission to bors. Removing tail entries leaves
+the inputs of builds ahead of them unchanged.
+
+The mutation owner checks an absolute deadline before observing and again before
+removal, including requests delayed in the GitHub server's mailbox. Successful
+and ambiguous mutations are logged there even if their caller times out. The
+heartbeat refreshes outgoing counts after every trim attempt, within a shared
+40-second budget for GitHub reads.
+
+GitHub does not provide a conditional dequeue mutation. An entry can begin
+building between the final read and removal; that narrow race can cancel the
+new build, but cannot bypass checks or allow the two backends to merge together.
+
+For bors -> GitHub, the project's serialized batcher releases waiting `main`
+batches without CI status rows or unresolved start intent. This includes paused
+batches whose earlier CI was abandoned. CI start intent is persisted before
+staging writes, so a restart during dispatch cannot misidentify a build as
+unstarted. Exact-head approvals are retained as durable holds; archived links
+distinguish a transfer from a failed build. Holds stay dormant until the shared
+heartbeat observes bors selected and GitHub drained, avoiding a retry loop for
+each transferred PR. Running builds and unfinished CI starts continue to drain.
+Unstarted bisection children can also transfer and undergo GitHub queue checks.
+Manual cancellation, pushes and unsafe-review checks still revoke approvals.
+
+The incoming queue still waits for all outgoing active work to finish. No
+timeout or CI concurrency setting changes, no check is bypassed, and repeated
+heartbeats or service restarts cannot admit the same work to both queues. The
+experiment's measurement window begins after this shorter handoff completes.

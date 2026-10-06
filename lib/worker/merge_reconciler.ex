@@ -35,9 +35,13 @@ defmodule BorsNG.Worker.MergeReconciler do
 
   defp observe(project, state) do
     conn = Project.installation_connection(project.repo_xref, Repo)
+    deadline = System.monotonic_time(:millisecond) + 40_000
 
-    with {:ok, snapshot} <- GitHub.merge_backend_snapshot(conn),
-         {:ok, candidates} <- GitHub.merge_candidates(conn) do
+    with {:ok, before_handoff} <-
+           bounded_read(deadline, 15_000, &GitHub.merge_backend_snapshot(conn, &1)),
+         released <- BorsNG.Worker.QueueHandoff.trim(conn, before_handoff, deadline),
+         {:ok, snapshot} <- handoff_snapshot(conn, before_handoff, deadline),
+         {:ok, candidates} <- bounded_read(deadline, 30_000, &GitHub.merge_candidates(conn, &1)) do
       batches =
         Repo.all(
           from(b in Batch.all_for_project(project.id, :incomplete),
@@ -118,6 +122,7 @@ defmodule BorsNG.Worker.MergeReconciler do
         Map.merge(snapshot, %{
           observed_at: DateTime.to_iso8601(DateTime.utc_now()),
           bors_count: length(batches),
+          released_github_prs: Enum.map(released, & &1.pr),
           eligible: ready,
           pending: length(pending),
           overlap: snapshot.github_count > 0 and batches != [],
@@ -147,11 +152,11 @@ defmodule BorsNG.Worker.MergeReconciler do
             )
           )
 
-        # Starting a missing batcher recovers its holds once. Re-casting r+
-        # every minute would duplicate pending preflight loops and comments.
+        # Wake dormant transferred holds without one API retry loop per PR.
+        # The batcher tracks each head's pending preflight generation.
         if held do
           pid = Batcher.Registry.get(project.id)
-          send(pid, :recover_backend_holds)
+          send(pid, :wake_backend_holds)
         end
       end
 
@@ -166,5 +171,15 @@ defmodule BorsNG.Worker.MergeReconciler do
     else
       _ -> %{state | observation: nil}
     end
+  end
+
+  defp handoff_snapshot(conn, %{backend: "bors", github_count: count}, deadline) when count > 0,
+    do: bounded_read(deadline, 15_000, &GitHub.merge_backend_snapshot(conn, &1))
+
+  defp handoff_snapshot(_, snapshot, _), do: {:ok, snapshot}
+
+  defp bounded_read(deadline, cap, read) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+    if remaining > 0, do: read.(min(cap, remaining)), else: {:error, :heartbeat_deadline}
   end
 end
