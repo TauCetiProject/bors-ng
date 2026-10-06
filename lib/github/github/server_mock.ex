@@ -173,6 +173,35 @@ defmodule BorsNG.GitHub.ServerMock do
     {get_in(state, [conn, :merge_candidates]) || {:error, :unavailable}, state}
   end
 
+  def do_handle_call(:release_queue_tail, conn, {selected_at}, state) do
+    case get_in(state, [conn, :backend_snapshot]) do
+      {:ok, %{backend: "bors", updated_at: ^selected_at}} ->
+        case get_in(state, [conn, :handoff_results]) do
+          [{:ok, _entry} = result | rest] ->
+            state = put_in(state, [conn, :handoff_results], rest)
+            {:ok, snapshot} = get_in(state, [conn, :backend_snapshot])
+
+            state =
+              put_in(
+                state,
+                [conn, :backend_snapshot],
+                {:ok, %{snapshot | github_count: snapshot.github_count - 1}}
+              )
+
+            {result, state}
+
+          [result | rest] ->
+            {result, put_in(state, [conn, :handoff_results], rest)}
+
+          _ ->
+            {{:done, :empty}, state}
+        end
+
+      _ ->
+        {{:error, :backend_changed}, state}
+    end
+  end
+
   def do_handle_call(:get_eligibility_checks, conn, {head}, state) do
     {get_in(state, [conn, :eligibility_checks, head]) || {:ok, []}, state}
   end

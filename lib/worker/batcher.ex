@@ -512,6 +512,8 @@ defmodule BorsNG.Worker.Batcher do
   defp poll_(project_id) do
     project = Repo.get(Project, project_id)
 
+    release_unstarted_batches(project)
+
     incomplete =
       project_id
       |> Batch.all_for_project(:incomplete)
@@ -967,13 +969,78 @@ defmodule BorsNG.Worker.Batcher do
   end
 
   defp start_waiting_batch(batch) do
-    case BorsNG.MergeBackend.allow(batch.project, batch.into_branch, :start) do
+    purpose = if is_nil(batch.commit), do: :start, else: :drain
+
+    case BorsNG.MergeBackend.allow(batch.project, batch.into_branch, purpose) do
       :ok ->
         start_waiting_batch_allowed(batch)
 
       {:defer, reason} ->
         Logger.info("merge_backend deferred batch=#{batch.id} reason=#{reason}")
         Process.send_after(self(), {:poll, :once}, 60_000)
+    end
+  end
+
+  # This runs inside the project's batcher, serialized with activation and CI
+  # dispatch. A waiting batch with a commit may have run before being paused;
+  # leave it draining. Retain archived links and exact-head approvals, so a
+  # later switch back to bors recovers intent without replaying consumed checks.
+  def release_unstarted_batches(project) do
+    if BorsNG.MergeBackend.scoped?(project, "main") do
+      waiting =
+        Repo.all(
+          from(b in Batch.all_for_project(project.id, :waiting),
+            where: b.into_branch == "main" and is_nil(b.commit)
+          )
+        )
+
+      if waiting != [] do
+        conn = get_repo_conn(project)
+
+        case GitHub.merge_backend_snapshot(conn) do
+          {:ok, %{backend: "queue"}} ->
+            Enum.each(waiting, fn batch ->
+              links = Repo.all(LinkPatchBatch.from_batch(batch.id))
+
+              {:ok, _} =
+                Repo.transaction(fn ->
+                  batch |> Batch.changeset(%{state: :canceled}) |> Repo.update!()
+
+                  Enum.each(links, fn link ->
+                    patch = link.patch
+
+                    if patch.open and not patch.is_draft and link.head_sha == patch.commit and
+                         is_binary(link.head_sha) do
+                      Bundles.hold_approval(patch, link.reviewer)
+                    end
+                  end)
+                end)
+
+              Enum.each(links, fn link ->
+                patch = Repo.get!(Patch, link.patch_id)
+
+                if patch.bundle_reviewer == link.reviewer and patch.commit == link.head_sha do
+                  defer_approval(patch, link.reviewer)
+                end
+              end)
+
+              Labeler.reconcile_queue(conn, "main", Enum.map(links, & &1.patch))
+
+              Logger.info(
+                Jason.encode!(%{
+                  schema: "tauceti-merge.handoff/v1",
+                  from: "bors",
+                  to: "queue",
+                  batch_id: batch.id,
+                  released_prs: Enum.map(links, & &1.patch.pr_xref)
+                })
+              )
+            end)
+
+          _ ->
+            :ok
+        end
+      end
     end
   end
 

@@ -262,9 +262,8 @@ defmodule BorsNG.GitHub.Server do
   end
 
   def do_handle_call(:merge_backend_snapshot, {{:raw, token}, _} = conn, {}) do
-    variables = backend_variables(conn, 1, [])
-    variable = Enum.find(variables, &(&1["name"] == "MERGE_BACKEND"))
-    backend = if variable, do: variable["value"], else: "queue"
+    {:ok, setting} = backend_selection(conn)
+    backend = setting.backend
 
     query =
       ~s|{repository(owner:"TauCetiProject",name:"TauCeti"){mergeQueue(branch:"main"){entries(first:1){totalCount}}}}|
@@ -279,13 +278,54 @@ defmodule BorsNG.GitHub.Server do
 
     if response.status == 200 and not Map.has_key?(data, "errors") and
          backend in ["queue", "bors"] and is_integer(count) and count >= 0 do
-      {:ok,
-       %{backend: backend, updated_at: variable && variable["updated_at"], github_count: count}}
+      {:ok, Map.put(setting, :github_count, count)}
     else
       {:error, :invalid_backend_observation}
     end
   rescue
     _ -> {:error, :backend_observation_failed}
+  end
+
+  def do_handle_call(:release_queue_tail, {{:raw, token}, _} = conn, {selected_at}) do
+    # Never trim a newer selection, including a quick queue -> bors -> queue flip.
+    with {:ok, %{backend: "bors", updated_at: ^selected_at}} <- backend_selection(conn),
+         %{status: 200, body: raw} <-
+           "token #{token}"
+           |> tesla_client(@content_type)
+           |> Tesla.post!(
+             "/graphql",
+             Jason.encode!(%{
+               query:
+                 ~s|{repository(owner:"TauCetiProject",name:"TauCeti"){mergeQueue(branch:"main"){entries(last:1){totalCount nodes{id position state headCommit{oid} pullRequest{id number headRefOid}}}}}}|
+             })
+           ),
+         data <- Jason.decode!(raw),
+         false <- Map.has_key?(data, "errors"),
+         {:ok, entry} <-
+           BorsNG.Worker.QueueHandoff.queued_tail(
+             get_in(data, ["data", "repository", "mergeQueue", "entries"])
+           ),
+         %{status: 200, body: response} <-
+           "token #{token}"
+           |> tesla_client(@content_type)
+           |> Tesla.post!(
+             "/graphql",
+             Jason.encode!(%{
+               query: "mutation($id:ID!){dequeuePullRequest(input:{id:$id}){pullRequest{id}}}",
+               variables: %{id: entry.node_id}
+             })
+           ),
+         result <- Jason.decode!(response),
+         false <- Map.has_key?(result, "errors"),
+         id when id == entry.node_id <-
+           get_in(result, ["data", "dequeuePullRequest", "pullRequest", "id"]) do
+      {:ok, Map.drop(entry, [:node_id])}
+    else
+      {:done, reason} -> {:done, reason}
+      _ -> {:error, :queue_handoff_deferred}
+    end
+  rescue
+    _ -> {:error, :queue_handoff_unavailable}
   end
 
   def do_handle_call(:merge_candidates, {{:raw, token}, _}, {}) do
@@ -1140,6 +1180,22 @@ defmodule BorsNG.GitHub.Server do
       merge_candidates(token, next, all, MapSet.put(seen, next))
     else
       all
+    end
+  end
+
+  defp backend_selection(conn) do
+    variables = backend_variables(conn, 1, [])
+    found = Enum.filter(variables, &(&1["name"] == "MERGE_BACKEND"))
+
+    case found do
+      [] ->
+        {:ok, %{backend: "queue", updated_at: nil}}
+
+      [%{"value" => value, "updated_at" => updated_at}] when value in ["queue", "bors"] ->
+        {:ok, %{backend: value, updated_at: updated_at}}
+
+      _ ->
+        {:error, :invalid_backend_selection}
     end
   end
 

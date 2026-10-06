@@ -39,6 +39,10 @@ defmodule BorsNG.GitHub do
     safe_genserver_call(:merge_candidates, repo_conn, {}, 30_000)
   end
 
+  def release_queue_tail(repo_conn, selected_at) do
+    safe_genserver_call(:release_queue_tail, repo_conn, {selected_at}, 10_000)
+  end
+
   def get_eligibility_checks(repo_conn, head) do
     safe_genserver_call(:get_eligibility_checks, repo_conn, {head}, 15_000)
   end

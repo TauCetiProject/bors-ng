@@ -36,7 +36,9 @@ defmodule BorsNG.Worker.MergeReconciler do
   defp observe(project, state) do
     conn = Project.installation_connection(project.repo_xref, Repo)
 
-    with {:ok, snapshot} <- GitHub.merge_backend_snapshot(conn),
+    with {:ok, before_handoff} <- GitHub.merge_backend_snapshot(conn),
+         released <- BorsNG.Worker.QueueHandoff.trim(conn, before_handoff),
+         {:ok, snapshot} <- handoff_snapshot(conn, before_handoff, released),
          {:ok, candidates} <- GitHub.merge_candidates(conn) do
       batches =
         Repo.all(
@@ -118,6 +120,7 @@ defmodule BorsNG.Worker.MergeReconciler do
         Map.merge(snapshot, %{
           observed_at: DateTime.to_iso8601(DateTime.utc_now()),
           bors_count: length(batches),
+          released_github_prs: Enum.map(released, & &1.pr),
           eligible: ready,
           pending: length(pending),
           overlap: snapshot.github_count > 0 and batches != [],
@@ -167,4 +170,7 @@ defmodule BorsNG.Worker.MergeReconciler do
       _ -> %{state | observation: nil}
     end
   end
+
+  defp handoff_snapshot(_, snapshot, []), do: {:ok, snapshot}
+  defp handoff_snapshot(conn, _, _), do: GitHub.merge_backend_snapshot(conn)
 end
