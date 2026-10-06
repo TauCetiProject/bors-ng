@@ -991,6 +991,42 @@ defmodule BorsNG.WebhookControllerTest do
 
     assert Enum.any?(pr_comments(1), &(&1 =~ "is a draft" and &1 =~ "single on"))
     refute Enum.any?(pr_comments(1), &(&1 =~ "takes `on` or `off`"))
+
+    # An old pinned workflow's command cannot supersede an authoritative check.
+    data = %{
+      schema: "tauceti-merge.eligibility/v1",
+      repo: "TauCetiProject/TauCeti",
+      pr: 1,
+      eligible: false,
+      review_safe: false,
+      single: false,
+      merge_base_sha: nil
+    }
+
+    check = %{
+      "id" => 100,
+      "name" => "merge eligibility",
+      "app" => %{"id" => 3_947_238},
+      "head_sha" => head,
+      "status" => "completed",
+      "conclusion" => "failure",
+      "external_id" => Jason.encode!(data)
+    }
+
+    state = GitHub.ServerMock.get_state()
+
+    state =
+      put_in(state, [{{:installation, 31}, 13}, :eligibility_checks], %{head => {:ok, [check]}})
+
+    GitHub.ServerMock.put_state(state)
+    before = pr_comments(1)
+
+    conn
+    |> put_req_header("x-github-event", "issue_comment")
+    |> post(webhook_path(conn, :webhook, "github"), single)
+
+    :sys.get_state(BorsNG.Worker.Batcher.Registry.get(project.id))
+    assert pr_comments(1) == before
   end
 
   test "an r+ in an issue comment on a draft PR is refused with a warning", %{
