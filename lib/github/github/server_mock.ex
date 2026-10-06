@@ -173,6 +173,14 @@ defmodule BorsNG.GitHub.ServerMock do
     {get_in(state, [conn, :merge_candidates]) || {:error, :unavailable}, state}
   end
 
+  def do_handle_call(:get_eligibility_checks, conn, {head}, state) do
+    {get_in(state, [conn, :eligibility_checks, head]) || {:ok, []}, state}
+  end
+
+  def do_handle_call(:get_pr_merge_base, conn, {pr, head}, state) do
+    {get_in(state, [conn, :merge_bases, {pr, head}]) || {:error, :unavailable}, state}
+  end
+
   def do_handle_call(:dispatch_reconcile, conn, {}, state) do
     {:ok, put_in(state, [conn, :reconcile_dispatched], true)}
   end

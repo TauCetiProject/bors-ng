@@ -27,3 +27,21 @@ test("preserves other and malformed events for bors", () => {
   assert.equal(needsBors("pull_request", body({})), true);
   assert.equal(needsBors("check_run", new TextEncoder().encode("{bad")), true);
 });
+
+test("eligibility notifications reach bors for fork heads and all decision transitions", () => {
+  const payload = {
+    repository: { full_name: "TauCetiProject/TauCeti" },
+    action: "completed",
+    check_run: { name: "merge eligibility", app: { id: 3947238 },
+      status: "completed", conclusion: "success", pull_requests: [], check_suite: { head_branch: null } },
+  };
+  for (const conclusion of ["success", "neutral", "failure"]) {
+    payload.check_run.conclusion = conclusion;
+    assert.equal(needsBors("check_run", body(payload)), true);
+  }
+  payload.check_run.app.id = 7;
+  assert.equal(needsBors("check_run", body(payload)), false);
+  payload.check_run.app.id = 3947238;
+  payload.repository.full_name = "another/repo";
+  assert.equal(needsBors("check_run", body(payload)), false);
+});

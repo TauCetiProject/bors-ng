@@ -1,6 +1,6 @@
 import { Container, getContainer } from "@cloudflare/containers";
 import { env as workerEnv } from "cloudflare:workers";
-import { needsBors } from "./webhook-filter.mjs";
+import { needsBors, REVIEW_APP_ID } from "./webhook-filter.mjs";
 import { readObservations, archiveObservation } from "./merge-observations.mjs";
 import { githubVariables } from "./experiment-github.mjs";
 import { tickExperiment } from "./merge-experiment.mjs";
@@ -54,7 +54,7 @@ export class BorsContainer extends Container {
     GITHUB_INTEGRATION_PEM: workerEnv.GITHUB_INTEGRATION_PEM,
     COMMAND_TRIGGER: "bors",
     BORS_STAGE_DISPATCH_PROJECT: "TauCetiProject/TauCeti",
-    TAUCETI_REVIEW_APP_ID: "3947238",
+    TAUCETI_REVIEW_APP_ID: REVIEW_APP_ID,
   };
 }
 

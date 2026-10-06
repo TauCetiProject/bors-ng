@@ -52,6 +52,8 @@ defmodule BorsNG.Worker.Batcher do
     GenServer.start_link(__MODULE__, project_id)
   end
 
+  def eligibility(pid, pr) when is_integer(pr), do: GenServer.cast(pid, {:eligibility, pr})
+
   def reviewed(pid, patch_id, reviewer) when is_integer(patch_id) do
     GenServer.cast(pid, {:reviewed, patch_id, reviewer})
   end
@@ -174,6 +176,10 @@ defmodule BorsNG.Worker.Batcher do
 
         Project.ping!(project_id)
     end
+  end
+
+  def do_handle_cast({:eligibility, pr}, project_id) do
+    BorsNG.Worker.MergeEligibility.reconcile(Repo.get!(Project, project_id), pr)
   end
 
   def do_handle_cast({:reviewed, patch_id, reviewer}, _project_id) do
@@ -2079,6 +2085,13 @@ defmodule BorsNG.Worker.Batcher do
   end
 
   defp patch_preflight(repo_conn, patch) do
+    case BorsNG.Worker.MergeEligibility.preflight(repo_conn, patch) do
+      :ok -> patch_preflight_policy(repo_conn, patch)
+      other -> other
+    end
+  end
+
+  defp patch_preflight_policy(repo_conn, patch) do
     if Patch.ci_skip?(patch) do
       {:error, :ci_skip}
     else

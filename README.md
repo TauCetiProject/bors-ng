@@ -439,3 +439,27 @@ You can do it from a PostgreSQL prompt like this:
 bors-ng is licensed under the Apache license, version 2.0.
 It should be included with the source distribution in LICENSE-APACHE.
 If it is missing, it is at <http://www.apache.org/licenses/LICENSE-2.0>.
+
+### Tau Ceti automatic admission
+
+For `TauCetiProject/TauCeti`, the review App publishes a `merge eligibility`
+check after evaluating the existing shared review/CI/path policy. Bors consumes
+that check automatically; the review workflow does not post `bors r+` or `r-`
+comments. Check provenance, PR number, exact head and reviewed merge base are
+validated before admission. Toolchain/pin changes retain single-PR batching.
+
+`success` permits automatic admission, `neutral` waits without withdrawing an
+existing approval, and `failure` withdraws unsafe reviews under either backend.
+The highest check ID from the configured review App is authoritative; webhook
+payloads only wake a live read. Fork PRs are identified from authenticated check
+metadata rather than the possibly empty `pull_requests` list. The minute
+heartbeat recovers missed notifications across eight rotating PRs per tick.
+
+Manual commands remain available. Observing the same check cannot undo a manual
+cancellation or repeatedly retry a failed head. Automatic approvals persist their
+check ID, proof and held intent in Postgres, and recovered holds repeat preflight.
+`MERGE_BACKEND` and outgoing-queue drainage still control admission and starts.
+
+Deploy this consumer (including its additive migration) before enabling the
+TauCetiReview publisher and updating TauCeti's policy pins. The review App needs
+Checks: write; no additional hosting resource or secret is needed.

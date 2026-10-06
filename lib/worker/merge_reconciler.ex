@@ -1,5 +1,5 @@
 defmodule BorsNG.Worker.MergeReconciler do
-  @moduledoc "Minute heartbeat; hints wake trusted review policy, never grant approval."
+  @moduledoc "Minute heartbeat; recover App-owned eligibility and wake the shared policy."
   use GenServer
   import Ecto.Query
   require Logger
@@ -44,6 +44,17 @@ defmodule BorsNG.Worker.MergeReconciler do
             where: b.into_branch == "main"
           )
         )
+
+      # Bound recovery reads; webhooks handle changes immediately. Rotate across
+      # all open candidates so an absent/stale ready label cannot strand a check.
+      if candidates != [] do
+        ordered = Enum.sort_by(candidates, & &1.pr)
+        offset = rem(div(System.system_time(:second), 60) * 8, length(ordered))
+
+        (Enum.drop(ordered, offset) ++ Enum.take(ordered, offset))
+        |> Enum.take(8)
+        |> Enum.each(&Batcher.eligibility(Batcher.Registry.get(project.id), &1.pr))
+      end
 
       ready = Enum.filter(candidates, & &1.ready)
 

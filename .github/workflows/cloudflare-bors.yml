@@ -44,7 +44,7 @@ jobs:
             lib/worker/batcher.ex
             lib/web/controllers/webhook_controller.ex
             test/controllers/webhook_controller_test.exs
-      - run: mix test test/controllers/webhook_controller_test.exs
+      - run: mix test test/controllers/webhook_controller_test.exs test/batcher/merge_eligibility_test.exs test/merge_eligibility_http_test.exs
       - run: git diff --exit-code
 
   container:
