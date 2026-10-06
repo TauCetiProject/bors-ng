@@ -121,7 +121,7 @@ defmodule BorsNG.Worker.MergeEligibility do
       true ->
         with :ok <- BorsNG.MergeBackend.allow(project, "main", :admit),
              {:ok, labels} <- GitHub.get_labels(conn, pr.number),
-             true <- MapSet.disjoint?(MapSet.new(labels), MapSet.new(@keep)),
+             true <- MapSet.disjoint?(MapSet.new(labels, &String.downcase/1), MapSet.new(@keep)),
              {:ok, merge_base} <- GitHub.get_pr_merge_base(conn, pr.number, pr.head_sha),
              true <- merge_base == d["merge_base_sha"] do
           # Durable intent and held approval are one write. Restart recovery can complete admission.
@@ -152,7 +152,9 @@ defmodule BorsNG.Worker.MergeEligibility do
       from(l in LinkPatchBatch,
         join: b in Batch,
         on: b.id == l.batch_id,
-        where: l.patch_id == ^patch.id and l.head_sha == ^patch.commit and b.state != :canceled
+        where:
+          l.patch_id == ^patch.id and (l.head_sha == ^patch.commit or is_nil(l.head_sha)) and
+            b.state != :canceled
       )
     ) or
       not is_nil(patch.bundle_reviewer)

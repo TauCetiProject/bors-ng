@@ -161,7 +161,7 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
     MergeEligibility.reconcile(p, 1)
     refute Repo.exists?(Batch.all_for_project(p.id, :incomplete))
     update_repo(:merge_bases, %{{1, @head} => {:ok, @base}})
-    update_repo(:labels, %{1 => ["human"]})
+    update_repo(:labels, %{1 => ["Human"]})
     MergeEligibility.reconcile(p, 1)
     refute Repo.exists?(Batch.all_for_project(p.id, :incomplete))
   end
