@@ -39,6 +39,14 @@ defmodule BorsNG.GitHub do
     safe_genserver_call(:merge_candidates, repo_conn, {}, 30_000)
   end
 
+  def get_eligibility_checks(repo_conn, head) do
+    safe_genserver_call(:get_eligibility_checks, repo_conn, {head}, 15_000)
+  end
+
+  def get_pr_merge_base(repo_conn, pr, head) do
+    safe_genserver_call(:get_pr_merge_base, repo_conn, {pr, head}, 15_000)
+  end
+
   @spec get_pr_files!(tconn, integer) :: [BorsNG.GitHub.File.t()]
   def get_pr_files!(repo_conn, pr_xref) do
     {:ok, pr} = get_pr_files(repo_conn, pr_xref)

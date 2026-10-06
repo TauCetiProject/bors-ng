@@ -6,7 +6,9 @@ function borsBranch(branch) {
     (branch.startsWith("staging") || branch.startsWith("trying"));
 }
 
-export function needsBors(event, body) {
+export const REVIEW_APP_ID = "3947238";
+
+export function needsBors(event, body, reviewAppId = REVIEW_APP_ID) {
   if (event !== "check_run" && event !== "check_suite") return true;
 
   let payload;
@@ -18,6 +20,9 @@ export function needsBors(event, body) {
   }
 
   if (event === "check_run") {
+    if (payload.repository?.full_name === "TauCetiProject/TauCeti" &&
+        payload.check_run?.name === "merge eligibility" &&
+        reviewAppId && String(payload.check_run?.app?.id) === String(reviewAppId)) return true;
     return payload.check_run?.status === "completed" &&
       borsBranch(payload.check_run?.check_suite?.head_branch);
   }

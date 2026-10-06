@@ -294,6 +294,47 @@ defmodule BorsNG.GitHub.Server do
     _ -> {:error, :merge_candidates_unavailable}
   end
 
+  def do_handle_call(:get_eligibility_checks, conn, {head}) do
+    {:ok, eligibility_checks(conn, head, 1, [])}
+  rescue
+    _ -> {:error, :eligibility_checks_unavailable}
+  end
+
+  defp eligibility_checks(conn, head, page, acc) do
+    path =
+      "commits/#{head}/check-runs?check_name=merge%20eligibility&filter=all&per_page=100&page=#{page}"
+
+    %{status: 200, body: raw} = get!(conn, path)
+    %{"check_runs" => checks, "total_count" => total} = Jason.decode!(raw)
+    true = is_list(checks) and is_integer(total) and total >= 0
+    acc = acc ++ checks
+
+    if length(acc) >= total,
+      do: acc,
+      else:
+        (
+          true = checks != []
+          eligibility_checks(conn, head, page + 1, acc)
+        )
+  end
+
+  def do_handle_call(:get_pr_merge_base, conn, {number, head}) do
+    with %{status: 200, body: raw} <- get!(conn, "pulls/#{number}"),
+         %{
+           "state" => "open",
+           "base" => %{"ref" => "main", "sha" => base},
+           "head" => %{"sha" => ^head}
+         } <- Jason.decode!(raw),
+         %{status: 200, body: raw} <- get!(conn, "compare/#{base}...#{head}?per_page=1"),
+         %{"merge_base_commit" => %{"sha" => merge_base}} <- Jason.decode!(raw) do
+      {:ok, merge_base}
+    else
+      _ -> {:error, :merge_base_unavailable}
+    end
+  rescue
+    _ -> {:error, :merge_base_unavailable}
+  end
+
   def do_handle_call(:dispatch_reconcile, conn, {}) do
     case post!(conn, "dispatches", Jason.encode!(%{event_type: "tauceti-merge-reconcile"})) do
       %{status: 204} -> :ok
