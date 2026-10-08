@@ -3,7 +3,7 @@ import { env as workerEnv } from "cloudflare:workers";
 import { needsBors, REVIEW_APP_ID } from "./webhook-filter.mjs";
 import { readObservations, archiveObservation } from "./merge-observations.mjs";
 import { githubVariables } from "./experiment-github.mjs";
-import { tickExperiment } from "./merge-experiment.mjs";
+import { tickExperiment, readExperimentState } from "./merge-experiment.mjs";
 
 const INSTANCE = "singleton";
 // JSON encodes a byte array at up to four characters per byte. Keep Queue
@@ -25,7 +25,7 @@ export class BorsContainer extends Container {
   }
 
   async experimentStatus() {
-    return await this.experimentStorage.get("merge-experiment") || { phase: "inactive" };
+    return await readExperimentState(this.experimentStorage) || { phase: "inactive" };
   }
 
   async experimentObservation(observation) {

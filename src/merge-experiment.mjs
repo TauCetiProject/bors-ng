@@ -8,11 +8,21 @@ function parsePlan(variable) {
   if (!variable) return null;
   const plan = JSON.parse(variable.value);
   if (plan.enabled === false) return null;
-  if (plan.schema !== "tauceti-merge.experiment/v1" || !/^[A-Za-z0-9_-]{1,80}$/.test(plan.id || "") ||
+  const schema = plan.mode === "bors_only" ? "tauceti-merge.experiment/v2" : "tauceti-merge.experiment/v1";
+  if (plan.schema !== schema || !/^[A-Za-z0-9_-]{1,80}$/.test(plan.id || "") ||
+      !["bors_then_queue", "bors_only"].includes(plan.mode ?? "bors_then_queue") ||
       plan.duration_hours !== 24 || !Number.isFinite(Date.parse(plan.created_at))) {
     throw new Error("Invalid experiment plan");
   }
   return plan;
+}
+
+export async function readExperimentState(storage) {
+  // Keep the bors-only state separate: a rollback to the v1 controller must
+  // see its old terminal state, not an active state it would restore to queue.
+  const states = (await Promise.all([storage.get("merge-experiment"),
+    storage.get("merge-experiment-bors-only")])).filter(Boolean);
+  return states.sort((a, b) => Date.parse(b.requested_at) - Date.parse(a.requested_at))[0];
 }
 
 function usable(observation, backend, now) {
@@ -25,7 +35,7 @@ function usable(observation, backend, now) {
 }
 
 export async function tickExperiment(storage, variables, now = Date.now()) {
-  let state = await storage.get("merge-experiment");
+  let state = await readExperimentState(storage);
   let plan;
   const planVariable = await variables.get("MERGE_EXPERIMENT");
   try { plan = parsePlan(planVariable); }
@@ -41,7 +51,10 @@ export async function tickExperiment(storage, variables, now = Date.now()) {
   if (!backend || !["queue", "bors"].includes(backend.value) || !backend.updated_at) {
     throw new Error("Live merge backend unavailable");
   }
-  const save = async () => { await storage.put("merge-experiment", state); return state; };
+  const save = async () => {
+    const key = state.plan.mode === "bors_only" ? "merge-experiment-bors-only" : "merge-experiment";
+    await storage.put(key, state); return state;
+  };
 
   // Persist the transition intent before sending PATCH. If its response is lost,
   // adopt the verified result next tick, or retry the unchanged prior value.
@@ -56,7 +69,9 @@ export async function tickExperiment(storage, variables, now = Date.now()) {
   };
   const owned = () => state.expected?.value === backend.value && state.expected.updated_at === backend.updated_at;
   const abort = async reason => {
-    if (owned() && backend.value !== "queue") {
+    // A bors-only measurement does not own a return-to-queue transition, even
+    // when measurement aborts. Live drain/admission guards still govern work.
+    if (owned() && backend.value !== "queue" && state.plan.mode !== "bors_only") {
       state.abort_reason = reason;
       await save();
       await select("queue");
@@ -64,6 +79,10 @@ export async function tickExperiment(storage, variables, now = Date.now()) {
     state.phase = "aborted";
     state.reason = reason;
     state.finished_at = iso(now);
+    if (state.plan.mode === "bors_only" && state.bors_started_at) {
+      state.bors_ended_at = iso(Math.min(now, Date.parse(state.bors_started_at) + 24 * HOUR));
+    }
+    console.error("merge experiment aborted", state.id, reason);
     delete state.abort_reason;
     return save();
   };
@@ -116,9 +135,14 @@ export async function tickExperiment(storage, variables, now = Date.now()) {
   if (state.phase === "draining_to_bors" && fresh && observation.github_count === 0) {
     state.phase = "bors"; state.bors_started_at = iso(now);
   } else if (state.phase === "bors" && now - Date.parse(state.bors_started_at) >= 24 * HOUR) {
-    state.phase = "draining_to_queue";
-    state.bors_ended_at = iso(now); state.queue_requested_at = iso(now);
-    await select("queue");
+    state.bors_ended_at = iso(now);
+    if (state.plan.mode === "bors_only") {
+      state.bors_ended_at = iso(Date.parse(state.bors_started_at) + 24 * HOUR);
+      state.phase = "complete"; state.finished_at = iso(now);
+    } else {
+      state.phase = "draining_to_queue"; state.queue_requested_at = iso(now);
+      await select("queue");
+    }
   } else if (state.phase === "draining_to_queue" && fresh && observation.bors_count === 0) {
     state.phase = "queue"; state.queue_started_at = iso(now);
   } else if (state.phase === "queue" && now - Date.parse(state.queue_started_at) >= 24 * HOUR) {
