@@ -512,5 +512,5 @@ leaves bors selected. Subsequent ticks do not restart the completed plan.
 Aborting a bors-only measurement also preserves the selected backend; the
 existing live admission and drain guards continue to govern merges. A manual
 backend change ends measurement automation and preserves the operator's choice.
-Omitting `mode`, or setting it to `bors_then_queue`, runs the existing two-day
+Using the v1 schema and omitting `mode`, or setting it to `bors_then_queue`, runs the existing two-day
 comparison and finishes on GitHub's queue.

@@ -79,6 +79,10 @@ export async function tickExperiment(storage, variables, now = Date.now()) {
     state.phase = "aborted";
     state.reason = reason;
     state.finished_at = iso(now);
+    if (state.plan.mode === "bors_only" && state.bors_started_at) {
+      state.bors_ended_at = iso(Math.min(now, Date.parse(state.bors_started_at) + 24 * HOUR));
+    }
+    console.error("merge experiment aborted", state.id, reason);
     delete state.abort_reason;
     return save();
   };

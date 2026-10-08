@@ -134,6 +134,15 @@ test('bors-only recovers lost selection responses and malformed-plan aborts', as
   assert.equal((await f.tick()).phase, 'aborted');
   assert.equal(f.backend.value, 'bors'); assert.deepEqual(f.writes, ['bors']);
 });
+test('bors-only absolute deadline preserves selection and caps the measured window', async () => {
+  const f = fixture('bors_only'); await f.tick();
+  f.time = start + 60000; f.observe(); await f.tick();
+  f.time = start + 73*HOUR;
+  const stopped = await f.tick();
+  assert.equal(stopped.phase, 'aborted'); assert.match(stopped.reason, /absolute/);
+  assert.equal(stopped.bors_ended_at, iso(start + 24*HOUR + 60000));
+  assert.equal(f.backend.value, 'bors'); assert.deepEqual(f.writes, ['bors']);
+});
 test('stale or pre-switch observations cannot start a measurement window', async () => {
   const f = fixture(); f.observe(); await f.tick();
   assert.equal((await f.tick()).phase, 'draining_to_bors');
