@@ -503,7 +503,7 @@ experiment's measurement window begins after this shorter handoff completes.
 
 ### Bors-only measurements
 
-The `MERGE_EXPERIMENT` plan supports `"mode": "bors_only"` for a single
+The `MERGE_EXPERIMENT` v2 plan supports `"mode": "bors_only"` for a single
 24-hour bors measurement. Use a fresh plan ID and creation time while
 `MERGE_BACKEND` is `queue`. The controller selects bors, waits for the outgoing
 GitHub queue to drain, then starts the 24-hour clock. It records completion and

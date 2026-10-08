@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { tickExperiment } from './merge-experiment.mjs';
+import { tickExperiment, readExperimentState } from './merge-experiment.mjs';
 
 const HOUR = 3600000;
 const start = Date.parse('2026-10-05T23:00:00Z');
@@ -11,6 +11,7 @@ function fixture(mode) {
   let backend = { value: 'queue', updated_at: iso(start - HOUR) };
   let plan = { schema: 'tauceti-merge.experiment/v1', id: 'test', duration_hours: 24, created_at: iso(start) };
   if (mode !== undefined) plan.mode = mode;
+  if (mode === 'bors_only') plan.schema = 'tauceti-merge.experiment/v2';
   let loseResponse = false;
   const writes = [];
   const storage = { async get(k) { return structuredClone(data.get(k)); }, async put(k, v) { data.set(k, structuredClone(v)); } };
@@ -96,10 +97,42 @@ test('bors-only respects a manual backend change', async () => {
   assert.equal((await f.tick()).phase, 'aborted');
   assert.equal(f.backend.value, 'queue'); assert.deepEqual(f.writes, ['bors']);
 });
-test('invalid measurement mode is refused without selecting a backend', async () => {
+test('invalid measurement mode is rejected without selecting a backend', async () => {
   const f = fixture('bors_onyl');
   await assert.rejects(f.tick(), /Invalid experiment plan/);
   assert.deepEqual(f.writes, []);
+});
+test('late bors-only completion retains the exact 24-hour measurement boundary', async () => {
+  const f = fixture('bors_only'); await f.tick();
+  f.time = start + 60000; f.observe(); await f.tick();
+  f.time = start + 25*HOUR;
+  const done = await f.tick();
+  assert.equal(done.bors_ended_at, iso(start + 24*HOUR + 60000));
+  assert.equal(done.finished_at, iso(start + 25*HOUR));
+  assert.deepEqual(f.writes, ['bors']);
+});
+test('bors-only uses a v2 plan and isolated state while v1 terminal state is preserved', async () => {
+  const f = fixture('bors_only');
+  const previous = {phase:'complete', id:'previous', requested_at:iso(start-HOUR)};
+  f.data.set('merge-experiment', previous);
+  const active = await f.tick();
+  assert.equal(active.plan.schema, 'tauceti-merge.experiment/v2');
+  assert.deepEqual(f.data.get('merge-experiment'), previous);
+  assert.equal(f.data.get('merge-experiment-bors-only').phase, 'draining_to_bors');
+  assert.deepEqual(await readExperimentState(f.storage), active);
+  f.plan = {schema:'tauceti-merge.experiment/v1', mode:'bors_only', id:'bad',
+    duration_hours:24,created_at:iso(start)};
+  assert.equal((await f.tick()).phase, 'aborted');
+  assert.equal(f.backend.value, 'bors'); assert.deepEqual(f.writes, ['bors']);
+});
+test('bors-only recovers lost selection responses and malformed-plan aborts', async () => {
+  const f = fixture('bors_only'); f.lose(); await assert.rejects(f.tick(), /response lost/);
+  f.time = start + 60000; f.observe();
+  assert.equal((await f.tick()).phase, 'bors');
+  const get = f.variables.get;
+  f.variables.get = async name => name === 'MERGE_EXPERIMENT' ? {value:'{invalid'} : get(name);
+  assert.equal((await f.tick()).phase, 'aborted');
+  assert.equal(f.backend.value, 'bors'); assert.deepEqual(f.writes, ['bors']);
 });
 test('stale or pre-switch observations cannot start a measurement window', async () => {
   const f = fixture(); f.observe(); await f.tick();

@@ -85,7 +85,7 @@ the combined staging SHA and bisects failures.
 ## Timed merge-backend comparison
 
 The existing minute cron can run one 24-hour bors window followed by one 24-hour
-GitHub merge-queue window. Arm it with the TauCeti repository variable
+GitHub merge-queue window. Arm that comparison with the TauCeti repository variable
 `MERGE_EXPERIMENT` containing:
 
 ```json
@@ -128,3 +128,30 @@ The controller leaves batching limits and CI timeouts as configured. Record
 those settings and runner sizes when arming a comparison. Compare completed
 windows using total recorded CI minutes, throughput, arrivals, backlog and
 coverage; a single pair of days cannot separate all workload changes.
+
+### Single bors window, leaving bors selected
+
+Deploy and verify the bors-only controller before arming this plan:
+
+```json
+{"schema":"tauceti-merge.experiment/v2","mode":"bors_only","id":"unique-bors-only-id","duration_hours":24,"created_at":"CURRENT-UTC-ISO-TIME","enabled":true}
+```
+
+Start with `MERGE_BACKEND=queue` and a fresh plan as above. The handoff drains
+outgoing active work before starting measurement. At the 24-hour boundary the
+controller records `bors_ended_at` and completes measurement; bors continues
+running. A delayed cron records the nominal 24-hour end and the actual
+completion time separately. Minute archives retain the completed measurement
+while subsequent bors activity remains outside its window.
+
+The v2 schema is rejected by the previous controller. Bors-only state is stored
+separately from the previous v1 state, so rolling back the Worker cannot cause
+the previous controller to interpret it as a two-day run and select queue.
+
+For this mode, disabling or editing the plan, expiring a handoff, and observing
+two fresh overlap samples end measurement without changing backend selection.
+Existing admission/drain guards continue to govern work. To request a return
+to GitHub, set `MERGE_BACKEND=queue` explicitly; this ends automation and
+preserves the operator's choice. After completion or abort, repeating a
+measurement requires queue selected and a fresh plan ID. The v1 behavior
+described above remains the two-day comparison's behavior.
