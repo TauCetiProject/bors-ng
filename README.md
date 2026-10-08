@@ -500,3 +500,17 @@ The incoming queue still waits for all outgoing active work to finish. No
 timeout or CI concurrency setting changes, no check is bypassed, and repeated
 heartbeats or service restarts cannot admit the same work to both queues. The
 experiment's measurement window begins after this shorter handoff completes.
+
+### Bors-only measurements
+
+The `MERGE_EXPERIMENT` plan supports `"mode": "bors_only"` for a single
+24-hour bors measurement. Use a fresh plan ID and creation time while
+`MERGE_BACKEND` is `queue`. The controller selects bors, waits for the outgoing
+GitHub queue to drain, then starts the 24-hour clock. It records completion and
+leaves bors selected. Subsequent ticks do not restart the completed plan.
+
+Aborting a bors-only measurement also preserves the selected backend; the
+existing live admission and drain guards continue to govern merges. A manual
+backend change ends measurement automation and preserves the operator's choice.
+Omitting `mode`, or setting it to `bors_then_queue`, runs the existing two-day
+comparison and finishes on GitHub's queue.

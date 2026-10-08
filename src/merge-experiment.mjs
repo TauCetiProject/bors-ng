@@ -9,6 +9,7 @@ function parsePlan(variable) {
   const plan = JSON.parse(variable.value);
   if (plan.enabled === false) return null;
   if (plan.schema !== "tauceti-merge.experiment/v1" || !/^[A-Za-z0-9_-]{1,80}$/.test(plan.id || "") ||
+      !["bors_then_queue", "bors_only"].includes(plan.mode ?? "bors_then_queue") ||
       plan.duration_hours !== 24 || !Number.isFinite(Date.parse(plan.created_at))) {
     throw new Error("Invalid experiment plan");
   }
@@ -56,7 +57,9 @@ export async function tickExperiment(storage, variables, now = Date.now()) {
   };
   const owned = () => state.expected?.value === backend.value && state.expected.updated_at === backend.updated_at;
   const abort = async reason => {
-    if (owned() && backend.value !== "queue") {
+    // A bors-only measurement does not own a return-to-queue transition, even
+    // when measurement aborts. Live drain/admission guards still govern work.
+    if (owned() && backend.value !== "queue" && state.plan.mode !== "bors_only") {
       state.abort_reason = reason;
       await save();
       await select("queue");
@@ -116,9 +119,13 @@ export async function tickExperiment(storage, variables, now = Date.now()) {
   if (state.phase === "draining_to_bors" && fresh && observation.github_count === 0) {
     state.phase = "bors"; state.bors_started_at = iso(now);
   } else if (state.phase === "bors" && now - Date.parse(state.bors_started_at) >= 24 * HOUR) {
-    state.phase = "draining_to_queue";
-    state.bors_ended_at = iso(now); state.queue_requested_at = iso(now);
-    await select("queue");
+    state.bors_ended_at = iso(now);
+    if (state.plan.mode === "bors_only") {
+      state.phase = "complete"; state.finished_at = iso(now);
+    } else {
+      state.phase = "draining_to_queue"; state.queue_requested_at = iso(now);
+      await select("queue");
+    }
   } else if (state.phase === "draining_to_queue" && fresh && observation.bors_count === 0) {
     state.phase = "queue"; state.queue_started_at = iso(now);
   } else if (state.phase === "queue" && now - Date.parse(state.queue_started_at) >= 24 * HOUR) {
