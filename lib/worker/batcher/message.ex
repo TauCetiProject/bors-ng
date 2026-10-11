@@ -45,6 +45,12 @@ defmodule BorsNG.Worker.Batcher.Message do
     "Synchronization error: the pull request's head commit changed after it was approved (most likely a new push), so the built batch no longer matches the current code and bors did not merge it. Re-run `bors r+` once the PR is ready."
   end
 
+  def generate_message({:race, :retrying, xrefs}) do
+    prs = Enum.map_join(xrefs, ", ", &"##{&1}")
+
+    "This PR was included in a batch that bors did not merge because the head of #{prs} changed after it was approved. It will be automatically retried."
+  end
+
   def generate_message({:preflight, :waiting}) do
     ":clock1: Waiting for PR status (GitHub check) to be set, probably by CI. Bors will automatically try to run when all required PR statuses are set."
   end

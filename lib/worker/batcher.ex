@@ -1587,30 +1587,54 @@ defmodule BorsNG.Worker.Batcher do
     {:conflict, nil}
   end
 
-  # At least one member's stored head no longer matches its live pull
-  # request: a push arrived whose synchronize webhook was never processed.
-  # Reconcile every member against GitHub — refresh the stale record and
-  # drop that member's held approval, the two effects the missed webhook
-  # would have had. Without the refresh, a fresh r+ preflights the stale
-  # commit and races again; with it, the next r+ (and the delegation
-  # merge-time gate) evaluates the real head. Members whose records are
-  # accurate are left untouched. The batch stays failed either way:
-  # nothing re-queues without a fresh r+.
+  # At least one member raced: its live head is not its stored commit (a push
+  # arrived whose synchronize webhook was never processed), or it was approved
+  # at an earlier head than the stored one. Staging stops at the first raced
+  # member and reports the whole batch, so every member is checked here.
+  #
+  # A raced member is reconciled against GitHub — its stale record refreshed
+  # and its held approval dropped, the two effects the missed webhook would
+  # have had — and fails with its bundle; nothing re-queues it without a fresh
+  # r+. Without the refresh, a fresh r+ preflights the stale commit and races
+  # again; with it, the next r+ (and the delegation merge-time gate) evaluates
+  # the real head. The other members were approved at the heads they still
+  # have, so they are re-queued in a new batch, as when a member is canceled
+  # out of a running batch, and staging checks their heads again. A member
+  # whose head cannot be read counts as raced, and when the check finds no
+  # raced member at all, the whole batch fails.
   defp start_waiting_merged_batch(batch, patch_links, _base, :race) do
     project = batch.project
     repo_conn = get_repo_conn(project)
-    patches = Enum.map(patch_links, & &1.patch)
     poll_after_delay(project)
 
-    Enum.each(patches, &reconcile_raced_patch(repo_conn, project, &1))
+    raced = Enum.filter(patch_links, &raced_link?(repo_conn, project, &1))
+    raced_ids = Enum.flat_map(raced, &Bundles.member_ids(patch_links, &1.patch_id))
 
-    send_message(repo_conn, patches, :race)
+    {raced_links, kept_links} =
+      case raced_ids do
+        [] -> {patch_links, []}
+        _ -> Enum.split_with(patch_links, &(&1.patch_id in raced_ids))
+      end
+
+    raced_patches = Enum.map(raced_links, & &1.patch)
+    send_message(repo_conn, raced_patches, :race)
+
+    if kept_links != [] do
+      Divider.clone_batch(kept_links, project.id, batch.into_branch)
+
+      send_message(
+        repo_conn,
+        Enum.map(kept_links, & &1.patch),
+        {:race, :retrying, Enum.map(raced, & &1.patch.pr_xref)}
+      )
+    end
+
     send_status(repo_conn, batch, :race)
 
     {:error, nil}
   end
 
-  defp reconcile_raced_patch(repo_conn, project, patch) do
+  defp raced_link?(repo_conn, project, %{patch: patch, head_sha: approved_head}) do
     case GitHub.get_pr(repo_conn, patch.pr_xref) do
       {:ok, %{head_sha: head_sha} = pr} when head_sha != patch.commit ->
         # A race means webhook delivery failed at least once. Recurring
@@ -1623,14 +1647,17 @@ defmodule BorsNG.Worker.Batcher do
 
         Bundles.drop_held_approval(patch.id)
         resync_raced_patch(project, patch, pr)
+        true
 
       {:ok, _} ->
-        :ok
+        approved_head != nil and approved_head != patch.commit
 
       error ->
         Logger.warning(
           "race: could not reconcile patch #{patch.id} (PR ##{patch.pr_xref}): #{inspect(error)}"
         )
+
+        true
     end
   end
 
