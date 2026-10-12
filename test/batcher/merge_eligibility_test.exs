@@ -407,10 +407,12 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
       :retry
     )
 
-    :sys.get_state(Batcher.Registry.get(p.id))
+    pid = Batcher.Registry.get(p.id)
+    :sys.get_state(pid)
     assert is_nil(Repo.get!(Patch, patch.id).manual_approval)
     assert get_in(GitHub.ServerMock.get_state(), [@conn, :pr_build_dispatches]) == [1]
     refute Repo.exists?(Batch.all_for_project(p.id, :incomplete))
+    :ok = DynamicSupervisor.terminate_child(Batcher.Supervisor, pid)
   end
 
   test "kim-em's command on a non-main base retains ordinary bors behavior", %{project: p} do
@@ -427,9 +429,11 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
       :activate
     )
 
-    :sys.get_state(Batcher.Registry.get(p.id))
+    pid = Batcher.Registry.get(p.id)
+    :sys.get_state(pid)
     assert is_nil(Repo.get!(Patch, patch.id).manual_approval)
     assert Repo.exists?(Batch.all_for_project(p.id, :incomplete))
+    :ok = DynamicSupervisor.terminate_child(Batcher.Supervisor, pid)
   end
 
   test "a dispatch failure preserves ordinary admission for a green in-scope PR", %{project: p} do
