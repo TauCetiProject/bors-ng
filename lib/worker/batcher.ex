@@ -182,6 +182,42 @@ defmodule BorsNG.Worker.Batcher do
     BorsNG.Worker.MergeEligibility.reconcile(Repo.get!(Project, project_id), pr)
   end
 
+  def do_handle_cast(
+        {:maintainer_reviewed, patch_id, head, actor_id, reviewer, created_at},
+        project_id
+      ) do
+    project = Repo.get!(Project, project_id)
+    patch = Repo.get!(Patch, patch_id)
+    conn = get_repo_conn(project)
+
+    if patch.project_id == project_id do
+      case BorsNG.Worker.ManualApproval.grant(conn, project, patch, actor_id, head, created_at) do
+        {:ok, approved} ->
+          send_message(
+            conn,
+            [approved],
+            {:manual_approved, head, approved.manual_approval["merge_base_sha"]}
+          )
+
+          # This is a request to reconsider policy, never a green scope status.
+          # The trusted workflow reads the approval back from bors and still runs all guards.
+          GitHub.reset_scope(conn, head)
+
+          if GitHub.dispatch_pr_build(conn, approved.pr_xref) != :ok,
+            do: send_message(conn, [approved], {:preflight, :manual_build_dispatch})
+
+          do_handle_cast({:reviewed, patch_id, reviewer}, project_id)
+
+        :waiting ->
+          send_message(conn, [patch], {:preflight, :manual_approval_unavailable})
+          do_handle_cast({:reviewed, patch_id, reviewer}, project_id)
+
+        _ ->
+          send_message(conn, [patch], {:preflight, :manual_approval_changed})
+      end
+    end
+  end
+
   def do_handle_cast({:reviewed, patch_id, reviewer}, _project_id) do
     case Repo.get(Patch.all(:awaiting_review), patch_id) do
       nil ->
@@ -247,10 +283,23 @@ defmodule BorsNG.Worker.Batcher do
     end
   end
 
+  def do_handle_cast({:cancel, patch_id, :review_unsafe}, project_id) do
+    patch = Repo.get!(Patch, patch_id)
+    project = Repo.get!(Project, patch.project_id)
+
+    if patch.manual_approval &&
+         BorsNG.Worker.ManualApproval.preflight(get_repo_conn(project), patch) in [:ok, :waiting] do
+      :ok
+    else
+      do_handle_cast({:cancel, patch_id, :automatic_review_rejected}, project_id)
+    end
+  end
+
   def do_handle_cast({:cancel, patch_id, reason}, _project_id) do
     # A bundled patch may hold an approval while its siblings await approval.
     # Canceling (r-, close, or new push) revokes it. Re-queueing the bundle
     # requires a fresh r+ on this member.
+    BorsNG.Worker.ManualApproval.revoke(patch_id)
     Bundles.drop_held_approval(patch_id)
     Process.delete({:approval_pending, patch_id})
 
@@ -266,6 +315,11 @@ defmodule BorsNG.Worker.Batcher do
   end
 
   def do_handle_cast({:cancel_all}, project_id) do
+    Repo.all(
+      from(p in Patch, where: p.project_id == ^project_id and not is_nil(p.manual_approval))
+    )
+    |> Enum.each(&BorsNG.Worker.ManualApproval.revoke(&1.id))
+
     waiting =
       project_id
       |> Batch.all_for_project(:waiting)
@@ -560,7 +614,8 @@ defmodule BorsNG.Worker.Batcher do
       batch_id: batch.id,
       patch_id: patch.id,
       reviewer: reviewer,
-      head_sha: patch.commit
+      head_sha: patch.commit,
+      manual_approval: patch.manual_approval
     })
     |> Repo.insert!()
 
@@ -856,7 +911,8 @@ defmodule BorsNG.Worker.Batcher do
             batch_id: batch.id,
             patch_id: p.id,
             reviewer: p.bundle_reviewer,
-            head_sha: p.commit
+            head_sha: p.commit,
+            manual_approval: p.manual_approval
           })
           |> Repo.insert!()
         end)
@@ -1298,8 +1354,13 @@ defmodule BorsNG.Worker.Batcher do
     repo_conn = get_repo_conn(batch.project)
     patches = Enum.map(patch_links, & &1.patch)
 
+    policy_ref =
+      if BorsNG.Worker.ManualApproval.scoped?(batch.project, batch.into_branch),
+        do: base.commit,
+        else: "#{batch.project.staging_branch}.tmp"
+
     repo_conn
-    |> Batcher.GetBorsToml.get("#{batch.project.staging_branch}.tmp")
+    |> Batcher.GetBorsToml.get(policy_ref)
     |> case do
       {:ok, toml} ->
         parents =
@@ -1474,6 +1535,10 @@ defmodule BorsNG.Worker.Batcher do
   end
 
   defp dispatch_staging(batch, repo_conn, head, base) do
+    # The public observation must bind an override to the actual staging base,
+    # rather than trusting caller-supplied dispatch metadata.
+    batch |> Batch.changeset(%{base_sha: base, commit: head, state: :running}) |> Repo.update!()
+
     if System.get_env("BORS_STAGE_DISPATCH_PROJECT") == batch.project.name do
       members =
         Repo.all(LinkPatchBatch.from_batch(batch.id))
@@ -1747,9 +1812,42 @@ defmodule BorsNG.Worker.Batcher do
 
   @spec complete_batch(Status.state(), Batch.t(), [Status.t()]) :: Batch.state()
   defp complete_batch(:ok, batch, statuses) do
-    case draft_patches(batch) do
-      [] -> push_completed_batch(batch, statuses)
-      drafts -> abort_draft_merge(batch, drafts)
+    conn = get_repo_conn(batch.project)
+    links = Repo.all(LinkPatchBatch.from_batch(batch.id))
+
+    # Approval must still exist for the exact diff when CI finishes, even if a
+    # retarget, force push or r- arrived after the scope status was posted.
+    manual = Enum.filter(links, &(&1.manual_approval != nil))
+
+    result =
+      Enum.reduce_while(manual, :ok, fn link, _ ->
+        patch = link.patch
+
+        verdict =
+          if patch.manual_approval == link.manual_approval and patch.commit == link.head_sha,
+            do: BorsNG.Worker.ManualApproval.preflight(conn, patch),
+            else: {:error, :manual_approval_changed}
+
+        case verdict do
+          :ok -> {:cont, :ok}
+          :waiting -> {:halt, :waiting}
+          {:error, _} -> {:halt, {:changed, patch.id}}
+        end
+      end)
+
+    case result do
+      :waiting ->
+        :running
+
+      {:changed, patch_id} ->
+        do_handle_cast({:cancel, patch_id, :eligibility_changed}, batch.project.id)
+        :canceled
+
+      :ok ->
+        case draft_patches(batch) do
+          [] -> push_completed_batch(batch, statuses)
+          drafts -> abort_draft_merge(batch, drafts)
+        end
     end
   end
 
@@ -2175,7 +2273,12 @@ defmodule BorsNG.Worker.Batcher do
   end
 
   defp patch_preflight(repo_conn, patch) do
-    case BorsNG.Worker.MergeEligibility.preflight(repo_conn, patch) do
+    result =
+      if patch.manual_approval,
+        do: BorsNG.Worker.ManualApproval.preflight(repo_conn, patch),
+        else: BorsNG.Worker.MergeEligibility.preflight(repo_conn, patch)
+
+    case result do
       :ok -> patch_preflight_policy(repo_conn, patch)
       other -> other
     end
@@ -2188,7 +2291,14 @@ defmodule BorsNG.Worker.Batcher do
       toml =
         Batcher.GetBorsToml.get(
           repo_conn,
-          patch.commit
+          if(
+            BorsNG.Worker.ManualApproval.scoped?(
+              Repo.get!(Project, patch.project_id),
+              patch.into_branch
+            ),
+            do: patch.into_branch,
+            else: patch.commit
+          )
         )
 
       patch_preflight(repo_conn, patch, toml)

@@ -104,6 +104,17 @@ defmodule BorsNG.Worker.MergeEligibility do
 
   defp apply_decision(project, conn, pr, patch, d) do
     cond do
+      patch.manual_approval != nil ->
+        # Automatic policy cannot retract this human decision. It remains bound
+        # to the live revision and diff; an observation failure never grants admission.
+        case BorsNG.Worker.ManualApproval.preflight(conn, patch) do
+          {:error, _} ->
+            Batcher.do_handle_cast({:cancel, patch.id, :eligibility_changed}, project.id)
+
+          _ ->
+            :ok
+        end
+
       d["review_safe"] == false ->
         # Repeat cancellation is safe and repairs a crash between recording and cancelling.
         patch |> Patch.changeset(%{merge_eligibility_id: d["id"]}) |> Repo.update!()

@@ -213,6 +213,15 @@ defmodule BorsNG.GitHub do
     )
   end
 
+  @doc "Request existing trusted PR CI after a maintainer approves its scope."
+  def dispatch_pr_build(repo_conn, pr) do
+    call_with_retry(:dispatch_pr_build, repo_conn, {pr})
+  end
+
+  def reset_scope(repo_conn, head) do
+    call_with_retry(:reset_scope, repo_conn, {head})
+  end
+
   @spec get_branch!(tconn, binary) :: %{commit: bitstring, tree: bitstring}
   def get_branch!(repo_conn, from) do
     {:ok, commit} = call_with_retry(:get_branch, repo_conn, {from}, 500, 4_000)

@@ -64,7 +64,10 @@ defmodule BorsNG.Command do
     pr_xref: nil,
     patch: nil,
     comment: "",
-    is_draft: nil
+    is_draft: nil,
+    approval_head: nil,
+    approval_created_at: nil,
+    automatic: false
   )
 
   @type t :: %BorsNG.Command{
@@ -1120,7 +1123,18 @@ defmodule BorsNG.Command do
 
   @spec run(t, cmd) :: :ok
   def run(c, :activate) do
-    run(c, {:activate_by, c.commenter.login})
+    if c.patch.into_branch == "main" and not is_nil(c.approval_created_at) and
+         BorsNG.Worker.ManualApproval.authorized?(c.project, c.commenter) do
+      batcher = Batcher.Registry.get(c.project.id)
+
+      GenServer.cast(
+        batcher,
+        {:maintainer_reviewed, c.patch.id, c.approval_head || c.patch.commit,
+         c.commenter.user_xref, c.commenter.login, c.approval_created_at}
+      )
+    else
+      run(c, {:activate_by, c.commenter.login})
+    end
   end
 
   def run(c, {:activate_by, username}) do
@@ -1141,7 +1155,7 @@ defmodule BorsNG.Command do
   def run(c, :deactivate) do
     c = fetch_patch(c)
     batcher = Batcher.Registry.get(c.project.id)
-    Batcher.cancel(batcher, c.patch.id)
+    Batcher.cancel(batcher, c.patch.id, if(c.automatic, do: :review_unsafe, else: :requested))
   end
 
   def run(c, {:link, pr_numbers}) do
@@ -1314,6 +1328,11 @@ defmodule BorsNG.Command do
 
   def run(c, :retry) do
     case Logging.most_recent_cmd(c.patch) do
+      {commenter, :activate} ->
+        # Retry can reuse ordinary review intent, never the original author's
+        # authority to approve restricted paths on a different revision.
+        run(c, {:activate_by, commenter.login})
+
       {commenter, cmd} ->
         run(%{c | commenter: commenter}, cmd)
 

@@ -32,6 +32,8 @@ defmodule BorsNG.Database.Patch do
     field(:retargeted_from, :string)
     field(:merge_eligibility_id, :integer)
     field(:merge_eligibility, :map)
+    field(:manual_approval, :map)
+    field(:manual_revision_at, :utc_datetime_usec)
     timestamps()
   end
 
@@ -60,7 +62,9 @@ defmodule BorsNG.Database.Patch do
       :head_ref,
       :retargeted_from,
       :merge_eligibility_id,
-      :merge_eligibility
+      :merge_eligibility,
+      :manual_approval,
+      :manual_revision_at
     ])
     |> unique_constraint(:pr_xref, name: :patches_pr_xref_index, match: :suffix)
   end

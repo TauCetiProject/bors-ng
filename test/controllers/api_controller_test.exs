@@ -121,4 +121,33 @@ defmodule BorsNG.ApiControllerTest do
     cloned = BorsNG.Worker.Batcher.Divider.clone_batch([link], project.id, "main")
     assert Repo.one!(BorsNG.Database.LinkPatchBatch.from_batch(cloned.id)).head_sha == "approved"
   end
+
+  test "observation exposes exact human approvals and staging bases, excluding stale heads", %{
+    conn: conn,
+    project1: p
+  } do
+    head = String.duplicate("a", 40)
+    base = String.duplicate("b", 40)
+    approval = %{"actor_id" => 477_956, "head_sha" => head, "merge_base_sha" => base}
+
+    patch =
+      Repo.insert!(%BorsNG.Database.Patch{
+        project_id: p.id,
+        pr_xref: 42,
+        into_branch: "main",
+        commit: head,
+        manual_approval: approval
+      })
+
+    batch =
+      Repo.insert!(%Batch{project_id: p.id, state: :running, into_branch: "main", base_sha: base})
+
+    path = "/repositories/#{p.id}/active-batches?base=main&batch_id=#{batch.id}"
+    response = conn |> get(path) |> json_response(200)
+    assert response["scope_approvals"] == [Map.put(approval, "pr", 42)]
+    assert response["requested_batch"]["base_sha"] == base
+    patch |> BorsNG.Database.Patch.changeset(%{commit: base}) |> Repo.update!()
+    response = conn |> recycle() |> get(path) |> json_response(200)
+    assert response["scope_approvals"] == []
+  end
 end
