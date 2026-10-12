@@ -16,6 +16,7 @@ defmodule BorsNG.Database.Batch do
     belongs_to(:project, Project)
     field(:into_branch, :string)
     field(:commit, :string)
+    field(:base_sha, :string)
     field(:state, BatchState)
     field(:last_polled, :integer)
     field(:timeout_at, :integer)
@@ -173,6 +174,7 @@ defmodule BorsNG.Database.Batch do
     struct
     |> cast(params, [
       :project_id,
+      :base_sha,
       :commit,
       :state,
       :last_polled,

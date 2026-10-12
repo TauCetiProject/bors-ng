@@ -346,6 +346,33 @@ defmodule BorsNG.GitHub.Server do
     _ -> {:error, :merge_base_unavailable}
   end
 
+  def do_handle_call(:reset_scope, conn, {head}) do
+    body =
+      Jason.encode!(%{
+        context: "scope",
+        state: "pending",
+        description: "Human scope approval changed; waiting for trusted CI"
+      })
+
+    case post!(conn, "statuses/#{head}", body) do
+      %{status: 201} -> :ok
+      _ -> {:error, :scope_reset_failed}
+    end
+  rescue
+    _ -> {:error, :scope_reset_failed}
+  end
+
+  def do_handle_call(:dispatch_pr_build, conn, {pr}) do
+    body = Jason.encode!(%{event_type: "tauceti-bors-pr-approved", client_payload: %{pr: pr}})
+
+    case post!(conn, "dispatches", body) do
+      %{status: 204} -> :ok
+      _ -> {:error, :pr_build_dispatch_failed}
+    end
+  rescue
+    _ -> {:error, :pr_build_dispatch_failed}
+  end
+
   def do_handle_call(:dispatch_reconcile, conn, {}) do
     case post!(conn, "dispatches", Jason.encode!(%{event_type: "tauceti-merge-reconcile"})) do
       %{status: 204} -> :ok

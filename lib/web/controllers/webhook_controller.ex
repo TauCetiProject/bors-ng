@@ -197,7 +197,8 @@ defmodule BorsNG.WebhookController do
                         comment: command,
                         pr_xref: pr_xref,
                         pr: pr,
-                        is_draft: pr.draft
+                        is_draft: pr.draft,
+                        automatic: true
                       }
                       |> Command.run()
 
@@ -222,7 +223,8 @@ defmodule BorsNG.WebhookController do
             commenter: commenter,
             comment: comment,
             pr_xref: pr_xref,
-            is_draft: conn.body_params["issue"]["draft"]
+            is_draft: conn.body_params["issue"]["draft"],
+            approval_created_at: conn.body_params["comment"]["created_at"]
           }
           |> Command.run()
 
@@ -271,7 +273,9 @@ defmodule BorsNG.WebhookController do
         comment: comment,
         pr_xref: conn.body_params["pull_request"]["number"],
         pr: pr,
-        patch: Syncer.sync_patch(project.id, pr)
+        patch: Syncer.sync_patch(project.id, pr),
+        approval_head: conn.body_params["comment"]["commit_id"],
+        approval_created_at: conn.body_params["comment"]["created_at"]
       }
       |> Command.run()
     end
@@ -301,7 +305,9 @@ defmodule BorsNG.WebhookController do
         comment: comment,
         pr_xref: conn.body_params["pull_request"]["number"],
         pr: pr,
-        patch: Syncer.sync_patch(project.id, pr)
+        patch: Syncer.sync_patch(project.id, pr),
+        approval_head: conn.body_params["review"]["commit_id"],
+        approval_created_at: conn.body_params["review"]["submitted_at"]
       }
       |> Command.run()
     end

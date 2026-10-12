@@ -65,6 +65,22 @@ defmodule BorsNG.Worker.Batcher.Message do
     ":-1: Rejected by label"
   end
 
+  def generate_message({:manual_approved, head, base}) do
+    "Human approval recorded for head `#{head}` against merge base `#{base}`. Requesting trusted CI; restricted paths are approved, and all other checks remain required."
+  end
+
+  def generate_message({:preflight, :manual_approval_unavailable}) do
+    "Could not verify human scope approval. Ordinary merge checks still apply; run `bors r+` or `bors merge` again to retry approval."
+  end
+
+  def generate_message({:preflight, :manual_approval_changed}) do
+    "The PR revision or reviewed merge base changed, or could not be verified. Review the current diff and run `bors r+` or `bors merge` again."
+  end
+
+  def generate_message({:preflight, :manual_build_dispatch}) do
+    "Human approval was recorded, but bors could not request trusted CI. Run `bors r+` or `bors merge` again to retry."
+  end
+
   def generate_message({:preflight, :pr_status}) do
     ":-1: Rejected by PR status"
   end

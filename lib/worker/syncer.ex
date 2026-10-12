@@ -164,7 +164,8 @@ defmodule BorsNG.Worker.Syncer do
       author_id: author.id,
       open: pr.state == :open,
       author: author,
-      is_draft: pr.draft
+      is_draft: pr.draft,
+      manual_revision_at: DateTime.utc_now()
     }
 
     data =
@@ -205,6 +206,18 @@ defmodule BorsNG.Worker.Syncer do
   # bundle's base-restore bookkeeping (retargeted_from). A later unlink will
   # leave the person's base as they set it.
   defp forget_stale_retarget(data, %Patch{} = patch, pr) do
+    # Changes unrelated to the revision must not make a fresh command look stale.
+    data =
+      if patch.commit == pr.head_sha and patch.into_branch == pr.base_ref,
+        do: Map.delete(data, :manual_revision_at),
+        else: data
+
+    data =
+      if patch.commit != pr.head_sha or patch.into_branch != pr.base_ref or pr.draft or
+           pr.state != :open,
+         do: Map.put(data, :manual_approval, nil),
+         else: data
+
     if patch.into_branch != pr.base_ref do
       Map.put(data, :retargeted_from, nil)
     else

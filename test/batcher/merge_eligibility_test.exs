@@ -1,8 +1,8 @@
 defmodule BorsNG.Worker.MergeEligibilityTest do
   use BorsNG.Worker.TestCase
-  alias BorsNG.Database.{Batch, Installation, LinkPatchBatch, Patch, Project, Repo}
+  alias BorsNG.Database.{Batch, Installation, LinkPatchBatch, Patch, Project, Repo, User, Status}
   alias BorsNG.GitHub
-  alias BorsNG.Worker.{Batcher, MergeEligibility}
+  alias BorsNG.Worker.{Batcher, MergeEligibility, ManualApproval, Syncer}
 
   @head String.duplicate("a", 40)
   @base String.duplicate("b", 40)
@@ -231,5 +231,225 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
     assert {:error, :review_unsafe} = MergeEligibility.preflight(@conn, patch)
     update_repo(:eligibility_checks, %{@head => {:error, :unavailable}})
     assert :waiting = MergeEligibility.preflight(@conn, patch)
+  end
+
+  defp manual_review(project) do
+    patch =
+      Syncer.sync_patch(project.id, get_in(GitHub.ServerMock.get_state(), [@conn, :pulls, 1]))
+
+    Batcher.do_handle_cast(
+      {:maintainer_reviewed, patch.id, @head, 477_956, "kim-em", DateTime.utc_now()},
+      project.id
+    )
+
+    Repo.get!(Patch, patch.id)
+  end
+
+  defp scope_ci() do
+    toml =
+      "status = [\"build\", \"scope\", \"bump-guard\"]\npr_status = [\"build\", \"scope\", \"bump-guard\"]\n"
+
+    update_repo(:files, %{@head => %{"bors.toml" => toml}, "main" => %{"bors.toml" => toml}})
+    update_repo(:statuses, %{@head => %{"build" => :ok, "bump-guard" => :ok, "scope" => :error}})
+  end
+
+  test "scope authority follows the actual GitHub user ID, not a claimed reviewer name", %{
+    project: p
+  } do
+    assert ManualApproval.authorized?(p, %User{user_xref: 477_956, login: "renamed"})
+    refute ManualApproval.authorized?(p, %User{user_xref: 1, login: "kim-em"})
+    refute ManualApproval.authorized?(%{p | name: "fork/TauCeti"}, %User{user_xref: 477_956})
+    patch = Syncer.sync_patch(p.id, get_in(GitHub.ServerMock.get_state(), [@conn, :pulls, 1]))
+    assert {:error, _} = ManualApproval.grant(@conn, p, patch, 1, @head)
+    assert {:error, _} = ManualApproval.grant(@conn, p, patch, 477_956, @base)
+    assert is_nil(Repo.get!(Patch, patch.id).manual_approval)
+  end
+
+  test "human approval requests CI and waits for real scope success", %{project: p} do
+    scope_ci()
+    patch = manual_review(p)
+    assert ManualApproval.valid?(patch)
+    assert patch.manual_approval["merge_base_sha"] == @base
+    assert patch.bundle_reviewer == "kim-em"
+    assert get_in(GitHub.ServerMock.get_state(), [@conn, :pr_build_dispatches]) == [1]
+    refute Repo.exists?(Batch.all_for_project(p.id, :incomplete))
+    update_repo(:statuses, %{@head => %{"build" => :ok, "bump-guard" => :ok, "scope" => :ok}})
+    Batcher.do_handle_cast({:reviewed, patch.id, "kim-em"}, p.id)
+    batch = Repo.one!(Batch.all_for_project(p.id, :incomplete))
+    link = Repo.one!(LinkPatchBatch.from_batch(batch.id))
+    assert link.manual_approval == patch.manual_approval
+    clone = Batcher.Divider.clone_batch([link], p.id, "main")
+    assert Repo.one!(LinkPatchBatch.from_batch(clone.id)).manual_approval == patch.manual_approval
+  end
+
+  test "manual approval supersedes an automatic verdict but never a failed build", %{project: p} do
+    # Start with an automatic approval, then replace it with the human decision.
+    MergeEligibility.reconcile(p, 1)
+    patch = manual_review(p)
+    assert is_nil(patch.merge_eligibility)
+    batch = Repo.one!(Batch.all_for_project(p.id, :incomplete))
+    assert Repo.one!(LinkPatchBatch.from_batch(batch.id)).manual_approval == patch.manual_approval
+
+    update_repo(:eligibility_checks, %{
+      @head => {:ok, [check(11, %{"eligible" => false, "review_safe" => false})]}
+    })
+
+    MergeEligibility.reconcile(p, 1)
+    assert Repo.exists?(Batch.all_for_project(p.id, :incomplete))
+    Batcher.do_handle_cast({:cancel, patch.id, :requested}, p.id)
+    assert is_nil(Repo.get!(Patch, patch.id).manual_approval)
+    assert get_in(GitHub.ServerMock.get_state(), [@conn, :statuses, @head, "scope"]) == :running
+    scope_ci()
+
+    update_repo(:statuses, %{
+      @head => %{"build" => :error, "bump-guard" => :ok, "scope" => :error}
+    })
+
+    manual_review(p)
+    refute Repo.exists?(Batch.all_for_project(p.id, :incomplete))
+  end
+
+  test "changed merge base cancels a manual approval even under the same head", %{project: p} do
+    patch = manual_review(p)
+    assert Repo.exists?(Batch.all_for_project(p.id, :incomplete))
+    update_repo(:merge_bases, %{{1, @head} => {:ok, String.duplicate("c", 40)}})
+    assert {:error, :manual_approval_changed} = ManualApproval.preflight(@conn, patch)
+    MergeEligibility.reconcile(p, 1)
+    refute Repo.exists?(Batch.all_for_project(p.id, :incomplete))
+    assert is_nil(Repo.get!(Patch, patch.id).manual_approval)
+  end
+
+  test "push, retarget, draft, and close invalidate stored human approval", %{project: p} do
+    for changes <- [%{head_sha: @base}, %{base_ref: "pilot"}, %{draft: true}, %{state: :closed}] do
+      pr = get_in(GitHub.ServerMock.get_state(), [@conn, :pulls, 1])
+      patch = Syncer.sync_patch(p.id, pr)
+      assert {:ok, _} = ManualApproval.grant(@conn, p, patch, 477_956, @head)
+      synced = Syncer.sync_patch(p.id, struct(pr, changes))
+      assert is_nil(synced.manual_approval)
+      Syncer.sync_patch(p.id, pr)
+    end
+  end
+
+  test "failed observations cannot grant human approval or admit stale diffs", %{project: p} do
+    patch = Syncer.sync_patch(p.id, get_in(GitHub.ServerMock.get_state(), [@conn, :pulls, 1]))
+    update_repo(:merge_bases, %{{1, @head} => {:error, :unavailable}})
+    assert :waiting = ManualApproval.grant(@conn, p, patch, 477_956, @head)
+    assert is_nil(Repo.get!(Patch, patch.id).manual_approval)
+    update_repo(:merge_bases, %{{1, @head} => {:ok, @base}})
+    assert {:ok, patch} = ManualApproval.grant(@conn, p, patch, 477_956, @head)
+    update_repo(:merge_bases, %{{1, @head} => {:error, :unavailable}})
+    assert :waiting = ManualApproval.preflight(@conn, patch)
+  end
+
+  test "the final push rechecks human approval after a green staging result", %{project: p} do
+    patch = manual_review(p)
+    batch = Repo.one!(Batch.all_for_project(p.id, :incomplete))
+    staged = String.duplicate("d", 40)
+    batch |> Batch.changeset(%{state: :running, commit: staged}) |> Repo.update!()
+    Repo.insert!(%Status{batch_id: batch.id, identifier: "build", state: :running})
+    update_repo(:merge_bases, %{{1, @head} => {:ok, @base}})
+    # A failed live read holds the built batch instead of pushing it.
+    update_repo(:merge_bases, %{{1, @head} => {:error, :unavailable}})
+    Batcher.do_handle_cast({:status, {staged, "build", :ok, "https://ci"}}, p.id)
+    assert Repo.get!(Batch, batch.id).state == :running
+    update_repo(:merge_bases, %{{1, @head} => {:ok, String.duplicate("c", 40)}})
+    Batcher.do_handle_cast({:status, {staged, "build", :ok, "https://ci"}}, p.id)
+    assert Repo.get!(Batch, batch.id).state == :canceled
+    assert is_nil(Repo.get!(Patch, patch.id).manual_approval)
+  end
+
+  test "delayed comments cannot approve a revision observed after they were written", %{
+    project: p
+  } do
+    patch = Syncer.sync_patch(p.id, get_in(GitHub.ServerMock.get_state(), [@conn, :pulls, 1]))
+    old = DateTime.add(patch.manual_revision_at, -60, :second) |> DateTime.to_iso8601()
+
+    assert {:error, :manual_approval_changed} =
+             ManualApproval.grant(@conn, p, patch, 477_956, @head, old)
+
+    assert {:error, :manual_approval_changed} =
+             ManualApproval.grant(@conn, p, patch, 477_956, @head, nil)
+  end
+
+  test "legacy automatic cancellation preserves human approval", %{project: p} do
+    patch = manual_review(p)
+    Batcher.do_handle_cast({:cancel, patch.id, :review_unsafe}, p.id)
+    assert ManualApproval.valid?(Repo.get!(Patch, patch.id))
+    Batcher.do_handle_cast({:cancel, patch.id, :requested}, p.id)
+    refute ManualApproval.valid?(Repo.get!(Patch, patch.id))
+  end
+
+  test "a retry by another member cannot extend kim-em's scope authority after a push", %{
+    project: p
+  } do
+    scope_ci()
+    patch = manual_review(p)
+    kim = Repo.insert!(%User{user_xref: 477_956, login: "kim-em"})
+    BorsNG.Database.Context.Logging.log_cmd(patch, kim, :activate)
+    state = GitHub.ServerMock.get_state()
+    pr = get_in(state, [@conn, :pulls, 1])
+    newer = %{pr | head_sha: @base}
+    update_repo(:pulls, %{1 => newer})
+    toml = get_in(state, [@conn, :files, "main", "bors.toml"])
+    update_repo(:files, %{@base => %{"bors.toml" => toml}, "main" => %{"bors.toml" => toml}})
+    update_repo(:statuses, %{@base => %{"build" => :ok, "bump-guard" => :ok, "scope" => :error}})
+    update_repo(:merge_bases, %{{1, @base} => {:ok, @head}})
+    patch = Syncer.sync_patch(p.id, newer)
+    caller = %User{user_xref: 6, login: "author"}
+
+    BorsNG.Command.run(
+      %BorsNG.Command{
+        project: p,
+        patch: patch,
+        commenter: caller,
+        approval_created_at: DateTime.to_iso8601(DateTime.utc_now())
+      },
+      :retry
+    )
+
+    :sys.get_state(Batcher.Registry.get(p.id))
+    assert is_nil(Repo.get!(Patch, patch.id).manual_approval)
+    assert get_in(GitHub.ServerMock.get_state(), [@conn, :pr_build_dispatches]) == [1]
+    refute Repo.exists?(Batch.all_for_project(p.id, :incomplete))
+  end
+
+  test "kim-em's command on a non-main base retains ordinary bors behavior", %{project: p} do
+    pr = get_in(GitHub.ServerMock.get_state(), [@conn, :pulls, 1])
+    update_repo(:pulls, %{1 => %{pr | base_ref: "pilot"}})
+    patch = Syncer.sync_patch(p.id, %{pr | base_ref: "pilot"})
+
+    BorsNG.Command.run(
+      %BorsNG.Command{
+        project: p,
+        patch: patch,
+        commenter: %User{user_xref: 477_956, login: "kim-em"}
+      },
+      :activate
+    )
+
+    :sys.get_state(Batcher.Registry.get(p.id))
+    assert is_nil(Repo.get!(Patch, patch.id).manual_approval)
+    assert Repo.exists?(Batch.all_for_project(p.id, :incomplete))
+  end
+
+  test "a dispatch failure preserves ordinary admission for a green in-scope PR", %{project: p} do
+    update_repo(:pr_build_dispatch_error, {:error, :unavailable})
+    patch = manual_review(p)
+    assert ManualApproval.valid?(patch)
+    assert Repo.exists?(Batch.all_for_project(p.id, :incomplete))
+  end
+
+  test "candidate bors.toml cannot remove main's scope and build requirements", %{project: p} do
+    scope_ci()
+    state = GitHub.ServerMock.get_state()
+
+    files =
+      get_in(state, [@conn, :files])
+      |> Map.put(@head, %{"bors.toml" => "status = []\npr_status = []\n"})
+
+    update_repo(:files, files)
+    patch = Syncer.sync_patch(p.id, get_in(state, [@conn, :pulls, 1]))
+    Batcher.do_handle_cast({:reviewed, patch.id, "reviewer"}, p.id)
+    refute Repo.exists?(Batch.all_for_project(p.id, :incomplete))
   end
 end

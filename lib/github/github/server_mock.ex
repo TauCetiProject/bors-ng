@@ -210,6 +210,37 @@ defmodule BorsNG.GitHub.ServerMock do
     {get_in(state, [conn, :merge_bases, {pr, head}]) || {:error, :unavailable}, state}
   end
 
+  def do_handle_call(:reset_scope, conn, {head}, state) do
+    repo = Map.fetch!(state, conn)
+
+    statuses =
+      Map.update(
+        Map.get(repo, :statuses, %{}),
+        head,
+        %{"scope" => :running},
+        &Map.put(&1, "scope", :running)
+      )
+
+    {:ok, Map.put(state, conn, Map.put(repo, :statuses, statuses))}
+  end
+
+  def do_handle_call(:dispatch_pr_build, conn, {pr}, state) do
+    repo = Map.fetch!(state, conn)
+
+    case Map.get(repo, :pr_build_dispatch_error) do
+      nil ->
+        {:ok,
+         Map.put(
+           state,
+           conn,
+           Map.put(repo, :pr_build_dispatches, [pr | Map.get(repo, :pr_build_dispatches, [])])
+         )}
+
+      error ->
+        {error, state}
+    end
+  end
+
   def do_handle_call(:dispatch_reconcile, conn, {}, state) do
     {:ok, put_in(state, [conn, :reconcile_dispatched], true)}
   end

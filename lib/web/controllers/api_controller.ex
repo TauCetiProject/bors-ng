@@ -78,6 +78,15 @@ defmodule BorsNG.ApiController do
 
         held = Repo.all(held_query) |> Enum.map(&%{pr: &1.pr_xref, head_sha: &1.commit})
 
+        approvals =
+          Repo.all(
+            from(p in BorsNG.Database.Patch,
+              where: p.project_id == ^project.id and not is_nil(p.manual_approval)
+            )
+          )
+          |> Enum.filter(&BorsNG.Worker.ManualApproval.valid?/1)
+          |> Enum.map(&Map.put(&1.manual_approval, "pr", &1.pr_xref))
+
         details = Enum.map(active, &batch_detail/1)
 
         requested =
@@ -105,6 +114,7 @@ defmodule BorsNG.ApiController do
           batches: details,
           held: held,
           outcomes: outcomes,
+          scope_approvals: approvals,
           requested_batch: requested,
           handoff:
             if(project.name == "TauCetiProject/TauCeti",
@@ -125,6 +135,7 @@ defmodule BorsNG.ApiController do
       base: batch.into_branch,
       state: batch.state,
       head_sha: batch.commit,
+      base_sha: batch.base_sha,
       members: members
     }
   end
