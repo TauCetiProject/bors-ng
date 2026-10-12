@@ -1,4 +1,5 @@
 defmodule BorsNG.Worker.Batcher.Divider do
+  import Ecto.Query
   alias BorsNG.Database.Repo
   alias BorsNG.Database.Batch
   alias BorsNG.Database.Patch
@@ -92,20 +93,72 @@ defmodule BorsNG.Worker.Batcher.Divider do
   defp single_bundle_unit?(_), do: false
 
   def clone_batch(patch_links, project_id, into_branch) do
-    batch = Repo.insert!(Batch.new(project_id, into_branch))
+    # Running batches have a sentinel priority of 100. Preserve the members'
+    # requested priority, rather than copying that sentinel or resetting to zero.
+    priority = patch_links |> Enum.map(&link_patch(&1).priority) |> Enum.max(fn -> 0 end)
 
-    patch_links
-    |> Enum.map(
-      &%{
-        batch_id: batch.id,
-        patch_id: &1.patch_id,
-        reviewer: &1.reviewer,
-        head_sha: &1.head_sha,
-        manual_approval: &1.manual_approval
-      }
-    )
-    |> Enum.map(&LinkPatchBatch.changeset(%LinkPatchBatch{}, &1))
-    |> Enum.each(&Repo.insert!/1)
+    {:ok, batch} =
+      Repo.transaction(fn ->
+        source_ids =
+          patch_links
+          |> Enum.map(&Map.get(&1, :batch_id))
+          |> Enum.reject(&is_nil/1)
+          |> Enum.uniq()
+
+        # Serialize retry creation and recognize a child already committed
+        # before a crash interrupted the parent's status/notification update.
+        Repo.all(from(b in Batch, where: b.id in ^source_ids, order_by: b.id, lock: "FOR UPDATE"))
+
+        existing =
+          Repo.all(
+            from(l in LinkPatchBatch,
+              join: b in Batch,
+              on: b.id == l.batch_id,
+              where:
+                b.project_id == ^project_id and b.id not in ^source_ids and
+                  b.state in [:waiting, :running] and
+                  l.patch_id in ^Enum.map(patch_links, & &1.patch_id),
+              select: {l.patch_id, l.head_sha, b.id}
+            )
+          )
+
+        represented = MapSet.new(existing, fn {id, head, _} -> {id, head} end)
+
+        remaining =
+          patch_links
+          |> group_units()
+          |> Enum.flat_map(fn unit ->
+            {present, missing} =
+              Enum.split_with(unit, &MapSet.member?(represented, {&1.patch_id, &1.head_sha}))
+
+            if present != [] and missing != [], do: Repo.rollback(:partial_bundle_membership)
+            missing
+          end)
+
+        if remaining == [] do
+          case existing do
+            [{_, _, id} | _] -> Repo.get!(Batch, id)
+            [] -> nil
+          end
+        else
+          batch = Repo.insert!(Batch.new(project_id, into_branch, priority))
+
+          remaining
+          |> Enum.map(
+            &%{
+              batch_id: batch.id,
+              patch_id: &1.patch_id,
+              reviewer: &1.reviewer,
+              head_sha: &1.head_sha,
+              manual_approval: &1.manual_approval
+            }
+          )
+          |> Enum.map(&LinkPatchBatch.changeset(%LinkPatchBatch{}, &1))
+          |> Enum.each(&Repo.insert!/1)
+
+          batch
+        end
+      end)
 
     batch
   end

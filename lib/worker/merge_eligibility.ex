@@ -4,7 +4,7 @@ defmodule BorsNG.Worker.MergeEligibility do
   require Logger
   alias BorsNG.Database.{Batch, LinkPatchBatch, Patch, Project, Repo}
   alias BorsNG.GitHub
-  alias BorsNG.Worker.{Batcher, Syncer}
+  alias BorsNG.Worker.{Batcher, QueueApproval, Syncer}
 
   @name "merge eligibility"
   @repo "TauCetiProject/TauCeti"
@@ -123,6 +123,9 @@ defmodule BorsNG.Worker.MergeEligibility do
       not d["eligible"] or pr.state != :open or pr.base_ref != "main" or pr.draft ->
         :ok
 
+      QueueApproval.blocked?(patch) ->
+        :ok
+
       patch.merge_eligibility_id == d["id"] ->
         :ok
 
@@ -141,6 +144,12 @@ defmodule BorsNG.Worker.MergeEligibility do
             |> Patch.changeset(%{
               merge_eligibility_id: d["id"],
               merge_eligibility: d,
+              queue_pending: true,
+              queue_approval: %{
+                "head_sha" => patch.commit,
+                "reviewer" => @reviewer,
+                "state" => "approved"
+              },
               is_single: d["single"],
               bundle_reviewer: @reviewer
             })

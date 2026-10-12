@@ -185,7 +185,7 @@ defmodule BorsNG.Worker.Batcher.Message do
         {:push_failed_unknown_failure, target_branch, status_code, raw_error_content}
       ) do
     """
-    This PR was included in a batch that successfully built, but then failed to merge into #{target_branch}. It will not be retried.
+    This PR was included in a batch that successfully built, but then failed to merge into #{target_branch}. Bors retains the tested staging commit and will retry the merge; no new build is needed unless the base changes.
 
     Additional information:
 

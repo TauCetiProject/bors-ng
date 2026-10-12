@@ -213,16 +213,8 @@ defmodule BorsNG.Worker.Batcher.Registry do
         :ok
     end
 
-    project_id
-    |> Batch.all_for_project(:waiting)
-    |> Repo.all()
-    |> Enum.each(&Repo.delete!/1)
-
-    project_id
-    |> Batch.all_for_project(:running)
-    |> Repo.all()
-    |> Enum.map(&Batch.changeset(&1, %{state: :canceled}))
-    |> Enum.each(&Repo.update!/1)
+    # Batches and CI status rows are durable restart state. A process crash is
+    # neither a withdrawal nor a failed proof; the next batcher resumes them.
 
     Repo.insert(%Crash{
       project_id: project_id,
@@ -256,14 +248,16 @@ defmodule BorsNG.Worker.Batcher.Registry do
       |> Batch.all_for_project(:waiting)
       |> Repo.all()
 
-    waiting_messages = pr_messages(waiting, "Waiting", "deleted", project.name, project_pr_url)
+    waiting_messages =
+      pr_messages(waiting, "Waiting", "retained for recovery", project.name, project_pr_url)
 
     running =
       project_id
       |> Batch.all_for_project(:running)
       |> Repo.all()
 
-    running_messages = pr_messages(running, "Running", "canceled", project.name, project_pr_url)
+    running_messages =
+      pr_messages(running, "Running", "retained for recovery", project.name, project_pr_url)
 
     List.flatten([header, waiting_messages, running_messages])
   end

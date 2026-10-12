@@ -13,7 +13,16 @@ defmodule BorsNG.Worker.MergeReconciler do
 
   def init(_) do
     :persistent_term.put({__MODULE__, :observation}, nil)
-    {:ok, %{last_dispatch: nil, observation: nil}}
+
+    {:ok,
+     %{
+       last_dispatch: nil,
+       observation: nil,
+       candidate_cursor: nil,
+       candidate_scan: %{},
+       candidate_snapshot: [],
+       candidate_completed_at: nil
+     }}
   end
 
   def handle_call(:tick, _, state) do
@@ -34,6 +43,7 @@ defmodule BorsNG.Worker.MergeReconciler do
   end
 
   defp observe(project, state) do
+    send(Batcher.Registry.get(project.id), :recover_queue)
     conn = Project.installation_connection(project.repo_xref, Repo)
     deadline = System.monotonic_time(:millisecond) + 40_000
 
@@ -41,7 +51,7 @@ defmodule BorsNG.Worker.MergeReconciler do
            bounded_read(deadline, 15_000, &GitHub.merge_backend_snapshot(conn, &1)),
          released <- BorsNG.Worker.QueueHandoff.trim(conn, before_handoff, deadline),
          {:ok, snapshot} <- handoff_snapshot(conn, before_handoff, deadline),
-         {:ok, candidates} <- bounded_read(deadline, 30_000, &GitHub.merge_candidates(conn, &1)) do
+         {:ok, candidates, state} <- candidate_page(conn, state, deadline) do
       batches =
         Repo.all(
           from(b in Batch.all_for_project(project.id, :incomplete),
@@ -51,14 +61,19 @@ defmodule BorsNG.Worker.MergeReconciler do
 
       # Bound recovery reads; webhooks handle changes immediately. Rotate across
       # all open candidates so an absent/stale ready label cannot strand a check.
-      if candidates != [] do
-        ordered = Enum.sort_by(candidates, & &1.pr)
-        offset = rem(div(System.system_time(:second), 60) * 8, length(ordered))
-
-        (Enum.drop(ordered, offset) ++ Enum.take(ordered, offset))
-        |> Enum.take(8)
-        |> Enum.each(&Batcher.eligibility(Batcher.Registry.get(project.id), &1.pr))
-      end
+      state =
+        if candidates != [] do
+          ordered = Enum.sort_by(candidates, & &1.pr)
+          cursor = Map.get(state, :eligibility_cursor, 0)
+          {older, newer} = Enum.split_while(ordered, &(&1.pr <= cursor))
+          selected = Enum.take(newer ++ older, 4)
+          Enum.each(selected, &Batcher.eligibility(Batcher.Registry.get(project.id), &1.pr))
+          # The cursor advances only when work is actually offered, so missed
+          # cron ticks do not systematically skip part of the candidate set.
+          Map.put(state, :eligibility_cursor, List.last(selected).pr)
+        else
+          state
+        end
 
       ready = Enum.filter(candidates, & &1.ready)
 
@@ -77,17 +92,28 @@ defmodule BorsNG.Worker.MergeReconciler do
         )
         |> MapSet.new()
 
+      latest =
+        from(l in BorsNG.Database.LinkPatchBatch,
+          join: p in Patch,
+          on: p.id == l.patch_id,
+          where:
+            p.project_id == ^project.id and p.open and not p.queue_pending and
+              l.head_sha == p.commit,
+          group_by: [p.id, l.head_sha],
+          select: %{patch_id: p.id, head_sha: l.head_sha, batch_id: max(l.batch_id)}
+        )
+
       outcomes =
         Repo.all(
-          from(l in BorsNG.Database.LinkPatchBatch,
-            join: p in assoc(l, :patch),
-            join: b in assoc(l, :batch),
-            where: b.project_id == ^project.id and b.into_branch == "main" and p.open,
-            order_by: [desc: b.id],
+          from(l in subquery(latest),
+            join: p in Patch,
+            on: p.id == l.patch_id,
+            join: b in Batch,
+            on: b.id == l.batch_id,
+            where: b.into_branch == "main",
             select: {p.pr_xref, l.head_sha, b.state}
           )
         )
-        |> Enum.uniq_by(fn {pr, head, _} -> {pr, head} end)
 
       terminal =
         outcomes
@@ -124,6 +150,8 @@ defmodule BorsNG.Worker.MergeReconciler do
           bors_count: length(batches),
           released_github_prs: Enum.map(released, & &1.pr),
           eligible: ready,
+          candidate_snapshot_at: state.candidate_completed_at,
+          candidate_scan_complete: is_nil(state.candidate_cursor),
           pending: length(pending),
           overlap: snapshot.github_count > 0 and batches != [],
           reason: if(other_count == 0, do: "drained", else: "outgoing_not_drained")
@@ -169,6 +197,7 @@ defmodule BorsNG.Worker.MergeReconciler do
         state
       end
     else
+      {:candidate_error, next} -> %{next | observation: nil}
       _ -> %{state | observation: nil}
     end
   end
@@ -181,5 +210,50 @@ defmodule BorsNG.Worker.MergeReconciler do
   defp bounded_read(deadline, cap, read) do
     remaining = deadline - System.monotonic_time(:millisecond)
     if remaining > 0, do: read.(min(cap, remaining)), else: {:error, :heartbeat_deadline}
+  end
+
+  # One GraphQL page per heartbeat. Preserve the last complete observation
+  # while refreshing it incrementally and expose its age and scan coverage.
+  defp candidate_page(conn, state, deadline) do
+    with {:ok, page} <-
+           bounded_read(
+             deadline,
+             15_000,
+             &GitHub.merge_candidates_page(conn, Map.get(state, :candidate_cursor), &1)
+           ) do
+      scan = if is_nil(Map.get(state, :candidate_cursor)), do: %{}, else: state.candidate_scan
+      scan = Enum.reduce(page.candidates, scan, &Map.put(&2, &1.pr, &1))
+
+      if is_nil(page.next_cursor) do
+        candidates = scan |> Map.values() |> Enum.sort_by(& &1.pr)
+
+        next =
+          Map.merge(state, %{
+            candidate_cursor: nil,
+            candidate_scan: %{},
+            candidate_snapshot: candidates,
+            candidate_completed_at: DateTime.to_iso8601(DateTime.utc_now())
+          })
+
+        {:ok, candidates, next}
+      else
+        next =
+          Map.merge(state, %{
+            candidate_cursor: page.next_cursor,
+            candidate_scan: scan,
+            candidate_completed_at: Map.get(state, :candidate_completed_at)
+          })
+
+        candidates =
+          case Map.get(state, :candidate_completed_at) do
+            nil -> Map.values(scan)
+            _ -> state.candidate_snapshot
+          end
+
+        {:ok, candidates, next}
+      end
+    else
+      _ -> {:candidate_error, Map.merge(state, %{candidate_cursor: nil, candidate_scan: %{}})}
+    end
   end
 end

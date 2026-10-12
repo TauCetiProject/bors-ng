@@ -86,6 +86,43 @@ defmodule BorsNG.Worker.RegistryRestartTest do
     assert Repo.get(Batch, batch.id) != nil
   end
 
+  test "a process crash retains waiting and running batches and their status rows" do
+    proj = project!()
+    waiting = Repo.insert!(%Batch{project_id: proj.id, into_branch: "master", state: :waiting})
+
+    running =
+      Repo.insert!(%Batch{
+        project_id: proj.id,
+        into_branch: "master",
+        state: :running,
+        commit: "tested",
+        timeout_at: 12345
+      })
+
+    status =
+      Repo.insert!(%BorsNG.Database.Status{
+        batch_id: running.id,
+        identifier: "ci",
+        state: :running
+      })
+
+    ref = make_ref()
+
+    assert {:noreply, {names, refs}} =
+             BorsNG.Worker.Batcher.Registry.handle_info(
+               {:DOWN, ref, :process, self(), :injected_disconnect},
+               {%{proj.id => self()}, %{ref => proj.id}}
+             )
+
+    assert names == %{}
+    assert refs == %{}
+    assert Repo.get!(Batch, waiting.id).state == :waiting
+    assert Repo.get!(Batch, running.id).state == :running
+    assert Repo.get!(Batch, running.id).commit == "tested"
+    assert Repo.get!(BorsNG.Database.Status, status.id).state == :running
+    assert Repo.aggregate(Crash, :count, :id) == 1
+  end
+
   test "a supervisor-ordered stop does not record an attemptor crash" do
     proj = project!()
 

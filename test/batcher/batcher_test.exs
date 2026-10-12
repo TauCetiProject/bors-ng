@@ -4119,7 +4119,7 @@ defmodule BorsNG.Worker.BatcherTest do
     # and then trigger the push
     Batcher.do_handle_cast({:status, {"iniN", "ci", :ok, nil}}, proj.id)
 
-    # Verify our batch is marked as an error, and no other batches started
+    # Verify the green stage is retained for promotion retry, and no other batches started
     batches =
       Repo.all(
         from(b in Batch,
@@ -4132,7 +4132,7 @@ defmodule BorsNG.Worker.BatcherTest do
     assert Enum.count(batches) == 1
     [original] = batches
 
-    assert original.state == :error
+    assert original.state == :running
   end
 
   test "push to master branch, other error codes result in a crash", %{proj: proj} do
@@ -4196,7 +4196,7 @@ defmodule BorsNG.Worker.BatcherTest do
     # and then trigger the push
     Batcher.do_handle_cast({:status, {"iniN", "ci", :ok, nil}}, proj.id)
 
-    # Verify our batch is marked as an error, and no other batches started
+    # Verify the green stage is retained for promotion retry, and no other batches started
     batches =
       Repo.all(
         from(b in Batch,
@@ -4209,7 +4209,7 @@ defmodule BorsNG.Worker.BatcherTest do
     assert Enum.count(batches) == 1
     [original] = batches
 
-    assert original.state == :error
+    assert original.state == :running
   end
 
   test "full runthrough and continue", %{proj: proj} do

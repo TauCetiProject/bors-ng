@@ -1263,6 +1263,21 @@ defmodule BorsNG.Worker.BatcherBundleTest do
       assert Repo.get!(Batch, retry.id).state == :running
     end
 
+    test "replaying retry creation after a crash keeps exactly one child and member priority", %{
+      proj: proj
+    } do
+      p1 = insert_patch(proj, 1, %{commit: "N", priority: 2})
+      p2 = insert_patch(proj, 2, %{commit: "O", priority: 1})
+      batch = insert_waiting_batch(proj, [p1, p2])
+      links = Repo.all(LinkPatchBatch.from_batch(batch.id))
+      first = BorsNG.Worker.Batcher.Divider.clone_batch(links, proj.id, "master")
+      replay = BorsNG.Worker.Batcher.Divider.clone_batch(links, proj.id, "master")
+      assert first.id == replay.id
+      assert first.priority == 2
+      assert Repo.aggregate(LinkPatchBatch, :count, :id) == 4
+      assert Repo.aggregate(Batch, :count, :id) == 2
+    end
+
     test "a race fails the raced member's bundle and re-queues a solo member", %{proj: proj} do
       put_merge_state([{1, "N"}, {2, "O"}, {3, "P"}])
       put_pr_users()
@@ -1313,10 +1328,9 @@ defmodule BorsNG.Worker.BatcherBundleTest do
       assert Enum.any?(comments_for(1), &(&1 =~ "the head of #2 changed"))
     end
 
-    test "a bundle whose final push fails drops the whole set's approvals",
+    test "an infrastructure push failure retains the green stage and resumes without rebuilding",
          %{proj: proj} do
-      # The batch builds green, but the push to master fails unrecoverably
-      # (e.g. branch protection). That is terminal: the batch is not retried.
+      # A branch-protection outage must retain the tested commit and approvals.
       put_merge_state([{1, "N"}, {2, "O"}], %{
         statuses: %{"iniNO" => %{}},
         push_errors: %{"master" => %{error_code: 403, response: "protected branch"}}
@@ -1340,18 +1354,31 @@ defmodule BorsNG.Worker.BatcherBundleTest do
 
       Repo.get!(Batch, batch.id) |> Batch.changeset(%{last_polled: 0}) |> Repo.update!()
       Batcher.handle_info({:poll, :once}, proj.id)
-      assert Repo.get!(Batch, batch.id).state == :error
-
-      # Terminal for the bundle too: held approvals are dropped so a
-      # sibling's stale approval cannot re-queue the set on one fresh r+.
-      assert Repo.get!(Patch, p1.id).bundle_reviewer == nil
-      assert Repo.get!(Patch, p2.id).bundle_reviewer == nil
+      assert Repo.get!(Batch, batch.id).state == :running
+      assert Repo.get!(Patch, p1.id).bundle_reviewer == "rvr"
+      assert Repo.get!(Patch, p2.id).bundle_reviewer == "rvr"
 
       for pr <- [1, 2] do
         msg = List.last(comments_for(pr))
         assert msg =~ "failed to merge into master"
-        assert msg =~ "It will not be retried"
+        assert msg =~ "retains the tested staging commit"
       end
+
+      assert Repo.aggregate(Batch, :count, :id) == 1
+
+      GitHub.ServerMock.put_state(
+        put_in(GitHub.ServerMock.get_state(), [{{:installation, 91}, 14}, :push_errors], %{})
+      )
+
+      # Exercise restart recovery with an expired original CI deadline.
+      Repo.get!(Batch, batch.id)
+      |> Batch.changeset(%{timeout_at: 1, last_polled: 0})
+      |> Repo.update!()
+
+      Batcher.handle_info({:poll, :once}, proj.id)
+      assert Repo.get!(Batch, batch.id).state == :ok
+      assert Repo.get!(Batch, batch.id).commit == "iniNO"
+      assert Repo.aggregate(Batch, :count, :id) == 1
     end
   end
 
