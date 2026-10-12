@@ -43,6 +43,9 @@ stranded approvals require a one-time audited bootstrap because the previous
 release did not record withdrawal tombstones. Use `scripts/bootstrap_queue_approvals.py`
 with a JSON list of `{pr, head_sha, batch_id}` records. Run with `--limit 1` and
 without `--apply` first. The script requires psycopg 3 and authenticated gh. It
+requires `--output` for its results. Applying also requires `--audit` pointing to
+a manifest with `recoverable` exact-head records and `withdrawals_checked: true`.
+The latter attests to the withdrawal audit described below.
 rejects changed/draft/closed PRs, holds, active memberships, bundles, separate held
 or manual approvals, and confirmed singleton failures. The source audit must
 establish crash/race provenance and exclude dashboard cancel-all withdrawals,
