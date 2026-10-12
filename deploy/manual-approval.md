@@ -51,9 +51,12 @@ already queued automatic approval.
 
 The initial CI change itself is subject to the previous scope policy. The new
 approval cannot bootstrap it: both PR and staging CI still use main's old workflow.
-It needs a one-time supervised scope status override on its reviewed PR head and
-exact staging commit, with build and bump-guard still green, or the existing human
-infrastructure merge procedure while bors is drained. After this rollout, ordinary
+Use the existing human infrastructure merge procedure while bors is drained, with
+build and bump-guard still green. Select `MERGE_BACKEND=queue` to defer fresh bors
+admissions and release unstarted batches, wait for the observation endpoint to show
+no waiting or running bors batches, merge the reviewed CI change, then restore
+`MERGE_BACKEND=bors`. Do not try to override staging scope after the old workflow
+reports failure: bors has already failed that batch. After this rollout, ordinary
 restricted-path PRs use only the existing human bors command.
 
 No repository permissions, secrets, labels or new commands are required.
