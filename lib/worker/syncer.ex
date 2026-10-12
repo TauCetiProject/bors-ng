@@ -206,23 +206,21 @@ defmodule BorsNG.Worker.Syncer do
   # bundle's base-restore bookkeeping (retargeted_from). A later unlink will
   # leave the person's base as they set it.
   defp forget_stale_retarget(data, %Patch{} = patch, pr) do
-    # Changes unrelated to the revision must not make a fresh command look stale.
     data =
       if patch.commit == pr.head_sha and patch.into_branch == pr.base_ref,
         do: Map.delete(data, :manual_revision_at),
         else: data
 
     data =
-      if patch.commit != pr.head_sha or patch.into_branch != pr.base_ref or pr.draft or
-           pr.state != :open,
-         do: Map.put(data, :manual_approval, nil),
+      if patch.commit != pr.head_sha or patch.into_branch != pr.base_ref or
+           pr.draft or pr.state != :open,
+         do: Map.merge(data, %{manual_approval: nil, queue_pending: false}),
          else: data
 
-    if patch.into_branch != pr.base_ref do
-      Map.put(data, :retargeted_from, nil)
-    else
-      data
-    end
+    # Keep the old exact-head intent as a revision-bound history marker. It
+    # cannot authorize the new head, but distinguishes new records from the
+    # legacy consumed checks requiring an audited one-time bootstrap.
+    if patch.into_branch != pr.base_ref, do: Map.put(data, :retargeted_from, nil), else: data
   end
 
   @spec sync_user(GitHub.User.t()) :: %User{}

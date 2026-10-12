@@ -173,6 +173,22 @@ defmodule BorsNG.GitHub.ServerMock do
     {get_in(state, [conn, :merge_candidates]) || {:error, :unavailable}, state}
   end
 
+  def do_handle_call(:merge_candidates_page, conn, {cursor}, state) do
+    result =
+      case get_in(state, [conn, :merge_candidate_pages, cursor]) do
+        nil ->
+          case get_in(state, [conn, :merge_candidates]) do
+            {:ok, candidates} -> {:ok, %{candidates: candidates, next_cursor: nil}}
+            other -> other || {:error, :unavailable}
+          end
+
+        page ->
+          page
+      end
+
+    {result, state}
+  end
+
   def do_handle_call(:release_queue_tail, conn, {selected_at, _deadline}, state) do
     case get_in(state, [conn, :backend_snapshot]) do
       {:ok, %{backend: "bors", updated_at: ^selected_at}} ->

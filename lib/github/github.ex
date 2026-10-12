@@ -39,6 +39,10 @@ defmodule BorsNG.GitHub do
     safe_genserver_call(:merge_candidates, repo_conn, {}, timeout)
   end
 
+  def merge_candidates_page(repo_conn, cursor, timeout \\ 15_000) do
+    safe_genserver_call(:merge_candidates_page, repo_conn, {cursor}, timeout)
+  end
+
   def release_queue_tail(repo_conn, selected_at, deadline) do
     remaining = deadline - System.monotonic_time(:millisecond)
 

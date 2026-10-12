@@ -2,7 +2,7 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
   use BorsNG.Worker.TestCase
   alias BorsNG.Database.{Batch, Installation, LinkPatchBatch, Patch, Project, Repo, User, Status}
   alias BorsNG.GitHub
-  alias BorsNG.Worker.{Batcher, MergeEligibility, ManualApproval, Syncer}
+  alias BorsNG.Worker.{Batcher, ManualApproval, MergeEligibility, QueueApproval, Syncer}
 
   @head String.duplicate("a", 40)
   @base String.duplicate("b", 40)
@@ -154,6 +154,88 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
     Batcher.do_handle_cast({:cancel, patch.id, :requested}, p.id)
     MergeEligibility.reconcile(p, 1)
     refute Repo.exists?(Batch.all_for_project(p.id, :incomplete))
+  end
+
+  test "a consumed eligibility check recovers a missing membership without a new approval", %{
+    project: p
+  } do
+    MergeEligibility.reconcile(p, 1)
+    patch = Repo.get_by!(Patch, project_id: p.id, pr_xref: 1)
+    old = Repo.one!(Batch.all_for_project(p.id, :incomplete))
+    assert patch.queue_pending
+    assert patch.queue_approval["head_sha"] == @head
+    Repo.delete!(old)
+    Process.delete(:queue_recovery_cursor)
+
+    Batcher.handle_info(:recover_queue, p.id)
+    recovered = Repo.one!(Batch.all_for_project(p.id, :incomplete))
+    assert recovered.id != old.id
+    assert Repo.one!(LinkPatchBatch.from_batch(recovered.id)).head_sha == @head
+    assert Repo.get!(Patch, patch.id).merge_eligibility_id == 10
+    Batcher.handle_info(:recover_queue, p.id)
+    assert Repo.aggregate(LinkPatchBatch, :count, :id) == 1
+  end
+
+  test "recovery does not restart an existing approval waiting for CI", %{project: p} do
+    update_repo(:statuses, %{@head => %{"build" => :running}})
+    MergeEligibility.reconcile(p, 1)
+    patch = Repo.get_by!(Patch, project_id: p.id, pr_xref: 1)
+    before = GitHub.ServerMock.get_state()
+    assert patch.bundle_reviewer
+    for _ <- 1..3, do: Batcher.handle_info(:recover_queue, p.id)
+    assert GitHub.ServerMock.get_state() == before
+    refute Repo.exists?(Batch.all_for_project(p.id, :incomplete))
+  end
+
+  test "recovery pins the accepted head even if the stored head moves before admission", %{
+    project: p
+  } do
+    patch = Syncer.sync_patch(p.id, get_in(GitHub.ServerMock.get_state(), [@conn, :pulls, 1]))
+    Batcher.do_handle_cast({:recover_reviewed, patch.id, @base, "reviewer"}, p.id)
+    refute Repo.exists?(Batch.all_for_project(p.id, :incomplete))
+    refute Repo.get!(Patch, patch.id).queue_pending
+  end
+
+  test "explicit withdrawal survives missing history and a newer eligibility check", %{project: p} do
+    MergeEligibility.reconcile(p, 1)
+    patch = Repo.get_by!(Patch, project_id: p.id, pr_xref: 1)
+    Batcher.do_handle_cast({:cancel, patch.id, :requested}, p.id)
+    update_repo(:eligibility_checks, %{@head => {:ok, [check(11)]}})
+    MergeEligibility.reconcile(p, 1)
+    Batcher.handle_info(:recover_queue, p.id)
+    refute Repo.exists?(Batch.all_for_project(p.id, :incomplete))
+    refute Repo.get!(Patch, patch.id).queue_pending
+  end
+
+  test "orphan recovery honors live holds, API failures and changed heads", %{project: p} do
+    MergeEligibility.reconcile(p, 1)
+    batch = Repo.one!(Batch.all_for_project(p.id, :incomplete))
+    Repo.delete!(batch)
+    update_repo(:labels, %{1 => ["Hold"]})
+    Batcher.handle_info(:recover_queue, p.id)
+    refute Repo.exists?(Batch.all_for_project(p.id, :incomplete))
+    update_repo(:labels, %{1 => []})
+    GitHub.ServerMock.put_state(Map.put(GitHub.ServerMock.get_state(), :get_pr_error, 1))
+    Batcher.handle_info(:recover_queue, p.id)
+    refute Repo.exists?(Batch.all_for_project(p.id, :incomplete))
+    pr = get_in(GitHub.ServerMock.get_state(), [@conn, :pulls, 1])
+    update_repo(:pulls, %{1 => %{pr | head_sha: String.duplicate("c", 40)}})
+    Batcher.handle_info(:recover_queue, p.id)
+    refute Repo.exists?(Batch.all_for_project(p.id, :incomplete))
+  end
+
+  test "confirmed failure remains stopped until an explicit fresh review", %{project: p} do
+    MergeEligibility.reconcile(p, 1)
+    patch = Repo.get_by!(Patch, project_id: p.id, pr_xref: 1)
+    batch = Repo.one!(Batch.all_for_project(p.id, :incomplete))
+    QueueApproval.fail([patch], batch, :build)
+    batch |> Batch.changeset(%{state: :error}) |> Repo.update!()
+    update_repo(:eligibility_checks, %{@head => {:ok, [check(11)]}})
+    MergeEligibility.reconcile(p, 1)
+    Batcher.handle_info(:recover_queue, p.id)
+    refute Repo.exists?(Batch.all_for_project(p.id, :incomplete))
+    Batcher.do_handle_cast({:reviewed, patch.id, "human"}, p.id)
+    assert Repo.exists?(Batch.all_for_project(p.id, :incomplete))
   end
 
   test "queue selection, drainage and failed observations defer automatic admission", %{
@@ -350,9 +432,11 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
     update_repo(:merge_bases, %{{1, @head} => {:ok, @base}})
     # A failed live read holds the built batch instead of pushing it.
     update_repo(:merge_bases, %{{1, @head} => {:error, :unavailable}})
+    Repo.update_all(from(b in Batch, where: b.id == ^batch.id), set: [promotion_retry_at: 0])
     Batcher.do_handle_cast({:status, {staged, "build", :ok, "https://ci"}}, p.id)
     assert Repo.get!(Batch, batch.id).state == :running
     update_repo(:merge_bases, %{{1, @head} => {:ok, String.duplicate("c", 40)}})
+    Repo.update_all(from(b in Batch, where: b.id == ^batch.id), set: [promotion_retry_at: 0])
     Batcher.do_handle_cast({:status, {staged, "build", :ok, "https://ci"}}, p.id)
     assert Repo.get!(Batch, batch.id).state == :canceled
     assert is_nil(Repo.get!(Patch, patch.id).manual_approval)

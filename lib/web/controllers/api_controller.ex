@@ -136,6 +136,10 @@ defmodule BorsNG.ApiController do
       state: batch.state,
       head_sha: batch.commit,
       base_sha: batch.base_sha,
+      promotion_retry_at: batch.promotion_retry_at,
+      promotion_failures: batch.promotion_failures,
+      recovery_after: batch.recovery_after,
+      recovery_failures: batch.recovery_failures,
       members: members
     }
   end

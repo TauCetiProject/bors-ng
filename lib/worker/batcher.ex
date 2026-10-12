@@ -29,6 +29,7 @@ defmodule BorsNG.Worker.Batcher do
   alias BorsNG.Worker.Batcher.Divider
   alias BorsNG.Worker.Labeler
   alias BorsNG.Worker.Syncer
+  alias BorsNG.Worker.QueueApproval
   alias BorsNG.Worker.Zulip
   alias BorsNG.Database.Repo
   alias BorsNG.Database.Batch
@@ -218,7 +219,14 @@ defmodule BorsNG.Worker.Batcher do
     end
   end
 
-  def do_handle_cast({:reviewed, patch_id, reviewer}, _project_id) do
+  def do_handle_cast({:reviewed, patch_id, reviewer}, project_id) do
+    case Repo.get(Patch, patch_id) do
+      nil -> :ok
+      patch -> do_handle_cast({:reviewed_expected, patch_id, patch.commit, reviewer}, project_id)
+    end
+  end
+
+  def do_handle_cast({:reviewed_expected, patch_id, expected_head, reviewer}, _project_id) do
     case Repo.get(Patch.all(:awaiting_review), patch_id) do
       nil ->
         # Patch exists (otherwise, no ID), but is not awaiting review
@@ -229,8 +237,12 @@ defmodule BorsNG.Worker.Batcher do
         |> get_repo_conn()
         |> send_message([patch], :already_running_review)
 
+      %Patch{commit: head} when head != expected_head ->
+        :ok
+
       patch ->
         # Patch exists and is awaiting review
+        patch = QueueApproval.remember(patch, reviewer)
         # This will cause the PR to run after the patch's scheduled delay
         # if all other conditions are met. It will poll if all conditions
         # except CI are met and those CI are :waiting.
@@ -259,8 +271,20 @@ defmodule BorsNG.Worker.Batcher do
             )
 
           {:error, message} ->
+            QueueApproval.stop([patch], :preflight)
             send_message(repo_conn, [patch], {:preflight, message})
         end
+    end
+  end
+
+  def do_handle_cast({:recover_reviewed, patch_id, expected_head, reviewer}, project_id) do
+    case Repo.get(Patch.all(:awaiting_review), patch_id) do
+      %Patch{commit: ^expected_head, open: true, is_draft: false} ->
+        unless Process.get({:approval_pending, patch_id}),
+          do: do_handle_cast({:reviewed_expected, patch_id, expected_head, reviewer}, project_id)
+
+      _ ->
+        :ok
     end
   end
 
@@ -270,11 +294,12 @@ defmodule BorsNG.Worker.Batcher do
     |> Repo.all()
     |> case do
       [batch] ->
-        batch.id
-        |> Status.get_for_batch(identifier)
-        |> Repo.update_all(set: [state: state, url: url, identifier: identifier])
+        {updated, _} =
+          batch.id
+          |> Status.get_for_batch(identifier)
+          |> Repo.update_all(set: [state: state, url: url, identifier: identifier])
 
-        if batch.state == :running do
+        if updated > 0 and batch.state == :running do
           maybe_complete_batch(batch)
         end
 
@@ -301,6 +326,12 @@ defmodule BorsNG.Worker.Batcher do
     # requires a fresh r+ on this member.
     BorsNG.Worker.ManualApproval.revoke(patch_id)
     Bundles.drop_held_approval(patch_id)
+
+    case Repo.get(Patch, patch_id) do
+      nil -> :ok
+      patch -> QueueApproval.stop(Bundles.members_or_self(patch), reason)
+    end
+
     Process.delete({:approval_pending, patch_id})
 
     patch_id
@@ -319,6 +350,9 @@ defmodule BorsNG.Worker.Batcher do
       from(p in Patch, where: p.project_id == ^project_id and not is_nil(p.manual_approval))
     )
     |> Enum.each(&BorsNG.Worker.ManualApproval.revoke(&1.id))
+
+    pending = Repo.all(from(p in Patch, where: p.project_id == ^project_id and p.open))
+    QueueApproval.stop(pending, :cancel_all)
 
     waiting =
       project_id
@@ -474,6 +508,77 @@ defmodule BorsNG.Worker.Batcher do
     end
   end
 
+  def handle_info(:recover_queue, project_id) do
+    project = Repo.get!(Project, project_id)
+    conn = get_repo_conn(project)
+    cursor = Process.get(:queue_recovery_cursor, 0)
+
+    candidates =
+      if BorsNG.MergeBackend.allow(project, "main", :admit) == :ok,
+        do: QueueApproval.candidates(project_id, cursor, 4),
+        else: []
+
+    Enum.each(candidates, fn patch ->
+      Process.put(:queue_recovery_cursor, patch.id)
+
+      try do
+        case patch.queue_approval do
+          %{"head_sha" => head, "reviewer" => reviewer, "state" => "approved"}
+          when head == patch.commit and is_binary(reviewer) ->
+            # Cached database state discovers orphans; normal live admission
+            # verifies authorization, head, holds and CI before any build starts.
+            case GitHub.get_pr(conn, patch.pr_xref) do
+              {:ok, pr} ->
+                if pr.state == :open and not pr.draft and pr.head_sha == head and
+                     pr.base_ref == patch.into_branch do
+                  with {:ok, labels} <- GitHub.get_labels(conn, patch.pr_xref),
+                       true <-
+                         MapSet.disjoint?(
+                           MapSet.new(labels, &String.downcase/1),
+                           MapSet.new(~w(keep hold wip human do-not-close))
+                         ) do
+                    do_handle_cast({:recover_reviewed, patch.id, head, reviewer}, project_id)
+                    Logger.info("queue_recovered pr=#{patch.pr_xref} head=#{head}")
+                  else
+                    _ -> :ok
+                  end
+                else
+                  do_handle_cast({:cancel, patch.id, :eligibility_changed}, project_id)
+                  if pr.user, do: Syncer.sync_patch(project.id, pr)
+                end
+
+              _ ->
+                :ok
+            end
+
+          _ ->
+            QueueApproval.stop([patch], :revision_changed)
+        end
+      rescue
+        error ->
+          Logger.warning(
+            "queue recovery deferred pr=#{patch.pr_xref}: #{Exception.message(error)}"
+          )
+      end
+    end)
+
+    if candidates != [], do: Process.put(:queue_recovery_cursor, List.last(candidates).id)
+    {:noreply, project_id}
+  end
+
+  def handle_info({:retry_promotion, batch_id, head}, project_id) do
+    case Repo.get(Batch, batch_id) do
+      %Batch{project_id: ^project_id, state: :running, commit: ^head} = batch ->
+        Process.delete({:promotion_retry, batch_id})
+        poll_running_batch(Repo.preload(batch, :project))
+
+      _ ->
+        :ok
+    end
+
+    {:noreply, project_id}
+  end
+
   def handle_info({:backend_retry, patch_id, head, reviewer, generation}, project_id) do
     if Process.get({:approval_pending, patch_id}) == {head, generation} do
       handle_info({:backend_retry, patch_id, head, reviewer}, project_id)
@@ -529,6 +634,8 @@ defmodule BorsNG.Worker.Batcher do
                 handle_waiting_preflight(repo_conn, reviewer, patch, try_num)
 
               {:error, message} ->
+                QueueApproval.stop([patch], :preflight)
+                Bundles.drop_held_approval(patch.id)
                 send_message(repo_conn, [patch], {:preflight, message})
             end
         end
@@ -554,7 +661,14 @@ defmodule BorsNG.Worker.Batcher do
           )
         )
 
-      Enum.each(held, fn p ->
+      cursor = Process.get(:held_recovery_cursor, 0)
+      held = Enum.sort_by(held, & &1.id)
+      {older, newer} = Enum.split_while(held, &(&1.id <= cursor))
+      selected = Enum.take(newer ++ older, 4)
+
+      Enum.each(selected, fn p ->
+        Process.put(:held_recovery_cursor, p.id)
+
         unless match?({head, _} when head == p.commit, Process.get({:approval_pending, p.id})) do
           Process.put({:approval_pending, p.id}, {p.commit, make_ref()})
           do_handle_cast({:reviewed, p.id, p.bundle_reviewer}, project_id)
@@ -758,6 +872,8 @@ defmodule BorsNG.Worker.Batcher do
         )
 
       {:error, message, failed} ->
+        QueueApproval.stop([failed], :preflight)
+        Bundles.drop_held_approval(failed.id)
         send_message(repo_conn, [failed], {:preflight, message})
 
         repo_conn
@@ -1007,7 +1123,9 @@ defmodule BorsNG.Worker.Batcher do
   end
 
   defp poll_batches({:waiting, batches}) do
-    case Enum.filter(batches, &Batch.next_poll_is_past/1) do
+    now = DateTime.to_unix(DateTime.utc_now())
+
+    case Enum.filter(batches, &(Batch.next_poll_is_past(&1) and (&1.recovery_after || 0) <= now)) do
       [] -> :ok
       [batch | _] -> start_waiting_batch(batch)
     end
@@ -1017,6 +1135,17 @@ defmodule BorsNG.Worker.Batcher do
     batch = hd(batches)
 
     cond do
+      (batch.recovery_after || 0) > DateTime.to_unix(DateTime.utc_now()) ->
+        :ok
+
+      (batch.promotion_retry_at || 0) > DateTime.to_unix(DateTime.utc_now()) ->
+        :ok
+
+      Batch.timeout_is_past(batch) and green_staged?(batch) ->
+        # CI has finished. A restart during an infrastructure hold must retry
+        # promotion of the same staged commit, not classify it as a CI timeout.
+        poll_running_batch(batch)
+
       Batch.timeout_is_past(batch) ->
         timeout_batch(batch)
 
@@ -1026,6 +1155,11 @@ defmodule BorsNG.Worker.Batcher do
       true ->
         :ok
     end
+  end
+
+  defp green_staged?(batch) do
+    statuses = Repo.all(Status.all_for_batch(batch.id))
+    is_binary(batch.commit) and statuses != [] and Enum.all?(statuses, &(&1.state == :ok))
   end
 
   defp start_waiting_batch(batch) do
@@ -1148,6 +1282,7 @@ defmodule BorsNG.Worker.Batcher do
 
     ejected_links = closed_links ++ draft_links ++ pulled_by_closed ++ pulled_by_draft
     Enum.each(ejected_links, &Repo.delete!/1)
+    QueueApproval.stop(Enum.map(ejected_links, & &1.patch), :closed_or_draft)
 
     closed_patches = Enum.map(closed_links, & &1.patch)
     drafted_patches = Enum.map(draft_links, & &1.patch)
@@ -1529,8 +1664,17 @@ defmodule BorsNG.Worker.Batcher do
 
       {:error, message} ->
         message = Batcher.Message.generate_bors_toml_error(message)
-        send_message(repo_conn, patches, {:config, message})
-        {:error, nil}
+
+        unless Process.get({:config_failure_reported, batch.id}) == message do
+          send_message(repo_conn, patches, {:config, message})
+          Process.put({:config_failure_reported, batch.id}, message)
+        end
+
+        Repo.update_all(from(b in Batch, where: b.id == ^batch.id),
+          set: [recovery_after: DateTime.to_unix(DateTime.utc_now()) + 300]
+        )
+
+        {:waiting, nil}
     end
   end
 
@@ -1567,6 +1711,7 @@ defmodule BorsNG.Worker.Batcher do
     poll_after_delay(project)
 
     if state == :failed do
+      QueueApproval.fail(patches, batch, :conflict)
       # A single unmergeable PR is dropped. Flag it for a maintainer to
       # re-queue. The queue labels come off once the batch state is :conflict.
       Labeler.mark_awaiting_requeue(repo_conn, batch.into_branch, patches)
@@ -1587,30 +1732,64 @@ defmodule BorsNG.Worker.Batcher do
     {:conflict, nil}
   end
 
-  # At least one member's stored head no longer matches its live pull
-  # request: a push arrived whose synchronize webhook was never processed.
-  # Reconcile every member against GitHub — refresh the stale record and
-  # drop that member's held approval, the two effects the missed webhook
-  # would have had. Without the refresh, a fresh r+ preflights the stale
-  # commit and races again; with it, the next r+ (and the delegation
-  # merge-time gate) evaluates the real head. Members whose records are
-  # accurate are left untouched. The batch stays failed either way:
-  # nothing re-queues without a fresh r+.
+  # At least one member raced: its live head is not its stored commit (a push
+  # arrived whose synchronize webhook was never processed), or it was approved
+  # at an earlier head than the stored one. Staging stops at the first raced
+  # member and reports the whole batch, so every member is checked here.
+  #
+  # A raced member is reconciled against GitHub — its stale record refreshed
+  # and its held approval dropped, the two effects the missed webhook would
+  # have had — and fails with its bundle; nothing re-queues it without a fresh
+  # r+. Without the refresh, a fresh r+ preflights the stale commit and races
+  # again; with it, the next r+ (and the delegation merge-time gate) evaluates
+  # the real head. The other members were approved at the heads they still
+  # have, so they are re-queued in a new batch, as when a member is canceled
+  # out of a running batch, and staging checks their heads again. A member
+  # whose head cannot be read is deferred without revoking its approval.
   defp start_waiting_merged_batch(batch, patch_links, _base, :race) do
     project = batch.project
     repo_conn = get_repo_conn(project)
-    patches = Enum.map(patch_links, & &1.patch)
-    poll_after_delay(project)
+    classifications = Enum.map(patch_links, &{&1, raced_link?(repo_conn, project, &1)})
 
-    Enum.each(patches, &reconcile_raced_patch(repo_conn, project, &1))
+    if Enum.any?(classifications, fn {_, result} -> result == :unknown end) do
+      # An API outage is not evidence of a changed head. Retain this batch and
+      # let the regular poll retry; do not manufacture failed individual PRs.
+      {:waiting, nil}
+    else
+      poll_after_delay(project)
+      raced = for {link, true} <- classifications, do: link
+      raced_ids = Enum.flat_map(raced, &Bundles.member_ids(patch_links, &1.patch_id))
 
-    send_message(repo_conn, patches, :race)
-    send_status(repo_conn, batch, :race)
+      {raced_links, kept_links} =
+        case raced_ids do
+          [] -> {[], patch_links}
+          _ -> Enum.split_with(patch_links, &(&1.patch_id in raced_ids))
+        end
 
-    {:error, nil}
+      raced_patches = Enum.map(raced_links, & &1.patch)
+      QueueApproval.stop(raced_patches, :revision_changed)
+      send_message(repo_conn, raced_patches, :race)
+
+      if kept_links != [] do
+        Divider.clone_batch(kept_links, project.id, batch.into_branch)
+
+        send_message(
+          repo_conn,
+          Enum.map(kept_links, & &1.patch),
+          if(raced == [],
+            do: :race_unconfirmed,
+            else: {:race, :retrying, Enum.map(raced, & &1.patch.pr_xref)}
+          )
+        )
+      end
+
+      send_status(repo_conn, batch, :race)
+
+      {:error, nil}
+    end
   end
 
-  defp reconcile_raced_patch(repo_conn, project, patch) do
+  defp raced_link?(repo_conn, project, %{patch: patch, head_sha: approved_head}) do
     case GitHub.get_pr(repo_conn, patch.pr_xref) do
       {:ok, %{head_sha: head_sha} = pr} when head_sha != patch.commit ->
         # A race means webhook delivery failed at least once. Recurring
@@ -1623,14 +1802,17 @@ defmodule BorsNG.Worker.Batcher do
 
         Bundles.drop_held_approval(patch.id)
         resync_raced_patch(project, patch, pr)
+        true
 
       {:ok, _} ->
-        :ok
+        approved_head != nil and approved_head != patch.commit
 
       error ->
         Logger.warning(
           "race: could not reconcile patch #{patch.id} (PR ##{patch.pr_xref}): #{inspect(error)}"
         )
+
+        :unknown
     end
   end
 
@@ -1770,6 +1952,14 @@ defmodule BorsNG.Worker.Batcher do
   end
 
   defp maybe_complete_batch(batch) do
+    now = DateTime.to_unix(DateTime.utc_now())
+
+    if (batch.promotion_retry_at || 0) <= now and (batch.recovery_after || 0) <= now do
+      maybe_complete_batch_due(batch)
+    end
+  end
+
+  defp maybe_complete_batch_due(batch) do
     statuses = Repo.all(Status.all_for_batch(batch.id))
     initial_status = Batcher.State.summary_database_statuses(statuses)
     now = DateTime.to_unix(DateTime.utc_now(), :second)
@@ -1782,7 +1972,9 @@ defmodule BorsNG.Worker.Batcher do
         # need to change status (could go from :ok to :error if non-ff push)
         maybe_completed_status = complete_batch(initial_status, batch, statuses)
         # status can change so send_status should come after complete_batch
-        send_status(repo_conn, batch, maybe_completed_status)
+        if maybe_completed_status != :running,
+          do: send_status(repo_conn, batch, maybe_completed_status)
+
         Project.ping!(batch.project_id)
         maybe_completed_status
       else
@@ -1793,7 +1985,7 @@ defmodule BorsNG.Worker.Batcher do
     |> Batch.changeset(%{state: next_status, last_polled: now})
     |> Repo.update!()
 
-    send_zulip(batch, next_status)
+    if next_status != :running, do: send_zulip(batch, next_status)
 
     if next_status != :running do
       # A successful merge deliberately leaves the PR's labels untouched: the PR
@@ -1837,6 +2029,7 @@ defmodule BorsNG.Worker.Batcher do
 
     case result do
       :waiting ->
+        defer_promotion(batch, :approval_read)
         :running
 
       {:changed, patch_id} ->
@@ -1873,6 +2066,7 @@ defmodule BorsNG.Worker.Batcher do
       send_message(repo_conn, patches, {state, erred})
     else
       # Terminal failure: the PR is dropped and needs a maintainer to
+      QueueApproval.fail(patches, batch, :build)
       # re-queue it. Flag it. The queue labels are taken off once the batch
       # state is committed to :error.
       Labeler.mark_awaiting_requeue(repo_conn, batch.into_branch, patches)
@@ -1968,6 +2162,7 @@ defmodule BorsNG.Worker.Batcher do
     # The drafts are dropped for good: re-queueing one would only stop here
     # again. They need a fresh r+ after being marked ready for review.
     Bundles.drop_held_approvals(dropped)
+    QueueApproval.stop(dropped, :draft)
     Labeler.mark_awaiting_requeue(repo_conn, batch.into_branch, dropped)
     send_message(repo_conn, drafts, :draft_dropped_from_batch)
 
@@ -2022,6 +2217,9 @@ defmodule BorsNG.Worker.Batcher do
 
     case push_status do
       {:success} ->
+        Process.delete({:push_failure_reported, batch.id})
+        Process.delete({:promotion_retry, batch.id})
+        QueueApproval.stop(patches, :merged)
         # The bundle (if any) has merged. Drop held approvals so a future
         # run needs fresh r+. Forget the retargeting record so a later unlink
         # does not try to restore a base whose changes are now merged.
@@ -2057,29 +2255,53 @@ defmodule BorsNG.Worker.Batcher do
         :error
 
       {:unknown_failure, status_code, raw_error_content} ->
-        # Don't retry the batch. Something is preventing this batch from merging
-        # and it's unlikely us retrying would change that.
+        # Retain the green staging commit and its memberships. An inability to
+        # promote it is an infrastructure failure, not a failed proof.
 
         # send appropriate message to failed patches
-        send_message(
-          repo_conn,
-          patches,
-          {:push_failed_unknown_failure, batch.into_branch, status_code, raw_error_content}
-        )
+        unless Process.get({:push_failure_reported, batch.id}) == status_code do
+          send_message(
+            repo_conn,
+            patches,
+            {:push_failed_unknown_failure, batch.into_branch, status_code, raw_error_content}
+          )
 
-        # This is terminal for a bundle too: drop the held approvals so a
-        # sibling's stale approval cannot re-queue the set on one fresh r+.
-        # The diagnostic message above already went to every member.
-        Bundles.drop_held_approvals(patches)
+          Process.put({:push_failure_reported, batch.id}, status_code)
+        end
 
-        # The build passed but the push to the base branch failed unrecoverably
-        # and we don't re-queue, so the PR is dropped and needs a maintainer to
-        # put it back on. `ready-to-merge` / `bors-staging` come off in
-        # maybe_complete_batch once the batch state is committed to :error.
-        Labeler.mark_awaiting_requeue(repo_conn, batch.into_branch, patches)
+        # Keep the existing tested commit and retry with a bounded cadence.
+        defer_promotion(batch, status_code)
 
-        :error
+        :running
     end
+  end
+
+  defp defer_promotion(batch, reason) do
+    count = (batch.promotion_failures || 0) + 1
+    delay = if count < 6, do: 300, else: 3600
+
+    Repo.update_all(from(b in Batch, where: b.id == ^batch.id),
+      set: [
+        promotion_retry_at: DateTime.to_unix(DateTime.utc_now()) + delay,
+        promotion_failures: count
+      ]
+    )
+
+    if count in [1, 6] do
+      Logger.warning(
+        "bors promotion deferred batch=#{batch.id} attempts=#{count} reason=#{inspect(reason)}"
+      )
+
+      if count == 6,
+        do:
+          Zulip.send_message(
+            "Bors promotion stuck: #{batch.project.name} batch #{batch.id} has a green staging commit " <>
+              "but promotion is unavailable after six attempts. Approvals are retained; retrying hourly. " <>
+              "Check permissions/backend availability. A maintainer can withdraw a member with bors r-."
+          )
+    end
+
+    Process.send_after(self(), {:retry_promotion, batch.id, batch.commit}, delay * 1000)
   end
 
   # Terminal-failure handling for the bundled patches of a batch: drop every
@@ -2149,6 +2371,7 @@ defmodule BorsNG.Worker.Batcher do
       send_message(repo_conn, patches, {:timeout, state})
     else
       # Terminal failure: the PRs are dropped and need a maintainer to put
+      QueueApproval.fail(patches, batch, :timeout)
       # them back on the queue, so flag them before the queue reconcile below
       # takes `ready-to-merge` / `bors-staging` off.
       Labeler.mark_awaiting_requeue(repo_conn, batch.into_branch, patches)
@@ -2435,12 +2658,16 @@ defmodule BorsNG.Worker.Batcher do
 
     cond do
       prerun_timeout_sec == 0 ->
+        QueueApproval.stop([patch], :preflight_timeout)
+
         if reviewer == :held_approval or is_tuple(reviewer),
           do: Bundles.drop_held_approval(patch.id)
 
         send_message(repo_conn, [patch], {:preflight, :timeout})
 
       elapsed > prerun_timeout_ms ->
+        QueueApproval.stop([patch], :preflight_timeout)
+
         if reviewer == :held_approval or is_tuple(reviewer),
           do: Bundles.drop_held_approval(patch.id)
 

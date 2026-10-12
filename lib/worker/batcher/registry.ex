@@ -213,16 +213,31 @@ defmodule BorsNG.Worker.Batcher.Registry do
         :ok
     end
 
-    project_id
-    |> Batch.all_for_project(:waiting)
-    |> Repo.all()
-    |> Enum.each(&Repo.delete!/1)
+    # Batches and CI status rows are durable restart state. A process crash is
+    # neither a withdrawal nor a failed proof; the next batcher resumes them.
+
+    now = DateTime.to_unix(DateTime.utc_now())
 
     project_id
-    |> Batch.all_for_project(:running)
+    |> Batch.all_for_project(:incomplete)
     |> Repo.all()
-    |> Enum.map(&Batch.changeset(&1, %{state: :canceled}))
-    |> Enum.each(&Repo.update!/1)
+    |> Enum.each(fn batch ->
+      count = (batch.recovery_failures || 0) + 1
+      delay = min(30 * Integer.pow(2, min(count - 1, 7)), 3600)
+      import Ecto.Query
+
+      Repo.update_all(from(b in Batch, where: b.id == ^batch.id),
+        set: [recovery_failures: count, recovery_after: now + delay]
+      )
+
+      if count == 6,
+        do:
+          Zulip.send_message(
+            "Bors restart recovery stuck: project #{project_id}, batch #{batch.id} has survived six " <>
+              "crashes. Queue intent and CI state are retained; retries back off up to hourly. " <>
+              "Inspect the recorded crash before withdrawing or retrying members."
+          )
+    end)
 
     Repo.insert(%Crash{
       project_id: project_id,
@@ -256,14 +271,16 @@ defmodule BorsNG.Worker.Batcher.Registry do
       |> Batch.all_for_project(:waiting)
       |> Repo.all()
 
-    waiting_messages = pr_messages(waiting, "Waiting", "deleted", project.name, project_pr_url)
+    waiting_messages =
+      pr_messages(waiting, "Waiting", "retained for recovery", project.name, project_pr_url)
 
     running =
       project_id
       |> Batch.all_for_project(:running)
       |> Repo.all()
 
-    running_messages = pr_messages(running, "Running", "canceled", project.name, project_pr_url)
+    running_messages =
+      pr_messages(running, "Running", "retained for recovery", project.name, project_pr_url)
 
     List.flatten([header, waiting_messages, running_messages])
   end

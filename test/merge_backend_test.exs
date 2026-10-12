@@ -124,6 +124,43 @@ defmodule BorsNG.MergeBackendTest do
     :persistent_term.put({BorsNG.Worker.MergeReconciler, :observation}, nil)
   end
 
+  test "heartbeat reads one candidate page and exposes incomplete scan coverage" do
+    installation = Repo.insert!(%Installation{installation_xref: 91})
+
+    Repo.insert!(%Project{
+      name: "TauCetiProject/TauCeti",
+      repo_xref: 14,
+      installation_id: installation.id
+    })
+
+    conn = {{:installation, 91}, 14}
+    candidate = fn pr -> %{pr: pr, head_sha: "head", ready: false, queued: false} end
+
+    GitHub.ServerMock.put_state(%{
+      conn => %{
+        backend_snapshot: {:ok, %{backend: "bors", updated_at: nil, github_count: 0}},
+        merge_candidate_pages: %{
+          nil => {:ok, %{candidates: [candidate.(1)], next_cursor: "page2"}},
+          "page2" => {:ok, %{candidates: [candidate.(2)], next_cursor: nil}}
+        }
+      }
+    })
+
+    state = %{last_dispatch: nil, observation: nil}
+    assert {:reply, first, next} = BorsNG.Worker.MergeReconciler.handle_call(:tick, nil, state)
+    refute first.candidate_scan_complete
+    assert is_nil(first.candidate_snapshot_at)
+    assert next.candidate_cursor == "page2"
+
+    assert {:reply, second, complete} =
+             BorsNG.Worker.MergeReconciler.handle_call(:tick, nil, next)
+
+    assert second.candidate_scan_complete
+    assert is_binary(second.candidate_snapshot_at)
+    assert Enum.map(complete.candidate_snapshot, & &1.pr) == [1, 2]
+    :persistent_term.put({BorsNG.Worker.MergeReconciler, :observation}, nil)
+  end
+
   test "a superseded timeout cannot revoke a renewed approval at the same head" do
     installation = Repo.insert!(%Installation{installation_xref: 91})
 

@@ -120,6 +120,21 @@ defmodule BorsNG.Worker.BatcherBundleTest do
     })
   end
 
+  # sync_patch upserts the author, so a raced member's PR needs a user.
+  defp put_pr_users do
+    GitHub.ServerMock.put_state(
+      update_in(
+        GitHub.ServerMock.get_state(),
+        [{{:installation, 91}, 14}, :pulls],
+        fn pulls ->
+          Map.new(pulls, fn {xref, pr} ->
+            {xref, %Pr{pr | user: %GitHub.User{id: 23, login: "ghost", avatar_url: ""}}}
+          end)
+        end
+      )
+    )
+  end
+
   defp insert_waiting_batch(proj, patches) do
     batch =
       %Batch{
@@ -1177,19 +1192,7 @@ defmodule BorsNG.Worker.BatcherBundleTest do
 
     test "a race re-syncs the stale member and drops only its approval", %{proj: proj} do
       put_merge_state([{1, "N"}, {2, "O"}])
-
-      # sync_patch upserts the author, so the raced member's PR needs a user.
-      GitHub.ServerMock.put_state(
-        update_in(
-          GitHub.ServerMock.get_state(),
-          [{{:installation, 91}, 14}, :pulls],
-          fn pulls ->
-            Map.new(pulls, fn {xref, pr} ->
-              {xref, %Pr{pr | user: %GitHub.User{id: 23, login: "ghost", avatar_url: ""}}}
-            end)
-          end
-        )
-      )
+      put_pr_users()
 
       p1 = insert_patch(proj, 1, %{commit: "N", bundle_reviewer: "rvr"})
 
@@ -1219,10 +1222,135 @@ defmodule BorsNG.Worker.BatcherBundleTest do
       assert Enum.any?(comments_for(2), &(&1 =~ "Synchronization error"))
     end
 
-    test "a bundle whose final push fails drops the whole set's approvals",
+    test "a race fails only the raced member and re-queues the others", %{proj: proj} do
+      put_merge_state([{1, "N"}, {2, "O"}, {3, "P"}])
+      put_pr_users()
+
+      p1 = insert_patch(proj, 1, %{commit: "N"})
+      # #2's stored head is stale; its live head on GitHub is "O".
+      p2 = insert_patch(proj, 2, %{commit: "STALE"})
+      p3 = insert_patch(proj, 3, %{commit: "P"})
+      batch = insert_waiting_batch(proj, [p1, p2, p3])
+
+      Batcher.handle_info({:poll, :once}, proj.id)
+
+      assert Repo.get!(Batch, batch.id).state == :error
+      assert Repo.get!(Patch, p2.id).commit == "O"
+      assert Enum.any?(comments_for(2), &(&1 =~ "Synchronization error"))
+
+      # Staging stopped at #2, after #1 and before #3. Both still have the
+      # heads they were approved at, so both go back on the queue.
+      [retry] = Repo.all(from(b in Batch, where: b.id != ^batch.id))
+      assert retry.state == :waiting
+
+      assert retry.id
+             |> LinkPatchBatch.from_batch()
+             |> Repo.all()
+             |> Enum.map(& &1.patch_id)
+             |> Enum.sort() ==
+               Enum.sort([p1.id, p3.id])
+
+      for pr <- [1, 3] do
+        refute Enum.any?(comments_for(pr), &(&1 =~ "Synchronization error"))
+
+        assert "This PR was included in a batch that bors did not merge because the head of #2 changed after it was approved. It will be automatically retried." in comments_for(
+                 pr
+               )
+      end
+
+      retry |> Batch.changeset(%{last_polled: 0}) |> Repo.update!()
+      Batcher.handle_info({:poll, :once}, proj.id)
+      assert Repo.get!(Batch, retry.id).state == :running
+    end
+
+    test "replaying retry creation after a crash keeps exactly one child and member priority", %{
+      proj: proj
+    } do
+      p1 = insert_patch(proj, 1, %{commit: "N", priority: 2})
+      p2 = insert_patch(proj, 2, %{commit: "O", priority: 1})
+      batch = insert_waiting_batch(proj, [p1, p2])
+      links = Repo.all(LinkPatchBatch.from_batch(batch.id))
+      first = BorsNG.Worker.Batcher.Divider.clone_batch(links, proj.id, "master")
+      replay = BorsNG.Worker.Batcher.Divider.clone_batch(links, proj.id, "master")
+      assert first.id == replay.id
+      assert first.priority == 2
+      assert Repo.aggregate(LinkPatchBatch, :count, :id) == 4
+      assert Repo.aggregate(Batch, :count, :id) == 2
+    end
+
+    test "a paused running batch still owns staging when new waiting work arrives", %{proj: proj} do
+      put_merge_state([{1, "N"}, {2, "O"}])
+      p1 = insert_patch(proj, 1, %{commit: "N"})
+      running = insert_waiting_batch(proj, [p1])
+      Batcher.handle_info({:poll, :once}, proj.id)
+      assert Repo.get!(Batch, running.id).state == :running
+
+      Repo.update_all(from(b in Batch, where: b.id == ^running.id),
+        set: [recovery_after: DateTime.to_unix(DateTime.utc_now()) + 3600]
+      )
+
+      p2 = insert_patch(proj, 2, %{commit: "O"})
+      waiting = insert_waiting_batch(proj, [p2])
+      before = GitHub.ServerMock.get_state()
+      Batcher.handle_info({:poll, :once}, proj.id)
+      assert Repo.get!(Batch, waiting.id).state == :waiting
+      assert GitHub.ServerMock.get_state() == before
+      assert Repo.aggregate(from(b in Batch, where: b.state == :running), :count, :id) == 1
+    end
+
+    test "a race fails the raced member's bundle and re-queues a solo member", %{proj: proj} do
+      put_merge_state([{1, "N"}, {2, "O"}, {3, "P"}])
+      put_pr_users()
+
+      p1 = insert_patch(proj, 1, %{commit: "N", bundle_reviewer: "rvr"})
+      p2 = insert_patch(proj, 2, %{commit: "STALE", bundle_reviewer: "rvr"})
+      p3 = insert_patch(proj, 3, %{commit: "P"})
+      {_bundle, [p1, p2]} = insert_bundle(proj, [p1, p2])
+      batch = insert_waiting_batch(proj, [p1, p2, p3])
+
+      Batcher.handle_info({:poll, :once}, proj.id)
+
+      assert Repo.get!(Batch, batch.id).state == :error
+
+      # A bundle merges as one unit, so #1 leaves with #2.
+      [retry] = Repo.all(from(b in Batch, where: b.id != ^batch.id))
+
+      assert retry.id |> LinkPatchBatch.from_batch() |> Repo.all() |> Enum.map(& &1.patch_id) == [
+               p3.id
+             ]
+
+      for pr <- [1, 2], do: assert(Enum.any?(comments_for(pr), &(&1 =~ "Synchronization error")))
+      assert Enum.any?(comments_for(3), &(&1 =~ "the head of #2 changed"))
+    end
+
+    test "a member approved at an earlier head races too", %{proj: proj} do
+      put_merge_state([{1, "N"}, {2, "P"}])
+
+      p1 = insert_patch(proj, 1, %{commit: "N"})
+      p2 = insert_patch(proj, 2, %{commit: "P"})
+      batch = insert_waiting_batch(proj, [p1, p2])
+
+      # #2's stored and live heads agree on "P", but it was approved at "OLD".
+      Repo.update_all(from(l in LinkPatchBatch, where: l.patch_id == ^p2.id),
+        set: [head_sha: "OLD"]
+      )
+
+      Batcher.handle_info({:poll, :once}, proj.id)
+
+      assert Repo.get!(Batch, batch.id).state == :error
+      [retry] = Repo.all(from(b in Batch, where: b.id != ^batch.id))
+
+      assert retry.id |> LinkPatchBatch.from_batch() |> Repo.all() |> Enum.map(& &1.patch_id) == [
+               p1.id
+             ]
+
+      assert Enum.any?(comments_for(2), &(&1 =~ "Synchronization error"))
+      assert Enum.any?(comments_for(1), &(&1 =~ "the head of #2 changed"))
+    end
+
+    test "an infrastructure push failure retains the green stage and resumes without rebuilding",
          %{proj: proj} do
-      # The batch builds green, but the push to master fails unrecoverably
-      # (e.g. branch protection). That is terminal: the batch is not retried.
+      # A branch-protection outage must retain the tested commit and approvals.
       put_merge_state([{1, "N"}, {2, "O"}], %{
         statuses: %{"iniNO" => %{}},
         push_errors: %{"master" => %{error_code: 403, response: "protected branch"}}
@@ -1246,18 +1374,39 @@ defmodule BorsNG.Worker.BatcherBundleTest do
 
       Repo.get!(Batch, batch.id) |> Batch.changeset(%{last_polled: 0}) |> Repo.update!()
       Batcher.handle_info({:poll, :once}, proj.id)
-      assert Repo.get!(Batch, batch.id).state == :error
-
-      # Terminal for the bundle too: held approvals are dropped so a
-      # sibling's stale approval cannot re-queue the set on one fresh r+.
-      assert Repo.get!(Patch, p1.id).bundle_reviewer == nil
-      assert Repo.get!(Patch, p2.id).bundle_reviewer == nil
+      assert Repo.get!(Batch, batch.id).state == :running
+      assert Repo.get!(Patch, p1.id).bundle_reviewer == "rvr"
+      assert Repo.get!(Patch, p2.id).bundle_reviewer == "rvr"
 
       for pr <- [1, 2] do
         msg = List.last(comments_for(pr))
         assert msg =~ "failed to merge into master"
-        assert msg =~ "It will not be retried"
+        assert msg =~ "retains the tested staging commit"
       end
+
+      before = GitHub.ServerMock.get_state()
+      # Bors's own status and duplicate CI notifications cannot bypass the
+      # durable retry deadline or cause another API push/comment cycle.
+      Batcher.do_handle_cast({:status, {"iniNO", "bors", :ok, nil}}, proj.id)
+      Batcher.do_handle_cast({:status, {"iniNO", "ci", :ok, nil}}, proj.id)
+      assert GitHub.ServerMock.get_state() == before
+      assert Repo.get!(Batch, batch.id).promotion_failures == 1
+
+      assert Repo.aggregate(Batch, :count, :id) == 1
+
+      GitHub.ServerMock.put_state(
+        put_in(GitHub.ServerMock.get_state(), [{{:installation, 91}, 14}, :push_errors], %{})
+      )
+
+      # Exercise restart recovery with an expired original CI deadline.
+      Repo.get!(Batch, batch.id)
+      |> Batch.changeset(%{timeout_at: 1, last_polled: 0, promotion_retry_at: 0})
+      |> Repo.update!()
+
+      Batcher.handle_info({:poll, :once}, proj.id)
+      assert Repo.get!(Batch, batch.id).state == :ok
+      assert Repo.get!(Batch, batch.id).commit == "iniNO"
+      assert Repo.aggregate(Batch, :count, :id) == 1
     end
   end
 

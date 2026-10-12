@@ -2129,7 +2129,7 @@ defmodule BorsNG.Worker.BatcherTest do
 
     Batcher.handle_info({:poll, :once}, proj.id)
     batch = Repo.get_by!(Batch, project_id: proj.id)
-    assert batch.state == :error
+    assert batch.state == :waiting
 
     assert GitHub.ServerMock.get_state() == %{
              {{:installation, 91}, 14} => %{
@@ -2141,7 +2141,7 @@ defmodule BorsNG.Worker.BatcherTest do
                  }
                },
                comments: %{1 => ["Configuration problem:\nbors.toml: not found"]},
-               statuses: %{"N" => %{"bors" => :error}},
+               statuses: %{"N" => %{"bors" => :running}},
                pulls: %{
                  1 => %Pr{
                    number: 1,
@@ -4058,7 +4058,7 @@ defmodule BorsNG.Worker.BatcherTest do
     assert Enum.count(retried.patches) == 2
   end
 
-  test "push to master branch, other 422 errors result in a crash", %{proj: proj} do
+  test "push to master branch, other 422 errors retain the green stage", %{proj: proj} do
     GitHub.ServerMock.put_state(%{
       {{:installation, 91}, 14} => %{
         branches: %{"master" => "ini", "staging" => "", "staging.tmp" => ""},
@@ -4119,7 +4119,7 @@ defmodule BorsNG.Worker.BatcherTest do
     # and then trigger the push
     Batcher.do_handle_cast({:status, {"iniN", "ci", :ok, nil}}, proj.id)
 
-    # Verify our batch is marked as an error, and no other batches started
+    # Verify the green stage is retained for promotion retry, and no other batches started
     batches =
       Repo.all(
         from(b in Batch,
@@ -4132,10 +4132,10 @@ defmodule BorsNG.Worker.BatcherTest do
     assert Enum.count(batches) == 1
     [original] = batches
 
-    assert original.state == :error
+    assert original.state == :running
   end
 
-  test "push to master branch, other error codes result in a crash", %{proj: proj} do
+  test "push to master branch, infrastructure errors retain the green stage", %{proj: proj} do
     GitHub.ServerMock.put_state(%{
       {{:installation, 91}, 14} => %{
         branches: %{"master" => "ini", "staging" => "", "staging.tmp" => ""},
@@ -4196,7 +4196,7 @@ defmodule BorsNG.Worker.BatcherTest do
     # and then trigger the push
     Batcher.do_handle_cast({:status, {"iniN", "ci", :ok, nil}}, proj.id)
 
-    # Verify our batch is marked as an error, and no other batches started
+    # Verify the green stage is retained for promotion retry, and no other batches started
     batches =
       Repo.all(
         from(b in Batch,
@@ -4209,7 +4209,7 @@ defmodule BorsNG.Worker.BatcherTest do
     assert Enum.count(batches) == 1
     [original] = batches
 
-    assert original.state == :error
+    assert original.state == :running
   end
 
   test "full runthrough and continue", %{proj: proj} do

@@ -327,7 +327,7 @@ defmodule BorsNG.Worker.BatcherMessageTest do
 
   test "generate push failed (unknown) message" do
     expected_message = """
-    This PR was included in a batch that successfully built, but then failed to merge into main. It will not be retried.
+    This PR was included in a batch that successfully built, but then failed to merge into main. Bors retains the tested staging commit and will retry the merge; no new build is needed unless the base changes.
 
     Additional information:
 

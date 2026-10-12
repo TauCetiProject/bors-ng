@@ -34,6 +34,8 @@ defmodule BorsNG.Database.Patch do
     field(:merge_eligibility, :map)
     field(:manual_approval, :map)
     field(:manual_revision_at, :utc_datetime_usec)
+    field(:queue_approval, :map)
+    field(:queue_pending, :boolean, default: false)
     timestamps()
   end
 
@@ -64,7 +66,9 @@ defmodule BorsNG.Database.Patch do
       :merge_eligibility_id,
       :merge_eligibility,
       :manual_approval,
-      :manual_revision_at
+      :manual_revision_at,
+      :queue_approval,
+      :queue_pending
     ])
     |> unique_constraint(:pr_xref, name: :patches_pr_xref_index, match: :suffix)
   end
@@ -83,7 +87,7 @@ defmodule BorsNG.Database.Patch do
   defp all_links_not_err do
     from(l in LinkPatchBatch,
       join: b in Batch,
-      on: l.batch_id == b.id and b.state != ^:error and b.state != ^:canceled
+      on: l.batch_id == b.id and b.state in ^[:waiting, :running, :ok]
     )
   end
 

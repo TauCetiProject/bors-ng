@@ -323,6 +323,12 @@ defmodule BorsNG.GitHub.Server do
     _ -> {:error, :merge_candidates_unavailable}
   end
 
+  def do_handle_call(:merge_candidates_page, {{:raw, token}, _}, {cursor}) do
+    {:ok, merge_candidates_page(token, cursor)}
+  rescue
+    _ -> {:error, :merge_candidates_unavailable}
+  end
+
   def do_handle_call(:get_eligibility_checks, conn, {head}) do
     {:ok, eligibility_checks(conn, head, 1, [])}
   rescue
@@ -1163,6 +1169,19 @@ defmodule BorsNG.GitHub.Server do
   end
 
   defp merge_candidates(token, cursor, acc, seen) do
+    page = merge_candidates_page(token, cursor)
+    all = acc ++ page.candidates
+
+    if page.next_cursor do
+      next = page.next_cursor
+      if MapSet.member?(seen, next), do: raise("invalid pagination")
+      merge_candidates(token, next, all, MapSet.put(seen, next))
+    else
+      all
+    end
+  end
+
+  defp merge_candidates_page(token, cursor) do
     query =
       ~s|query($cursor:String){repository(owner:"TauCetiProject",name:"TauCeti"){pullRequests(first:100,after:$cursor,states:OPEN,baseRefName:"main"){pageInfo{hasNextPage endCursor}nodes{number headRefOid isDraft isInMergeQueue labels(first:100){nodes{name}pageInfo{hasNextPage}}}}}}|
 
@@ -1188,15 +1207,9 @@ defmodule BorsNG.GitHub.Server do
       end)
 
     page = connection["pageInfo"]
-    all = acc ++ nodes
-
-    if page["hasNextPage"] do
-      next = page["endCursor"]
-      if is_nil(next) or MapSet.member?(seen, next), do: raise("invalid pagination")
-      merge_candidates(token, next, all, MapSet.put(seen, next))
-    else
-      all
-    end
+    next = if page["hasNextPage"], do: page["endCursor"], else: nil
+    if page["hasNextPage"] and (is_nil(next) or next == cursor), do: raise("invalid pagination")
+    %{candidates: nodes, next_cursor: next}
   end
 
   defp dequeue_tail(token, entry, selected_at) do
