@@ -51,6 +51,10 @@ defmodule BorsNG.Worker.Batcher.Message do
     "This PR was included in a batch that bors did not merge because the head of #{prs} changed after it was approved. It will be automatically retried."
   end
 
+  def generate_message(:race_unconfirmed) do
+    "Bors stopped staging after a head synchronization race. These approved heads are unchanged and remain queued for another attempt."
+  end
+
   def generate_message({:preflight, :waiting}) do
     ":clock1: Waiting for PR status (GitHub check) to be set, probably by CI. Bors will automatically try to run when all required PR statuses are set."
   end

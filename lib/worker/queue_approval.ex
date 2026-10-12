@@ -60,7 +60,9 @@ defmodule BorsNG.Worker.QueueApproval do
         left_join: a in subquery(active),
         on: a.patch_id == p.id and a.head_sha == p.commit,
         where:
-          p.project_id == ^project_id and p.open and not p.is_draft and p.queue_pending and
+          p.project_id == ^project_id and p.into_branch == "main" and p.open and not p.is_draft and
+            p.queue_pending and
+            is_nil(p.bundle_reviewer) and
             is_nil(a.patch_id),
         order_by: p.id
       )

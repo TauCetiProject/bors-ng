@@ -21,6 +21,10 @@ defmodule BorsNG.Database.Batch do
     field(:last_polled, :integer)
     field(:timeout_at, :integer)
     field(:priority, :integer, default: 0)
+    field(:promotion_retry_at, :integer, default: 0)
+    field(:promotion_failures, :integer, default: 0)
+    field(:recovery_after, :integer, default: 0)
+    field(:recovery_failures, :integer, default: 0)
     has_many(:patches, LinkPatchBatch)
     timestamps()
   end
@@ -179,7 +183,11 @@ defmodule BorsNG.Database.Batch do
       :state,
       :last_polled,
       :timeout_at,
-      :priority
+      :priority,
+      :promotion_retry_at,
+      :promotion_failures,
+      :recovery_after,
+      :recovery_failures
     ])
   end
 

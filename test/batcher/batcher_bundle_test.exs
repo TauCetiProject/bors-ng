@@ -1278,6 +1278,26 @@ defmodule BorsNG.Worker.BatcherBundleTest do
       assert Repo.aggregate(Batch, :count, :id) == 2
     end
 
+    test "a paused running batch still owns staging when new waiting work arrives", %{proj: proj} do
+      put_merge_state([{1, "N"}, {2, "O"}])
+      p1 = insert_patch(proj, 1, %{commit: "N"})
+      running = insert_waiting_batch(proj, [p1])
+      Batcher.handle_info({:poll, :once}, proj.id)
+      assert Repo.get!(Batch, running.id).state == :running
+
+      Repo.update_all(from(b in Batch, where: b.id == ^running.id),
+        set: [recovery_after: DateTime.to_unix(DateTime.utc_now()) + 3600]
+      )
+
+      p2 = insert_patch(proj, 2, %{commit: "O"})
+      waiting = insert_waiting_batch(proj, [p2])
+      before = GitHub.ServerMock.get_state()
+      Batcher.handle_info({:poll, :once}, proj.id)
+      assert Repo.get!(Batch, waiting.id).state == :waiting
+      assert GitHub.ServerMock.get_state() == before
+      assert Repo.aggregate(from(b in Batch, where: b.state == :running), :count, :id) == 1
+    end
+
     test "a race fails the raced member's bundle and re-queues a solo member", %{proj: proj} do
       put_merge_state([{1, "N"}, {2, "O"}, {3, "P"}])
       put_pr_users()
@@ -1364,6 +1384,14 @@ defmodule BorsNG.Worker.BatcherBundleTest do
         assert msg =~ "retains the tested staging commit"
       end
 
+      before = GitHub.ServerMock.get_state()
+      # Bors's own status and duplicate CI notifications cannot bypass the
+      # durable retry deadline or cause another API push/comment cycle.
+      Batcher.do_handle_cast({:status, {"iniNO", "bors", :ok, nil}}, proj.id)
+      Batcher.do_handle_cast({:status, {"iniNO", "ci", :ok, nil}}, proj.id)
+      assert GitHub.ServerMock.get_state() == before
+      assert Repo.get!(Batch, batch.id).promotion_failures == 1
+
       assert Repo.aggregate(Batch, :count, :id) == 1
 
       GitHub.ServerMock.put_state(
@@ -1372,7 +1400,7 @@ defmodule BorsNG.Worker.BatcherBundleTest do
 
       # Exercise restart recovery with an expired original CI deadline.
       Repo.get!(Batch, batch.id)
-      |> Batch.changeset(%{timeout_at: 1, last_polled: 0})
+      |> Batch.changeset(%{timeout_at: 1, last_polled: 0, promotion_retry_at: 0})
       |> Repo.update!()
 
       Batcher.handle_info({:poll, :once}, proj.id)

@@ -2,7 +2,7 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
   use BorsNG.Worker.TestCase
   alias BorsNG.Database.{Batch, Installation, LinkPatchBatch, Patch, Project, Repo, User, Status}
   alias BorsNG.GitHub
-  alias BorsNG.Worker.{Batcher, ManualApproval, MergeEligibility, QueueApproval}
+  alias BorsNG.Worker.{Batcher, ManualApproval, MergeEligibility, QueueApproval, Syncer}
 
   @head String.duplicate("a", 40)
   @base String.duplicate("b", 40)
@@ -174,6 +174,26 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
     assert Repo.get!(Patch, patch.id).merge_eligibility_id == 10
     Batcher.handle_info(:recover_queue, p.id)
     assert Repo.aggregate(LinkPatchBatch, :count, :id) == 1
+  end
+
+  test "recovery does not restart an existing approval waiting for CI", %{project: p} do
+    update_repo(:statuses, %{@head => %{"build" => :running}})
+    MergeEligibility.reconcile(p, 1)
+    patch = Repo.get_by!(Patch, project_id: p.id, pr_xref: 1)
+    before = GitHub.ServerMock.get_state()
+    assert patch.bundle_reviewer
+    for _ <- 1..3, do: Batcher.handle_info(:recover_queue, p.id)
+    assert GitHub.ServerMock.get_state() == before
+    refute Repo.exists?(Batch.all_for_project(p.id, :incomplete))
+  end
+
+  test "recovery pins the accepted head even if the stored head moves before admission", %{
+    project: p
+  } do
+    patch = Syncer.sync_patch(p.id, get_in(GitHub.ServerMock.get_state(), [@conn, :pulls, 1]))
+    Batcher.do_handle_cast({:recover_reviewed, patch.id, @base, "reviewer"}, p.id)
+    refute Repo.exists?(Batch.all_for_project(p.id, :incomplete))
+    refute Repo.get!(Patch, patch.id).queue_pending
   end
 
   test "explicit withdrawal survives missing history and a newer eligibility check", %{project: p} do
@@ -412,9 +432,11 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
     update_repo(:merge_bases, %{{1, @head} => {:ok, @base}})
     # A failed live read holds the built batch instead of pushing it.
     update_repo(:merge_bases, %{{1, @head} => {:error, :unavailable}})
+    Repo.update_all(from(b in Batch, where: b.id == ^batch.id), set: [promotion_retry_at: 0])
     Batcher.do_handle_cast({:status, {staged, "build", :ok, "https://ci"}}, p.id)
     assert Repo.get!(Batch, batch.id).state == :running
     update_repo(:merge_bases, %{{1, @head} => {:ok, String.duplicate("c", 40)}})
+    Repo.update_all(from(b in Batch, where: b.id == ^batch.id), set: [promotion_retry_at: 0])
     Batcher.do_handle_cast({:status, {staged, "build", :ok, "https://ci"}}, p.id)
     assert Repo.get!(Batch, batch.id).state == :canceled
     assert is_nil(Repo.get!(Patch, patch.id).manual_approval)

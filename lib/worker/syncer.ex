@@ -214,7 +214,7 @@ defmodule BorsNG.Worker.Syncer do
     data =
       if patch.commit != pr.head_sha or patch.into_branch != pr.base_ref or
            pr.draft or pr.state != :open,
-         do: Map.merge(data, %{manual_approval: nil, queue_pending: false, bundle_reviewer: nil}),
+         do: Map.merge(data, %{manual_approval: nil, queue_pending: false}),
          else: data
 
     # Keep the old exact-head intent as a revision-bound history marker. It

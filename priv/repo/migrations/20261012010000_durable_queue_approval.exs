@@ -3,6 +3,13 @@ defmodule BorsNG.Database.Repo.Migrations.DurableQueueApproval do
   import Ecto.Query
 
   def up do
+    alter table(:batches) do
+      add(:promotion_retry_at, :bigint, default: 0, null: false)
+      add(:promotion_failures, :integer, default: 0, null: false)
+      add(:recovery_after, :bigint, default: 0, null: false)
+      add(:recovery_failures, :integer, default: 0, null: false)
+    end
+
     alter table(:patches) do
       add(:queue_approval, :map)
       add(:queue_pending, :boolean, default: false, null: false)
@@ -34,6 +41,13 @@ defmodule BorsNG.Database.Repo.Migrations.DurableQueueApproval do
   end
 
   def down do
+    alter table(:batches) do
+      remove(:promotion_retry_at)
+      remove(:promotion_failures)
+      remove(:recovery_after)
+      remove(:recovery_failures)
+    end
+
     drop(index(:patches, [:project_id, :queue_pending, :id]))
     drop(index(:link_patch_batch, [:patch_id, :head_sha, :batch_id]))
 

@@ -97,7 +97,7 @@ defmodule BorsNG.Worker.Batcher.Divider do
     # requested priority, rather than copying that sentinel or resetting to zero.
     priority = patch_links |> Enum.map(&link_patch(&1).priority) |> Enum.max(fn -> 0 end)
 
-    {:ok, batch} =
+    result =
       Repo.transaction(fn ->
         source_ids =
           patch_links
@@ -160,7 +160,15 @@ defmodule BorsNG.Worker.Batcher.Divider do
         end
       end)
 
-    batch
+    case result do
+      {:ok, batch} ->
+        batch
+
+      {:error, reason} ->
+        require Logger
+        Logger.error("retry membership deferred project=#{project_id} reason=#{inspect(reason)}")
+        nil
+    end
   end
 
   @doc """

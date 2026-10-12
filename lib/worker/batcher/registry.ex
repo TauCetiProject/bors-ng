@@ -216,6 +216,29 @@ defmodule BorsNG.Worker.Batcher.Registry do
     # Batches and CI status rows are durable restart state. A process crash is
     # neither a withdrawal nor a failed proof; the next batcher resumes them.
 
+    now = DateTime.to_unix(DateTime.utc_now())
+
+    project_id
+    |> Batch.all_for_project(:incomplete)
+    |> Repo.all()
+    |> Enum.each(fn batch ->
+      count = (batch.recovery_failures || 0) + 1
+      delay = min(30 * Integer.pow(2, min(count - 1, 7)), 3600)
+      import Ecto.Query
+
+      Repo.update_all(from(b in Batch, where: b.id == ^batch.id),
+        set: [recovery_failures: count, recovery_after: now + delay]
+      )
+
+      if count == 6,
+        do:
+          Zulip.send_message(
+            "Bors restart recovery stuck: project #{project_id}, batch #{batch.id} has survived six " <>
+              "crashes. Queue intent and CI state are retained; retries back off up to hourly. " <>
+              "Inspect the recorded crash before withdrawing or retrying members."
+          )
+    end)
+
     Repo.insert(%Crash{
       project_id: project_id,
       component: "batch",
