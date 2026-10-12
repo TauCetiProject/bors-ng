@@ -42,6 +42,19 @@ defmodule BorsNG.Worker.MergeReconciler do
       %{state | observation: nil}
   end
 
+  @doc false
+  def wake_idle_queue(pid, %{backend: "bors", github_count: 0}, batches) do
+    if Enum.any?(batches, &(&1.state == :waiting)) and
+         not Enum.any?(batches, &(&1.state == :running)) do
+      Batcher.poll(pid)
+      :woken
+    else
+      :idle
+    end
+  end
+
+  def wake_idle_queue(_pid, _snapshot, _batches), do: :idle
+
   defp observe(project, state) do
     send(Batcher.Registry.get(project.id), :recover_queue)
     conn = Project.installation_connection(project.repo_xref, Repo)
@@ -58,6 +71,11 @@ defmodule BorsNG.Worker.MergeReconciler do
             where: b.into_branch == "main"
           )
         )
+
+      # Cancellation or a restart can leave waiting work with only the long CI poll.
+      # Reuse this heartbeat to ask the serialized batcher to reconsider its queue.
+      # The normal start guard still rechecks the backend and every member.
+      wake_idle_queue(Batcher.Registry.get(project.id), snapshot, batches)
 
       # Bound recovery reads; webhooks handle changes immediately. Rotate across
       # all open candidates so an absent/stale ready label cannot strand a check.

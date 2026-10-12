@@ -4,6 +4,47 @@ defmodule BorsNG.MergeBackendTest do
   alias BorsNG.{GitHub, MergeBackend}
   alias BorsNG.Worker.Batcher
 
+  test "heartbeat wakes waiting work after the sole running batch was canceled" do
+    batches = [%Batch{state: :canceled}, %Batch{state: :waiting}]
+
+    assert BorsNG.Worker.MergeReconciler.wake_idle_queue(
+             self(),
+             %{backend: "bors", github_count: 0},
+             batches
+           ) == :woken
+
+    assert_receive {:poll, :once}
+  end
+
+  test "heartbeat does not poll active CI or an empty queue" do
+    for batches <- [[], [%Batch{state: :running}, %Batch{state: :waiting}]] do
+      assert BorsNG.Worker.MergeReconciler.wake_idle_queue(
+               self(),
+               %{backend: "bors", github_count: 0},
+               batches
+             ) == :idle
+
+      refute_receive {:poll, :once}
+    end
+  end
+
+  test "heartbeat cannot wake incoming work while native CI or another backend owns it" do
+    for snapshot <- [
+          %{backend: "bors", github_count: 1},
+          %{backend: "queue", github_count: 0},
+          %{backend: "invalid", github_count: 0},
+          %{}
+        ] do
+      assert BorsNG.Worker.MergeReconciler.wake_idle_queue(
+               self(),
+               snapshot,
+               [%Batch{state: :waiting}]
+             ) == :idle
+
+      refute_receive {:poll, :once}
+    end
+  end
+
   test "incoming admissions wait, existing batches drain with either selection" do
     for mode <- ["queue", "bors"] do
       snapshot = {:ok, %{backend: mode, github_count: 0}}
