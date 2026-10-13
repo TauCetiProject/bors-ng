@@ -30,6 +30,37 @@ hour and produce a dedicated alert at six failures. A delayed running batch stil
 owns staging; waiting batches cannot overwrite its build. These are infrastructure
 holds, not failed proofs. The observation API exposes deadlines and counts.
 
+For the configured staging-dispatch project, a failed `build` status is checked
+against its trusted GitHub Actions source before it becomes an individual proof
+failure. This failure-only classification reads at most one exact-head status
+page and one Actions run per attempt; ordinary green CI adds no requests. The
+source must match the repository, workflow, dispatch event, branch, batch, head
+and base. Classification covers `build`, `scope`, and `bump-guard`, including
+guard failures posted before the build finalizer. An in-progress finalizer or
+newer pending/successful status gets a one-minute propagation hold without
+incrementing the failure count or extending its CI deadline. The poll consumes
+the updated verdict before bisection or promotion; a held failure never posts
+a successful Bors status.
+
+A confirmed cancelled build retains approval and membership in the same batch,
+clears its obsolete staging/CI attempt, and returns to the normal waiting-batch
+preflight. The existing infrastructure failure count drives backoff from five
+minutes to hourly; prior process failures can make the initial delay longer.
+Restart never shortens an existing deadline. Other due waiting batches can use
+the slot during cancellation backoff. Withdrawals, changed heads and holds
+remain subject to preflight; no AI edit or rebase is requested. Conclusive
+build failures and workflow timeouts still bisect normally.
+
+Unavailable API reads or an unverifiable source briefly retain the running
+batch for another classification. Three infrastructure observations or the
+original CI deadline release its staging slot and retry through normal
+preflight, preserving approval instead of fabricating a failed singleton.
+Repeated inconclusive CI emits an operator alert at counts three, six, and
+every subsequent sixth observation. Inspect CI and API access: these retries
+are not evidence that the PRs passed integration. The configured public
+TauCeti repository's Actions metadata is readable with the existing Bors App;
+a private repository would also need the appropriate Actions read permission.
+
 ## Deployment and verification
 
 Merge the reviewed change into master after CI passes. The existing Cloudflare

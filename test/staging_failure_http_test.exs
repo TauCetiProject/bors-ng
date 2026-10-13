@@ -1,0 +1,105 @@
+defmodule BorsNG.StagingFailureHttpTest do
+  use ExUnit.Case
+  alias BorsNG.GitHub.Server
+
+  @head String.duplicate("a", 40)
+  @base String.duplicate("b", 40)
+  @repo "TauCetiProject/TauCeti"
+
+  defp responses(replies, fun) do
+    {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true])
+    {:ok, {_, port}} = :inet.sockname(listener)
+    old = Application.get_env(:bors, :api_github_root)
+    Application.put_env(:bors, :api_github_root, "http://127.0.0.1:#{port}")
+
+    on_exit(fn ->
+      :gen_tcp.close(listener)
+      Application.put_env(:bors, :api_github_root, old)
+    end)
+
+    parent = self()
+
+    spawn_link(fn ->
+      for {status, data} <- replies do
+        {:ok, socket} = :gen_tcp.accept(listener, 5_000)
+        {:ok, request} = :gen_tcp.recv(socket, 0, 5_000)
+        send(parent, {:staging_request, request})
+        body = Jason.encode!(data)
+
+        :gen_tcp.send(
+          socket,
+          "HTTP/1.1 #{status} Result\r\nContent-Type: application/json\r\nContent-Length: #{byte_size(body)}\r\nConnection: close\r\n\r\n#{body}"
+        )
+
+        :gen_tcp.close(socket)
+      end
+
+      send(parent, :staging_requests_done)
+    end)
+
+    result = fun.()
+    assert_receive :staging_requests_done
+    result
+  end
+
+  defp build(state \\ "failure") do
+    [
+      %{
+        "context" => "build",
+        "state" => state,
+        "creator" => %{"id" => 41_898_282},
+        "target_url" => "https://github.com/#{@repo}/actions/runs/123"
+      }
+    ]
+  end
+
+  defp run do
+    %{
+      "event" => "repository_dispatch",
+      "path" => ".github/workflows/pr-build.yml",
+      "display_title" => "bors branch=main batch=7 head=#{@head} base=#{@base}",
+      "status" => "completed",
+      "conclusion" => "cancelled"
+    }
+  end
+
+  defp classify do
+    Server.do_handle_call(
+      :staging_failure,
+      {{:raw, "test-token"}, 14},
+      {@head, @repo, 7, "main", @base}
+    )
+  end
+
+  test "classification needs at most one status page and one run lookup" do
+    assert {:ok, :cancelled} = responses([{200, build()}, {200, run()}], &classify/0)
+    assert_receive {:staging_request, first}
+    assert_receive {:staging_request, second}
+    assert first =~ "/repositories/14/commits/#{@head}/statuses?per_page=100"
+    assert second =~ "/repositories/14/actions/runs/123"
+    refute_receive {:staging_request, _}, 10
+  end
+
+  test "newer pending or successful evidence does not fetch the obsolete run" do
+    for state <- ["success", "pending"] do
+      assert {:ok, :pending} = responses([{200, build(state)}], &classify/0)
+      assert_receive {:staging_request, _}
+      refute_receive {:staging_request, _}, 10
+    end
+  end
+
+  test "read failure and a mismatching run remain inconclusive" do
+    assert {:ok, :unavailable} = responses([{503, %{}}], &classify/0)
+    assert_receive {:staging_request, _}
+    refute_receive {:staging_request, _}, 10
+
+    assert {:ok, :unavailable} =
+             responses(
+               [{200, build()}, {200, Map.put(run(), "display_title", "another batch")}],
+               &classify/0
+             )
+
+    assert_receive {:staging_request, _}
+    assert_receive {:staging_request, _}
+  end
+end

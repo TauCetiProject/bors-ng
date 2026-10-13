@@ -1146,6 +1146,11 @@ defmodule BorsNG.Worker.Batcher do
         # promotion of the same staged commit, not classify it as a CI timeout.
         poll_running_batch(batch)
 
+      Batch.timeout_is_past(batch) and staging_failure_pending?(batch) ->
+        # Establish the CI outcome before converting an elapsed deadline
+        # into an individual proof verdict.
+        poll_running_batch(batch)
+
       Batch.timeout_is_past(batch) ->
         timeout_batch(batch)
 
@@ -1160,6 +1165,18 @@ defmodule BorsNG.Worker.Batcher do
   defp green_staged?(batch) do
     statuses = Repo.all(Status.all_for_batch(batch.id))
     is_binary(batch.commit) and statuses != [] and Enum.all?(statuses, &(&1.state == :ok))
+  end
+
+  defp staging_failure_pending?(batch) do
+    staged_failure?(batch, Repo.all(Status.all_for_batch(batch.id)))
+  end
+
+  defp staged_failure?(batch, statuses) do
+    System.get_env("BORS_STAGE_DISPATCH_PROJECT") == batch.project.name and
+      Enum.any?(
+        statuses,
+        &(&1.identifier in ["build", "bump-guard", "scope"] and &1.state == :error)
+      )
   end
 
   defp start_waiting_batch(batch) do
@@ -1968,7 +1985,7 @@ defmodule BorsNG.Worker.Batcher do
     next_status =
       if initial_status != :running do
         # some repositories require an OK status to push
-        send_status(repo_conn, batch, :ok)
+        if initial_status == :ok, do: send_status(repo_conn, batch, :ok)
         # need to change status (could go from :ok to :error if non-ff push)
         maybe_completed_status = complete_batch(initial_status, batch, statuses)
         # status can change so send_status should come after complete_batch
@@ -2045,6 +2062,89 @@ defmodule BorsNG.Worker.Batcher do
   end
 
   defp complete_batch(:error, batch, statuses) do
+    project = batch.project
+
+    if staged_failure?(batch, statuses) do
+      case GitHub.staging_failure(
+             get_repo_conn(project),
+             batch.commit,
+             project.name,
+             batch.id,
+             batch.into_branch,
+             batch.base_sha
+           ) do
+        {:ok, :conclusive} -> complete_failed_batch(batch, statuses)
+        {:ok, :pending} -> defer_pending_result(batch)
+        {:ok, :cancelled} -> defer_inconclusive_build(batch, :cancelled)
+        _ -> defer_inconclusive_build(batch, :unavailable)
+      end
+    else
+      complete_failed_batch(batch, statuses)
+    end
+  end
+
+  defp defer_pending_result(batch) do
+    if Batch.timeout_is_past(batch) do
+      # The CI deadline is still bounded; an incomplete run provides no
+      # individual proof verdict. Retry through ordinary preflight instead.
+      defer_inconclusive_build(batch, :deadline)
+    else
+      batch
+      |> Batch.changeset(%{recovery_after: DateTime.to_unix(DateTime.utc_now()) + 60})
+      |> Repo.update!()
+
+      :running
+    end
+  end
+
+  defp defer_inconclusive_build(batch, cause) do
+    count = (batch.recovery_failures || 0) + 1
+    delay = min(300 * Integer.pow(2, min(count - 1, 4)), 3_600)
+    # Never monopolize staging indefinitely on unverifiable CI evidence.
+    # After three infrastructure observations, retry the ordinary preflight
+    # while retaining intent, rather than fabricating a failed singleton.
+    reset_attempt = cause in [:cancelled, :deadline] or count >= 3 or Batch.timeout_is_past(batch)
+    state = if reset_attempt, do: :waiting, else: :running
+
+    Repo.transaction(fn ->
+      changes = %{
+        state: state,
+        recovery_failures: count,
+        recovery_after: DateTime.to_unix(DateTime.utc_now()) + delay
+      }
+
+      changes =
+        if reset_attempt do
+          Repo.delete_all(Status.all_for_batch(batch.id))
+          Map.merge(changes, %{commit: nil, base_sha: nil, timeout_at: 0})
+        else
+          changes
+        end
+
+      batch |> Batch.changeset(changes) |> Repo.update!()
+    end)
+
+    if reset_attempt, do: Process.put(:last_commit, nil)
+
+    if count >= 3 and (count == 3 or rem(count, 6) == 0) do
+      Zulip.send_message(
+        "Bors CI recovery needs attention: #{batch.project.name} batch #{batch.id}; " <>
+          "CI has no conclusive result. Approval and membership are retained; " <>
+          "the infrastructure failure count is #{count} and retries back off up to hourly. " <>
+          "Inspect CI and API access; this is not an individual proof-failure verdict."
+      )
+    end
+
+    # Retain approval and membership. The normal waiting-batch preflight will
+    # re-check heads and withdrawals before a cancelled build is retried.
+    Logger.warning(
+      "staging CI inconclusive batch=#{batch.id} cause=#{cause} retry=#{count} delay=#{delay}"
+    )
+
+    state
+  end
+
+  defp complete_failed_batch(batch, statuses) do
     project = batch.project
     repo_conn = get_repo_conn(project)
     erred = Enum.filter(statuses, &(&1.state == :error))

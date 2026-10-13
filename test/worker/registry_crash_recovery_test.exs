@@ -66,4 +66,43 @@ defmodule BorsNG.Worker.RegistryCrashRecoveryTest do
                state
              )
   end
+
+  test "batcher restart never shortens an existing CI recovery deadline" do
+    inst = Repo.insert!(%Installation{installation_xref: 7_000_003})
+
+    project =
+      Repo.insert!(%Project{
+        name: "recovery",
+        installation_id: inst.id,
+        repo_xref: 7_000_004,
+        staging_branch: "staging"
+      })
+
+    deadline = DateTime.to_unix(DateTime.utc_now()) + 3_600
+
+    batch =
+      Repo.insert!(%BorsNG.Database.Batch{
+        project_id: project.id,
+        into_branch: "master",
+        state: :waiting,
+        last_polled: 0,
+        recovery_after: deadline,
+        recovery_failures: 1
+      })
+
+    ref = make_ref()
+
+    assert {:noreply, {names, _refs}} =
+             BorsNG.Worker.Batcher.Registry.handle_info(
+               {:DOWN, ref, :process, self(), :test_induced_crash},
+               {%{}, %{ref => project.id}}
+             )
+
+    observed = Repo.get!(BorsNG.Database.Batch, batch.id)
+    assert observed.recovery_after >= deadline
+    assert observed.recovery_failures == 2
+
+    if is_pid(names[project.id]),
+      do: DynamicSupervisor.terminate_child(BorsNG.Worker.Batcher.Supervisor, names[project.id])
+  end
 end
