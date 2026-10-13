@@ -113,6 +113,7 @@ defmodule BorsNG.ApiController do
           batch_ids: Enum.map(active, & &1.id),
           batches: details,
           held: held,
+          bump_repairs: BorsNG.Worker.BumpRecovery.repair_candidates(project.id, base),
           outcomes: outcomes,
           scope_approvals: approvals,
           requested_batch: requested,

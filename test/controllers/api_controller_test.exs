@@ -150,4 +150,57 @@ defmodule BorsNG.ApiControllerTest do
     response = conn |> recycle() |> get(path) |> json_response(200)
     assert response["scope_approvals"] == []
   end
+
+  test "bump repair observation requires a current stopped singleton in this project", %{
+    conn: conn,
+    project1: p,
+    project2: other
+  } do
+    user = Repo.insert!(%BorsNG.Database.User{user_xref: 300, login: "tauceti-review-bot[bot]"})
+    head = String.duplicate("a", 40)
+
+    patch =
+      Repo.insert!(%BorsNG.Database.Patch{
+        project_id: p.id,
+        pr_xref: 42,
+        author_id: user.id,
+        open: true,
+        head_ref: "bump-mathlib/test",
+        into_branch: "main",
+        commit: head
+      })
+
+    batch = Repo.insert!(%Batch{project_id: p.id, state: :error, into_branch: "main"})
+
+    Repo.insert!(%BorsNG.Database.LinkPatchBatch{
+      batch_id: batch.id,
+      patch_id: patch.id,
+      head_sha: head,
+      reviewer: user.login
+    })
+
+    BorsNG.Worker.QueueApproval.fail([patch], batch, :build)
+    patch = Repo.get!(BorsNG.Database.Patch, patch.id)
+
+    patch
+    |> BorsNG.Database.Patch.changeset(%{
+      queue_approval: Map.put(patch.queue_approval, "repair_batch", batch.id)
+    })
+    |> Repo.update!()
+
+    path = "/repositories/#{p.id}/active-batches?base=main"
+    response = conn |> get(path) |> json_response(200)
+    assert response["bump_repairs"] == [%{"pr" => 42, "head_sha" => head, "batch_id" => batch.id}]
+
+    response =
+      conn
+      |> recycle()
+      |> get("/repositories/#{other.id}/active-batches?base=main")
+      |> json_response(200)
+
+    assert response["bump_repairs"] == []
+    patch |> BorsNG.Database.Patch.changeset(%{queue_pending: true}) |> Repo.update!()
+    response = conn |> recycle() |> get(path) |> json_response(200)
+    assert response["bump_repairs"] == []
+  end
 end

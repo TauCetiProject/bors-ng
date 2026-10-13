@@ -112,3 +112,35 @@ on the affected PR, which withdraws its intent and preserves unrelated siblings,
 then explicitly review and queue it again once fixed. Bundles withdraw as units.
 Human scope approvals must be granted again by the authorized human after
 withdrawal. Do not clear database records or replay historical approval comments.
+
+## Dependency bumps after a confirmed integration failure
+
+The existing heartbeat offers the known open dependency bump every five minutes,
+including when GraphQL candidate discovery fails. This reserves one of the four
+eligibility reads; it adds no scheduler or branch updates. The serialized batcher
+may retry an unchanged, automatically reviewed singleton bump when current main
+is a strict descendant of its failed staging base. Legacy batches resolve that
+base from the staging commit's first parent. The normal current-head eligibility,
+CI, backend, label, and merge-base checks still apply. Pending approvals, active
+membership, explicit withdrawals, bundles and human approvals are excluded.
+
+Three retries are allowed per head, each requiring a new main revision. The
+counter survives restarts and new check IDs and resets on a genuinely new head.
+A failed observation spends no retry. The decision and base are persisted with
+the existing exact-head approval before normal queue admission.
+
+A confirmed singleton failure hands off to proof repair only when main has not
+advanced, ancestry definitively prevents retry, or the three-retry budget is
+exhausted. API failures defer. Repair ownership is stored in exact-head failed
+queue intent before publishing `bump-integration`; later main advances cannot
+requeue that head while an editor owns it. A retry stopped before admission
+restores failed intent. Timeouts refund its attempt; definitive failures retain
+the charge. Both retain the attempted main revision so they cannot loop on the
+same main. Multi-PR batch failures and cancelled CI do not publish it. The public
+observation's `bump_repairs` lists only current stopped singleton heads, excluding
+pending/active work and withdrawals. Worker bump selection can therefore repair
+an integration-only proof failure even when standalone CI is green. It rereads
+both the live PR and this handoff before launching an editor. Observation outages
+skip this candidate without stalling unrelated worker work. A missed status
+publication is retried by the same heartbeat. Recovery that succeeds unchanged
+requires neither a branch push nor another AI editing or review session.

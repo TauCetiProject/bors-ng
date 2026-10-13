@@ -87,6 +87,301 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
     GitHub.ServerMock.get_state() |> put_in([@conn, key], value) |> GitHub.ServerMock.put_state()
   end
 
+  defp failed_bump(project, legacy \\ false) do
+    pr = GitHub.ServerMock.get_state()[@conn].pulls[1]
+
+    pr = %{
+      pr
+      | head_ref: "bump-mathlib/fix-test",
+        head_repo_id: 14,
+        base_repo_id: 14,
+        user: %{pr.user | login: "tauceti-review-bot[bot]"}
+    }
+
+    update_repo(:pulls, %{1 => pr})
+    update_repo(:eligibility_checks, %{@head => {:ok, [check(10, %{"single" => true})]}})
+    MergeEligibility.reconcile(project, 1)
+    patch = Repo.get_by!(Patch, project_id: project.id, pr_xref: 1)
+    batch = Repo.one!(Batch.all_for_project(project.id, :incomplete))
+    staged = String.duplicate("d", 40)
+
+    batch =
+      batch
+      |> Batch.changeset(%{
+        state: :error,
+        commit: staged,
+        base_sha: if(legacy, do: nil, else: @base)
+      })
+      |> Repo.update!()
+
+    QueueApproval.fail([patch], batch, :build)
+
+    if legacy do
+      patch |> Patch.changeset(%{queue_approval: nil}) |> Repo.update!()
+      update_repo(:commits, %{staged => %{parents: [@base]}})
+    end
+
+    current = String.duplicate("c", 40)
+    update_repo(:branches, %{"main" => current})
+    update_repo(:compare_status, %{{@base, current} => :ahead})
+    {Repo.get!(Patch, patch.id), batch, current}
+  end
+
+  test "advanced main retries a failed singleton with the same check and head", %{project: p} do
+    {patch, _batch, _current} = failed_bump(p)
+    MergeEligibility.reconcile(p, 1)
+    updated = Repo.get!(Patch, patch.id)
+    assert updated.commit == @head
+    assert updated.merge_eligibility_id == 10
+    assert updated.merge_eligibility["bump_retry_count"] == 1
+    assert updated.is_single
+    assert Repo.aggregate(LinkPatchBatch, :count, :id) == 2
+    assert Repo.aggregate(Batch.all_for_project(p.id, :incomplete), :count, :id) == 1
+    MergeEligibility.reconcile(p, 1)
+    assert Repo.aggregate(LinkPatchBatch, :count, :id) == 2
+    assert GitHub.ServerMock.get_state()[@conn].pulls[1].head_sha == @head
+  end
+
+  test "legacy singleton base is read from its staging commit, without changing the branch", %{
+    project: p
+  } do
+    {patch, _, _} = failed_bump(p, true)
+    MergeEligibility.reconcile(p, 1)
+    assert Repo.get!(Patch, patch.id).merge_eligibility["bump_retry_count"] == 1
+    assert Repo.aggregate(LinkPatchBatch, :count, :id) == 2
+  end
+
+  test "withdrawal and pending intent remain stopped even after main advances", %{project: p} do
+    {patch, _, _} = failed_bump(p)
+
+    for reason <- [:requested, :cancel_all, :automatic_review_rejected] do
+      QueueApproval.stop([Repo.get!(Patch, patch.id)], reason)
+      MergeEligibility.reconcile(p, 1)
+      assert Repo.aggregate(LinkPatchBatch, :count, :id) == 1
+      refute Repo.get!(Patch, patch.id).queue_pending
+    end
+
+    patch
+    |> Patch.changeset(%{
+      queue_pending: true,
+      queue_approval: %{"state" => "approved", "head_sha" => @head, "reviewer" => "r"}
+    })
+    |> Repo.update!()
+
+    MergeEligibility.reconcile(p, 1)
+    assert Repo.aggregate(LinkPatchBatch, :count, :id) == 1
+  end
+
+  test "holds and non-forward main defer without charging recovery", %{project: p} do
+    {patch, _, current} = failed_bump(p)
+    update_repo(:labels, %{1 => ["hold"]})
+    MergeEligibility.reconcile(p, 1)
+    assert Repo.get!(Patch, patch.id).merge_eligibility["bump_retry_count"] == nil
+    update_repo(:labels, %{1 => []})
+    update_repo(:compare_status, %{{@base, current} => :diverged})
+    MergeEligibility.reconcile(p, 1)
+    assert Repo.aggregate(LinkPatchBatch, :count, :id) == 1
+  end
+
+  test "recovery is capped across main changes and hands genuine failure to bump repair", %{
+    project: p
+  } do
+    {patch, old, first} = failed_bump(p)
+
+    Enum.reduce(1..3, {old, first}, fn count, {_failed, current} ->
+      MergeEligibility.reconcile(p, 1)
+      patch = Repo.get!(Patch, patch.id)
+      assert patch.merge_eligibility["bump_retry_count"] == count
+      batch = Repo.one!(Batch.all_for_project(p.id, :incomplete))
+      batch = batch |> Batch.changeset(%{state: :error, base_sha: current}) |> Repo.update!()
+      QueueApproval.fail([patch], batch, :build)
+      next = String.duplicate(Integer.to_string(count + 4), 40)
+      update_repo(:branches, %{"main" => next})
+      update_repo(:compare_status, %{{current, next} => :ahead})
+      {batch, next}
+    end)
+
+    MergeEligibility.reconcile(p, 1)
+    refute Repo.exists?(Batch.all_for_project(p.id, :incomplete))
+    assert Repo.get!(Patch, patch.id).merge_eligibility["bump_retry_count"] == 3
+    assert GitHub.ServerMock.get_state()[@conn].statuses[@head]["bump-integration"] == :error
+
+    assert [%{pr: 1, head_sha: @head}] =
+             Enum.map(
+               BorsNG.Worker.BumpRecovery.repair_candidates(p.id, "main"),
+               &Map.take(&1, [:pr, :head_sha])
+             )
+  end
+
+  test "unavailable ancestry neither spends a retry nor hands off to an editor", %{project: p} do
+    {patch, _, _current} = failed_bump(p)
+    update_repo(:compare_status, %{})
+    MergeEligibility.reconcile(p, 1)
+    assert Repo.aggregate(LinkPatchBatch, :count, :id) == 1
+    assert Repo.get!(Patch, patch.id).queue_approval["repair_batch"] == nil
+    assert Repo.get!(Patch, patch.id).merge_eligibility["bump_retry_count"] == nil
+  end
+
+  test "new check IDs preserve the same-head retry budget; a new head resets it", %{project: p} do
+    {patch, _, _} = failed_bump(p)
+    MergeEligibility.reconcile(p, 1)
+    patch = Repo.get!(Patch, patch.id)
+    decision = patch.merge_eligibility |> Map.put("id", 11) |> Map.delete("bump_retry_count")
+    assert BorsNG.Worker.BumpRecovery.record(decision, patch, nil)["bump_retry_count"] == 1
+    changed = %{patch | commit: String.duplicate("e", 40)}
+    assert BorsNG.Worker.BumpRecovery.record(decision, changed, nil)["bump_retry_count"] == nil
+  end
+
+  test "repair handoff excludes pending, withdrawn, held and active intent", %{project: p} do
+    {patch, batch, _} = failed_bump(p)
+    candidates = fn -> BorsNG.Worker.BumpRecovery.repair_candidates(p.id, "main") end
+    assert candidates.() == []
+    BorsNG.Worker.BumpRecovery.handoff(@conn, patch, batch.id)
+    patch = Repo.get!(Patch, patch.id)
+    assert [%{pr: 1, batch_id: id}] = candidates.()
+    assert id == batch.id
+
+    for changes <- [
+          %{queue_pending: true},
+          %{bundle_reviewer: "reviewer"},
+          %{commit: String.duplicate("f", 40)}
+        ] do
+      patch |> Patch.changeset(changes) |> Repo.update!()
+      assert candidates.() == []
+
+      Repo.update_all(from(x in Patch, where: x.id == ^patch.id),
+        set: [queue_pending: false, bundle_reviewer: nil, commit: @head]
+      )
+    end
+
+    # Restore every field explicitly; updating an unchanged stale struct is not a reset.
+    Repo.update_all(from(x in Patch, where: x.id == ^patch.id),
+      set: [queue_pending: false, bundle_reviewer: nil, commit: @head]
+    )
+
+    active = Repo.insert!(%Batch{project_id: p.id, into_branch: "main", state: :waiting})
+
+    Repo.insert!(%LinkPatchBatch{
+      batch_id: active.id,
+      patch_id: patch.id,
+      head_sha: @head,
+      reviewer: "r"
+    })
+
+    assert candidates.() == []
+    active |> Batch.changeset(%{state: :canceled}) |> Repo.update!()
+    QueueApproval.stop([Repo.get!(Patch, patch.id)], :requested)
+    assert candidates.() == []
+  end
+
+  test "repair ownership prevents a later main advance from racing an editor", %{project: p} do
+    {patch, batch, current} = failed_bump(p)
+    update_repo(:branches, %{"main" => @base})
+    MergeEligibility.reconcile(p, 1)
+    assert Repo.get!(Patch, patch.id).queue_approval["repair_batch"] == batch.id
+    assert GitHub.ServerMock.get_state()[@conn].statuses[@head]["bump-integration"] == :error
+    update_repo(:branches, %{"main" => current})
+    MergeEligibility.reconcile(p, 1)
+    assert Repo.aggregate(LinkPatchBatch, :count, :id) == 1
+    assert Repo.get!(Patch, patch.id).merge_eligibility["bump_retry_count"] == nil
+  end
+
+  test "a recovery stopped before admission restores failed intent and refunds its retry", %{
+    project: p
+  } do
+    {patch, batch, _} = failed_bump(p)
+    decision = %{patch.merge_eligibility | "id" => 11}
+
+    metadata =
+      BorsNG.Worker.BumpRecovery.record(decision, patch, %{
+        "bump_retry_count" => 1,
+        "bump_retry_batch" => batch.id,
+        "bump_retry_base" => String.duplicate("c", 40)
+      })
+
+    patch =
+      patch
+      |> Patch.changeset(%{
+        merge_eligibility: metadata,
+        queue_pending: true,
+        queue_approval: %{
+          "state" => "approved",
+          "head_sha" => @head,
+          "reviewer" => "tauceti-review-bot[bot]"
+        },
+        bundle_reviewer: "tauceti-review-bot[bot]"
+      })
+      |> Repo.update!()
+
+    QueueApproval.stop([patch], :preflight_timeout)
+    patch = Repo.get!(Patch, patch.id)
+    assert patch.merge_eligibility["bump_retry_count"] == 0
+    assert patch.queue_approval["state"] == "failed"
+    assert patch.queue_approval["batch_id"] == batch.id
+    refute patch.queue_pending
+    assert is_nil(patch.bundle_reviewer)
+    MergeEligibility.reconcile(p, 1)
+    assert Repo.aggregate(LinkPatchBatch, :count, :id) == 1
+    next = String.duplicate("e", 40)
+    update_repo(:branches, %{"main" => next})
+    update_repo(:compare_status, %{{@base, next} => :ahead})
+    MergeEligibility.reconcile(p, 1)
+    assert Repo.aggregate(LinkPatchBatch, :count, :id) == 2
+  end
+
+  test "definitive preflight failures are bounded across main advances", %{project: p} do
+    {patch, batch, _} = failed_bump(p)
+
+    for count <- 1..3 do
+      current = String.duplicate(Integer.to_string(count + 3), 40)
+      update_repo(:branches, %{"main" => current})
+      update_repo(:compare_status, %{{@base, current} => :ahead})
+      patch = Repo.get!(Patch, patch.id)
+      pr = GitHub.ServerMock.get_state()[@conn].pulls[1]
+
+      assert {:retry, retry} =
+               BorsNG.Worker.BumpRecovery.plan(@conn, p, pr, patch, patch.merge_eligibility)
+
+      metadata = BorsNG.Worker.BumpRecovery.record(patch.merge_eligibility, patch, retry)
+
+      patch =
+        patch
+        |> Patch.changeset(%{
+          merge_eligibility: metadata,
+          queue_pending: true,
+          queue_approval: %{
+            "state" => "approved",
+            "head_sha" => @head,
+            "reviewer" => "tauceti-review-bot[bot]"
+          }
+        })
+        |> Repo.update!()
+
+      QueueApproval.stop([patch], :preflight)
+      patch = Repo.get!(Patch, patch.id)
+      assert patch.merge_eligibility["bump_retry_count"] == count
+      MergeEligibility.reconcile(p, 1)
+      assert Repo.aggregate(LinkPatchBatch, :count, :id) == 1
+    end
+
+    assert Repo.get!(Patch, patch.id).queue_approval["repair_batch"] == batch.id
+  end
+
+  test "known bump is offered at most once per five minutes without candidate discovery", %{
+    project: p
+  } do
+    {_, _, _} = failed_bump(p)
+    {bump, state} = BorsNG.Worker.MergeReconciler.offer_bump(p, %{}, 1000)
+    assert bump.pr == 1
+    assert {nil, ^state} = BorsNG.Worker.MergeReconciler.offer_bump(p, state, 1299)
+
+    assert {^bump, %{last_bump_offer: 1300}} =
+             BorsNG.Worker.MergeReconciler.offer_bump(p, state, 1300)
+
+    # Drain the asynchronous eligibility casts before releasing the test sandbox.
+    :sys.get_state(Batcher.Registry.get(p.id))
+  end
+
   test "transferred automatic approval survives restart and a switch back without a new check", %{
     project: project
   } do

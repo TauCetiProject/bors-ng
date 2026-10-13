@@ -3,7 +3,7 @@ defmodule BorsNG.Worker.MergeReconciler do
   use GenServer
   import Ecto.Query
   require Logger
-  alias BorsNG.Database.{Batch, Patch, Project, Repo}
+  alias BorsNG.Database.{Batch, Patch, Project, Repo, User}
   alias BorsNG.GitHub
   alias BorsNG.Worker.Batcher
 
@@ -58,6 +58,7 @@ defmodule BorsNG.Worker.MergeReconciler do
   defp observe(project, state) do
     send(Batcher.Registry.get(project.id), :recover_queue)
     conn = Project.installation_connection(project.repo_xref, Repo)
+    {bump, state} = offer_bump(project, state)
     deadline = System.monotonic_time(:millisecond) + 40_000
 
     with {:ok, before_handoff} <-
@@ -84,11 +85,17 @@ defmodule BorsNG.Worker.MergeReconciler do
           ordered = Enum.sort_by(candidates, & &1.pr)
           cursor = Map.get(state, :eligibility_cursor, 0)
           {older, newer} = Enum.split_while(ordered, &(&1.pr <= cursor))
-          selected = Enum.take(newer ++ older, 4)
-          Enum.each(selected, &Batcher.eligibility(Batcher.Registry.get(project.id), &1.pr))
+
+          regular =
+            Enum.reject(newer ++ older, &(bump && &1.pr == bump.pr))
+            |> Enum.take(if(bump, do: 3, else: 4))
+
+          Enum.each(regular, &Batcher.eligibility(Batcher.Registry.get(project.id), &1.pr))
           # The cursor advances only when work is actually offered, so missed
           # cron ticks do not systematically skip part of the candidate set.
-          Map.put(state, :eligibility_cursor, List.last(selected).pr)
+          if regular == [],
+            do: state,
+            else: Map.put(state, :eligibility_cursor, List.last(regular).pr)
         else
           state
         end
@@ -217,6 +224,39 @@ defmodule BorsNG.Worker.MergeReconciler do
     else
       {:candidate_error, next} -> %{next | observation: nil}
       _ -> %{state | observation: nil}
+    end
+  end
+
+  # Offer the known dependency bump even when GitHub candidate discovery fails.
+  # One slot per five minutes, inside the existing four-candidate heartbeat budget.
+  @doc false
+  def offer_bump(project, state, now \\ System.monotonic_time(:second)) do
+    if is_nil(Map.get(state, :last_bump_offer)) or now - state.last_bump_offer >= 300 do
+      query =
+        from(p in Patch,
+          join: u in User,
+          on: u.id == p.author_id,
+          where:
+            u.login == "tauceti-review-bot[bot]" and p.project_id == ^project.id and
+              p.into_branch == "main" and p.open and not p.is_draft and not p.queue_pending and
+              is_nil(p.bundle_reviewer) and is_nil(p.bundle_id) and is_nil(p.manual_approval) and
+              (like(p.head_ref, "bump-mathlib/%") or p.head_ref == "hopscotch/lkg-bump"),
+          order_by: p.id,
+          limit: 1,
+          select: %{pr: p.pr_xref, id: p.id}
+        )
+
+      cursor = Map.get(state, :bump_cursor, 0)
+      bump = Repo.one(from(p in query, where: p.id > ^cursor)) || Repo.one(query)
+
+      if bump do
+        Batcher.eligibility(Batcher.Registry.get(project.id), bump.pr)
+        {bump, Map.merge(state, %{last_bump_offer: now, bump_cursor: bump.id})}
+      else
+        {nil, state}
+      end
+    else
+      {nil, state}
     end
   end
 
