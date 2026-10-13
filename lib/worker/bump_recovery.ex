@@ -29,25 +29,52 @@ defmodule BorsNG.Worker.BumpRecovery do
     with true <- decision["eligible"] and decision["single"] and automatic?(patch),
          true <- pr.head_repo_id == project.repo_xref and pr.base_repo_id == project.repo_xref,
          true <- not patch.queue_pending and is_nil(patch.bundle_reviewer),
-         true <- is_integer(count) and count >= 0 and count < @limit,
+         true <- is_integer(count) and count >= 0,
          %{batch: batch, reviewer: @reviewer} <- latest(patch),
          true <-
            batch.state == :error and permitted_stop?(patch.queue_approval, patch.commit, batch.id),
          1 <-
            Repo.aggregate(from(l in LinkPatchBatch, where: l.batch_id == ^batch.id), :count, :id),
-         false <- active?(patch),
-         {:ok, failed_base} <- failed_base(conn, batch),
-         {:ok, %{commit: current}} <- GitHub.get_recovery_base(conn),
-         true <-
-           sha?(current) and current != failed_base and current != metadata["bump_retry_base"],
-         {:ok, :ahead} <- GitHub.compare_status(conn, failed_base, current) do
-      %{
-        "bump_retry_count" => count + 1,
-        "bump_retry_base" => current,
-        "bump_retry_batch" => batch.id
-      }
+         false <- active?(patch) do
+      cond do
+        get_in(patch.queue_approval || %{}, ["repair_batch"]) == batch.id ->
+          {:repair, batch.id}
+
+        count >= @limit ->
+          {:repair, batch.id}
+
+        true ->
+          with {:ok, failed_base} <- failed_base(conn, batch),
+               {:ok, %{commit: current}} <- GitHub.get_recovery_base(conn),
+               true <- sha?(current) do
+            if current == failed_base do
+              {:repair, batch.id}
+            else
+              case GitHub.compare_status(conn, failed_base, current) do
+                {:ok, :ahead} ->
+                  if current != metadata["bump_retry_base"],
+                    do:
+                      {:retry,
+                       %{
+                         "bump_retry_count" => count + 1,
+                         "bump_retry_base" => current,
+                         "bump_retry_batch" => batch.id
+                       }},
+                    else: :defer
+
+                {:ok, status} when status in [:identical, :behind, :diverged] ->
+                  {:repair, batch.id}
+
+                _ ->
+                  :defer
+              end
+            end
+          else
+            _ -> :defer
+          end
+      end
     else
-      _ -> nil
+      _ -> :defer
     end
   end
 
@@ -57,7 +84,7 @@ defmodule BorsNG.Worker.BumpRecovery do
         do:
           Map.take(
             patch.merge_eligibility,
-            ~w(bump_retry_count bump_retry_base bump_retry_batch bump_repair_batch)
+            ~w(bump_retry_count bump_retry_base bump_retry_batch)
           ),
         else: %{}
 
@@ -112,40 +139,74 @@ defmodule BorsNG.Worker.BumpRecovery do
 
   defp sha?(sha), do: is_binary(sha) and Regex.match?(~r/\A[0-9a-f]{40}\z/, sha)
 
-  def report_failure(conn, batch, [patch]) do
-    if automatic?(patch) do
-      case GitHub.post_bump_failure(conn, patch.commit, batch.id) do
+  # Persist exclusive repair ownership before publishing its advisory status.
+  # A later main advance must never retry a head already handed to an editor.
+  def handoff(conn, patch, batch_id) do
+    approval =
+      (patch.queue_approval ||
+         %{
+           "head_sha" => patch.commit,
+           "state" => "failed",
+           "reason" => "build",
+           "batch_id" => batch_id
+         })
+      |> Map.put("repair_batch", batch_id)
+
+    patch = patch |> Patch.changeset(%{queue_approval: approval}) |> Repo.update!()
+
+    if approval["repair_published"] != true do
+      case GitHub.post_bump_failure(conn, patch.commit, batch_id) do
         :ok ->
-          patch = Repo.get!(Patch, patch.id)
+          patch
+          |> Patch.changeset(%{queue_approval: Map.put(approval, "repair_published", true)})
+          |> Repo.update!()
 
-          if is_map(patch.merge_eligibility) do
-            metadata = Map.put(patch.merge_eligibility, "bump_repair_batch", batch.id)
-            patch |> Patch.changeset(%{merge_eligibility: metadata}) |> Repo.update!()
-          end
-
+        _ ->
           :ok
-
-        error ->
-          error
       end
     end
+
+    :ok
   end
 
-  def report_failure(_, _, _), do: :ok
+  def restore_failed_preflight(patch, reason) when reason in [:preflight, :preflight_timeout] do
+    metadata = patch.merge_eligibility || %{}
+    batch_id = metadata["bump_retry_batch"]
+    count = metadata["bump_retry_count"]
 
-  def ensure_repair_signal(conn, patch) do
-    with false <- patch.queue_pending,
-         true <- is_nil(patch.bundle_reviewer),
-         %{"state" => "failed", "reason" => "build", "head_sha" => head, "batch_id" => id}
-         when head == patch.commit <- patch.queue_approval,
-         true <- get_in(patch.merge_eligibility || %{}, ["bump_repair_batch"]) != id,
-         %{batch: %{id: ^id, state: :error} = batch} <- latest(patch),
-         1 <- Repo.aggregate(from(l in LinkPatchBatch, where: l.batch_id == ^id), :count, :id) do
-      report_failure(conn, batch, [patch])
+    with true <- automatic?(patch),
+         true <- metadata["head_sha"] == patch.commit,
+         true <- is_integer(count) and count > 0,
+         %{"state" => "approved", "head_sha" => head} when head == patch.commit <-
+           patch.queue_approval,
+         true <- confirmed_singleton?(patch, batch_id),
+         false <- active?(patch) do
+      metadata =
+        metadata
+        |> Map.put("bump_retry_count", count - 1)
+        |> Map.drop(["bump_retry_base", "bump_retry_batch"])
+
+      patch
+      |> Patch.changeset(%{
+        merge_eligibility: metadata,
+        queue_pending: false,
+        bundle_reviewer: nil,
+        queue_approval: %{
+          "head_sha" => patch.commit,
+          "state" => "failed",
+          "reason" => "build",
+          "batch_id" => batch_id
+        }
+      })
+      |> Repo.update!()
+
+      true
     else
-      _ -> :ok
+      _ -> false
     end
   end
+
+  def restore_failed_preflight(_, _), do: false
 
   defp confirmed_singleton?(patch, id) do
     match?(%{batch: %{id: ^id, state: :error}}, latest(patch)) and
@@ -168,10 +229,11 @@ defmodule BorsNG.Worker.BumpRecovery do
     |> Enum.flat_map(fn patch ->
       case patch.queue_approval do
         %{"head_sha" => head, "state" => "failed", "reason" => "build", "batch_id" => id}
-        when head == patch.commit ->
-          if automatic?(patch) and not active?(patch) and confirmed_singleton?(patch, id),
-            do: [%{pr: patch.pr_xref, head_sha: head, batch_id: id}],
-            else: []
+        when head == patch.commit and is_integer(id) and id > 0 ->
+          if patch.queue_approval["repair_batch"] == id and automatic?(patch) and
+               not active?(patch) and confirmed_singleton?(patch, id),
+             do: [%{pr: patch.pr_xref, head_sha: head, batch_id: id}],
+             else: []
 
         _ ->
           []

@@ -129,8 +129,12 @@ counter survives restarts and new check IDs and resets on a genuinely new head.
 A failed observation spends no retry. The decision and base are persisted with
 the existing exact-head approval before normal queue admission.
 
-A confirmed singleton build failure publishes the `bump-integration` failure
-status. Multi-PR batch failures and cancelled CI do not publish it. The public
+A confirmed singleton failure hands off to proof repair only when main has not
+advanced, ancestry definitively prevents retry, or the three-retry budget is
+exhausted. API failures defer. Repair ownership is stored in exact-head failed
+queue intent before publishing `bump-integration`; later main advances cannot
+requeue that head while an editor owns it. A retry stopped before admission
+restores failed intent and refunds its attempt. Multi-PR batch failures and cancelled CI do not publish it. The public
 observation's `bump_repairs` lists only current stopped singleton heads, excluding
 pending/active work and withdrawals. Worker bump selection can therefore repair
 an integration-only proof failure even when standalone CI is green. It rereads

@@ -3,7 +3,7 @@ defmodule BorsNG.Worker.MergeReconciler do
   use GenServer
   import Ecto.Query
   require Logger
-  alias BorsNG.Database.{Batch, Patch, Project, Repo}
+  alias BorsNG.Database.{Batch, Patch, Project, Repo, User}
   alias BorsNG.GitHub
   alias BorsNG.Worker.Batcher
 
@@ -232,23 +232,26 @@ defmodule BorsNG.Worker.MergeReconciler do
   @doc false
   def offer_bump(project, state, now \\ System.monotonic_time(:second)) do
     if is_nil(Map.get(state, :last_bump_offer)) or now - state.last_bump_offer >= 300 do
-      bump =
-        Repo.one(
-          from(p in Patch,
-            where:
-              p.project_id == ^project.id and p.into_branch == "main" and p.open and
-                not p.is_draft and not p.queue_pending and is_nil(p.bundle_reviewer) and
-                is_nil(p.bundle_id) and is_nil(p.manual_approval) and
-                (like(p.head_ref, "bump-mathlib/%") or p.head_ref == "hopscotch/lkg-bump"),
-            order_by: p.id,
-            limit: 1,
-            select: %{pr: p.pr_xref}
-          )
+      query =
+        from(p in Patch,
+          join: u in User,
+          on: u.id == p.author_id,
+          where:
+            u.login == "tauceti-review-bot[bot]" and p.project_id == ^project.id and
+              p.into_branch == "main" and p.open and not p.is_draft and not p.queue_pending and
+              is_nil(p.bundle_reviewer) and is_nil(p.bundle_id) and is_nil(p.manual_approval) and
+              (like(p.head_ref, "bump-mathlib/%") or p.head_ref == "hopscotch/lkg-bump"),
+          order_by: p.id,
+          limit: 1,
+          select: %{pr: p.pr_xref, id: p.id}
         )
+
+      cursor = Map.get(state, :bump_cursor, 0)
+      bump = Repo.one(from(p in query, where: p.id > ^cursor)) || Repo.one(query)
 
       if bump do
         Batcher.eligibility(Batcher.Registry.get(project.id), bump.pr)
-        {bump, Map.put(state, :last_bump_offer, now)}
+        {bump, Map.merge(state, %{last_bump_offer: now, bump_cursor: bump.id})}
       else
         {nil, state}
       end

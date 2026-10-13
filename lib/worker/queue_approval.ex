@@ -16,9 +16,11 @@ defmodule BorsNG.Worker.QueueApproval do
         "reason" => to_string(reason)
       }
 
-      patch
-      |> Patch.changeset(%{queue_approval: approval, queue_pending: false})
-      |> Repo.update!()
+      unless BorsNG.Worker.BumpRecovery.restore_failed_preflight(patch, reason) do
+        patch
+        |> Patch.changeset(%{queue_approval: approval, queue_pending: false})
+        |> Repo.update!()
+      end
     end)
   end
 

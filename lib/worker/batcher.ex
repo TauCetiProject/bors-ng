@@ -2236,11 +2236,10 @@ defmodule BorsNG.Worker.Batcher do
       poll_after_delay(project)
       send_message(repo_conn, patches, {state, erred})
     else
-      # Terminal failure: the PR is dropped and needs a maintainer to
+      # Record confirmed failure. Dependency recovery decides between a retry
+      # and an exclusive proof-repair handoff on the next eligibility heartbeat.
       QueueApproval.fail(patches, batch, :build)
-      BorsNG.Worker.BumpRecovery.report_failure(repo_conn, batch, patches)
-      # re-queue it. Flag it. The queue labels are taken off once the batch
-      # state is committed to :error.
+      # The queue labels are taken off once the batch state is committed to :error.
       Labeler.mark_awaiting_requeue(repo_conn, batch.into_branch, patches)
 
       # A bundle cannot be bisected to find a culprit. Drop the bundled

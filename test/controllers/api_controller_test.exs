@@ -180,6 +180,14 @@ defmodule BorsNG.ApiControllerTest do
     })
 
     BorsNG.Worker.QueueApproval.fail([patch], batch, :build)
+    patch = Repo.get!(BorsNG.Database.Patch, patch.id)
+
+    patch
+    |> BorsNG.Database.Patch.changeset(%{
+      queue_approval: Map.put(patch.queue_approval, "repair_batch", batch.id)
+    })
+    |> Repo.update!()
+
     path = "/repositories/#{p.id}/active-batches?base=main"
     response = conn |> get(path) |> json_response(200)
     assert response["bump_repairs"] == [%{"pr" => 42, "head_sha" => head, "batch_id" => batch.id}]

@@ -103,8 +103,28 @@ defmodule BorsNG.Worker.MergeEligibility do
   def reconcile(_, _), do: :ok
 
   defp apply_decision(project, conn, pr, patch, d) do
-    retry = BumpRecovery.plan(conn, project, pr, patch, d)
-    if is_nil(retry), do: BumpRecovery.ensure_repair_signal(conn, patch)
+    recovery =
+      with true <- d["eligible"] and BumpRecovery.automatic?(patch),
+           :ok <- BorsNG.MergeBackend.allow(project, "main", :admit),
+           {:ok, labels} <- GitHub.get_labels(conn, pr.number),
+           true <- MapSet.disjoint?(MapSet.new(labels, &String.downcase/1), MapSet.new(@keep)) do
+        BumpRecovery.plan(conn, project, pr, patch, d)
+      else
+        _ -> :defer
+      end
+
+    retry =
+      case recovery do
+        {:retry, metadata} ->
+          metadata
+
+        {:repair, batch_id} ->
+          BumpRecovery.handoff(conn, patch, batch_id)
+          nil
+
+        _ ->
+          nil
+      end
 
     cond do
       patch.manual_approval != nil ->
