@@ -5,18 +5,22 @@ defmodule BorsNG.Worker.ManualApproval do
   alias BorsNG.GitHub
 
   @repo "TauCetiProject/TauCeti"
-  @actor_id 477_956
 
   def scoped?(%Project{name: @repo}, "main"), do: true
   def scoped?(_, _), do: false
 
   # Actual authenticated command author, never the name in `r=somebody`.
-  def authorized?(%Project{name: @repo}, %User{user_xref: @actor_id}), do: true
+  def authorized?(%Project{name: @repo} = project, %User{user_xref: actor}) do
+    conn = Project.installation_connection(project.repo_xref, Repo)
+    administrator?(conn, actor) == {:ok, true}
+  end
+
   def authorized?(_, _), do: false
 
   def valid?(%Patch{into_branch: "main", open: true, is_draft: false} = patch) do
     case patch.manual_approval do
-      %{"actor_id" => @actor_id, "head_sha" => head, "merge_base_sha" => base} ->
+      %{"actor_id" => actor, "head_sha" => head, "merge_base_sha" => base}
+      when is_integer(actor) and actor > 0 ->
         head == patch.commit and sha?(head) and sha?(base)
 
       _ ->
@@ -28,8 +32,9 @@ defmodule BorsNG.Worker.ManualApproval do
 
   def grant(conn, project, patch, actor, head, created_at \\ DateTime.utc_now())
 
-  def grant(conn, %Project{name: @repo}, patch, @actor_id, head, created_at) do
-    with true <- fresh_command?(patch, created_at),
+  def grant(conn, %Project{name: @repo}, patch, actor, head, created_at) do
+    with {:ok, true} <- administrator?(conn, actor),
+         true <- fresh_command?(patch, created_at),
          true <- patch.commit == head,
          true <- patch.open and not patch.is_draft and patch.into_branch == "main",
          {:ok, pr} <- GitHub.get_pr(conn, patch.pr_xref),
@@ -41,7 +46,7 @@ defmodule BorsNG.Worker.ManualApproval do
         patch
         |> Patch.changeset(%{
           manual_approval: %{
-            "actor_id" => @actor_id,
+            "actor_id" => actor,
             "head_sha" => head,
             "merge_base_sha" => base
           },
@@ -63,6 +68,7 @@ defmodule BorsNG.Worker.ManualApproval do
 
       {:ok, patch}
     else
+      {:ok, false} -> {:error, :manual_approval_changed}
       false -> {:error, :manual_approval_changed}
       _ -> :waiting
     end
@@ -73,6 +79,7 @@ defmodule BorsNG.Worker.ManualApproval do
   # Check the live diff even when a push, retarget or cancellation webhook was missed.
   def preflight(conn, patch) do
     with true <- valid?(patch),
+         {:ok, true} <- administrator?(conn, patch.manual_approval["actor_id"]),
          {:ok, pr} <- GitHub.get_pr(conn, patch.pr_xref),
          true <-
            pr.head_sha == patch.commit and pr.state == :open and not pr.draft and
@@ -81,10 +88,19 @@ defmodule BorsNG.Worker.ManualApproval do
          true <- base == patch.manual_approval["merge_base_sha"] do
       :ok
     else
+      {:ok, false} -> {:error, :manual_approval_changed}
       false -> {:error, :manual_approval_changed}
       _ -> :waiting
     end
   end
+
+  defp administrator?(conn, actor) when is_integer(actor) and actor > 0 do
+    with {:ok, users} <- GitHub.get_repository_admins(conn) do
+      {:ok, Enum.any?(users, &(&1.user.id == actor and &1.perms[:admin] == true))}
+    end
+  end
+
+  defp administrator?(_, _), do: {:ok, false}
 
   def revoke(patch_id) do
     patch = Repo.get!(Patch, patch_id)

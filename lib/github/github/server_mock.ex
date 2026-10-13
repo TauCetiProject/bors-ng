@@ -970,6 +970,15 @@ defmodule BorsNG.GitHub.ServerMock do
     end
   end
 
+  def do_handle_call(:get_repository_admins, repo_conn, {}, state) do
+    with {:ok, repo} <- Map.fetch(state, repo_conn),
+         {:ok, users} <- Map.fetch(repo, :repository_admins) do
+      {{:ok, users}, state}
+    else
+      _ -> {{:error, :get_repository_admins}, state}
+    end
+  end
+
   def do_handle_call(
         :get_user_by_login,
         _token,

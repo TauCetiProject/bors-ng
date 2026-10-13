@@ -807,6 +807,14 @@ defmodule BorsNG.GitHub.Server do
     )
   end
 
+  def do_handle_call(:get_repository_admins, {{:raw, token}, repo_xref}, {}) do
+    get_collaborators_by_repo_(
+      token,
+      "#{site()}/repositories/#{repo_xref}/collaborators?permission=admin&per_page=100",
+      []
+    )
+  end
+
   def do_handle_call(
         :get_user_by_login,
         {:raw, token},
