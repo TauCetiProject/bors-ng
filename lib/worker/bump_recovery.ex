@@ -18,6 +18,55 @@ defmodule BorsNG.Worker.BumpRecovery do
       match?(%User{login: @reviewer}, Repo.get(User, patch.author_id))
   end
 
+  # A queue priority below the running-batch sentinel (100) cannot preempt CI.
+  # Reconcile existing memberships too; deploying policy needs no PR command.
+  @queue_priority 50
+  def prioritize_waiting(%{name: "TauCetiProject/TauCeti", id: project_id}) do
+    candidates =
+      Repo.all(
+        from(b in Batch,
+          join: l in LinkPatchBatch,
+          on: l.batch_id == b.id,
+          join: p in Patch,
+          on: p.id == l.patch_id,
+          join: u in User,
+          on: u.id == p.author_id,
+          where:
+            b.project_id == ^project_id and b.into_branch == "main" and b.state == :waiting and
+              p.project_id == ^project_id and p.into_branch == "main" and p.open and
+              not p.is_draft and
+              p.is_single and is_nil(p.bundle_id) and is_nil(p.manual_approval) and
+              is_nil(l.manual_approval) and l.head_sha == p.commit and l.reviewer == ^@reviewer and
+              u.login == ^@reviewer and
+              (like(p.head_ref, "bump-mathlib/%") or p.head_ref == "hopscotch/lkg-bump") and
+              (b.priority < ^@queue_priority and p.priority == 0),
+          select: {b, p}
+        )
+      )
+
+    Enum.each(candidates, fn {batch, patch} ->
+      proof = patch.merge_eligibility || %{}
+
+      if proof["head_sha"] == patch.commit and proof["eligible"] == true and
+           proof["review_safe"] == true and proof["single"] == true and
+           Repo.aggregate(from(l in LinkPatchBatch, where: l.batch_id == ^batch.id), :count, :id) ==
+             1 and
+           match?(
+             %{"state" => "approved", "head_sha" => head, "reviewer" => @reviewer}
+             when head == patch.commit,
+             patch.queue_approval
+           ) do
+        # Deliberately avoid the manual priority command's preemption side effect.
+        if batch.priority < @queue_priority,
+          do: batch |> Batch.changeset(%{priority: @queue_priority}) |> Repo.update!()
+      end
+    end)
+
+    :ok
+  end
+
+  def prioritize_waiting(_), do: :ok
+
   def plan(conn, project, pr, patch, decision) do
     metadata =
       if get_in(patch.merge_eligibility || %{}, ["head_sha"]) == patch.commit,
