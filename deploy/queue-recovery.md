@@ -144,3 +144,16 @@ both the live PR and this handoff before launching an editor. Observation outage
 skip this candidate without stalling unrelated worker work. A missed status
 publication is retried by the same heartbeat. Recovery that succeeds unchanged
 requires neither a branch push nor another AI editing or review session.
+
+## Dependency bump scheduling
+
+The serialized queue poll gives an already-approved dependency singleton
+priority 50. This applies to existing waiting memberships after deployment and
+requires the bot author/reviewer, current accepted single-head policy proof and
+exact-head approved intent. Withdrawals, drafts, bundles, manual approvals and
+multi-member batches are excluded. The scheduler adds no GitHub reads or AI work.
+Running batches retain their sentinel priority 100 and finish normally. The
+promotion changes queue order without the manual priority command's preemption
+side effect. Ordinary priority-zero batches follow the bump; explicitly higher
+maintainer priorities remain respected. New bump heads and bisected children use
+the same policy on each normal queue poll.

@@ -128,6 +128,82 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
     {Repo.get!(Patch, patch.id), batch, current}
   end
 
+  test "automatic bump priority promotes an existing singleton without interrupting running CI",
+       %{project: p} do
+    {patch, _, _} = failed_bump(p)
+    MergeEligibility.reconcile(p, 1)
+    bump = Repo.one!(Batch.all_for_project(p.id, :incomplete))
+
+    normal =
+      Repo.insert!(%Batch{project_id: p.id, into_branch: "main", state: :waiting, last_polled: 0})
+
+    running =
+      Repo.insert!(%Batch{
+        project_id: p.id,
+        into_branch: "main",
+        state: :running,
+        priority: 100,
+        commit: "staged",
+        last_polled: 0
+      })
+
+    BorsNG.Worker.BumpRecovery.prioritize_waiting(p)
+    assert Repo.get!(Patch, patch.id).priority == 50
+    assert Repo.get!(Batch, bump.id).priority == 50
+    assert Repo.get!(Batch, running.id).state == :running
+    assert Repo.get!(Batch, running.id).commit == "staged"
+    assert Repo.get!(Batch, normal.id).priority == 0
+
+    assert {:running, [first, second, third]} =
+             Batcher.sort_batches([
+               Repo.get!(Batch, normal.id),
+               Repo.get!(Batch, bump.id),
+               Repo.get!(Batch, running.id)
+             ])
+
+    assert [first.id, second.id, third.id] == [running.id, bump.id, normal.id]
+    BorsNG.Worker.BumpRecovery.prioritize_waiting(p)
+    assert Repo.aggregate(LinkPatchBatch, :count, :id) == 2
+  end
+
+  test "priority excludes withdrawals, stale proofs, changed heads and nonsingleton batches", %{
+    project: p
+  } do
+    {patch, _, _} = failed_bump(p)
+    MergeEligibility.reconcile(p, 1)
+    patch = Repo.get!(Patch, patch.id)
+    batch = Repo.one!(Batch.all_for_project(p.id, :incomplete))
+
+    for changes <- [
+          %{queue_approval: %{"state" => "withdrawn", "head_sha" => @head}},
+          %{merge_eligibility: Map.put(patch.merge_eligibility, "head_sha", @base)},
+          %{commit: @base},
+          %{is_draft: true},
+          %{is_single: false},
+          %{open: false}
+        ] do
+      patch |> Patch.changeset(changes) |> Repo.update!()
+      BorsNG.Worker.BumpRecovery.prioritize_waiting(p)
+      assert Repo.get!(Batch, batch.id).priority == 0
+
+      Repo.update_all(from(x in Patch, where: x.id == ^patch.id),
+        set: [
+          queue_approval: patch.queue_approval,
+          merge_eligibility: patch.merge_eligibility,
+          commit: @head,
+          is_draft: false,
+          is_single: true,
+          open: true
+        ]
+      )
+    end
+
+    sibling = Repo.insert!(%Patch{project_id: p.id, pr_xref: 2, commit: @base})
+    Repo.insert!(%LinkPatchBatch{batch_id: batch.id, patch_id: sibling.id, head_sha: @base})
+    BorsNG.Worker.BumpRecovery.prioritize_waiting(p)
+    assert Repo.get!(Batch, batch.id).priority == 0
+  end
+
   test "advanced main retries a failed singleton with the same check and head", %{project: p} do
     {patch, _batch, _current} = failed_bump(p)
     MergeEligibility.reconcile(p, 1)

@@ -711,6 +711,7 @@ defmodule BorsNG.Worker.Batcher do
     project = Repo.get(Project, project_id)
 
     release_unstarted_batches(project)
+    BorsNG.Worker.BumpRecovery.prioritize_waiting(project)
 
     incomplete =
       project_id
