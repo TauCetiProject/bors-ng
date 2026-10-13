@@ -184,8 +184,11 @@ defmodule BorsNG.Worker.BumpRecovery do
          false <- active?(patch) do
       metadata =
         metadata
-        |> Map.put("bump_retry_count", count - 1)
-        |> Map.drop(["bump_retry_base", "bump_retry_batch"])
+        |> Map.put(
+          "bump_retry_count",
+          if(reason == :preflight_timeout, do: count - 1, else: count)
+        )
+        |> Map.drop(["bump_retry_batch"])
 
       patch
       |> Patch.changeset(%{

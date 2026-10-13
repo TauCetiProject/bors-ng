@@ -321,7 +321,50 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
     refute patch.queue_pending
     assert is_nil(patch.bundle_reviewer)
     MergeEligibility.reconcile(p, 1)
+    assert Repo.aggregate(LinkPatchBatch, :count, :id) == 1
+    next = String.duplicate("e", 40)
+    update_repo(:branches, %{"main" => next})
+    update_repo(:compare_status, %{{@base, next} => :ahead})
+    MergeEligibility.reconcile(p, 1)
     assert Repo.aggregate(LinkPatchBatch, :count, :id) == 2
+  end
+
+  test "definitive preflight failures are bounded across main advances", %{project: p} do
+    {patch, batch, _} = failed_bump(p)
+
+    for count <- 1..3 do
+      current = String.duplicate(Integer.to_string(count + 3), 40)
+      update_repo(:branches, %{"main" => current})
+      update_repo(:compare_status, %{{@base, current} => :ahead})
+      patch = Repo.get!(Patch, patch.id)
+      pr = GitHub.ServerMock.get_state()[@conn].pulls[1]
+
+      assert {:retry, retry} =
+               BorsNG.Worker.BumpRecovery.plan(@conn, p, pr, patch, patch.merge_eligibility)
+
+      metadata = BorsNG.Worker.BumpRecovery.record(patch.merge_eligibility, patch, retry)
+
+      patch =
+        patch
+        |> Patch.changeset(%{
+          merge_eligibility: metadata,
+          queue_pending: true,
+          queue_approval: %{
+            "state" => "approved",
+            "head_sha" => @head,
+            "reviewer" => "tauceti-review-bot[bot]"
+          }
+        })
+        |> Repo.update!()
+
+      QueueApproval.stop([patch], :preflight)
+      patch = Repo.get!(Patch, patch.id)
+      assert patch.merge_eligibility["bump_retry_count"] == count
+      MergeEligibility.reconcile(p, 1)
+      assert Repo.aggregate(LinkPatchBatch, :count, :id) == 1
+    end
+
+    assert Repo.get!(Patch, patch.id).queue_approval["repair_batch"] == batch.id
   end
 
   test "known bump is offered at most once per five minutes without candidate discovery", %{
