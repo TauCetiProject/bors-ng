@@ -2731,17 +2731,12 @@ defmodule BorsNG.Worker.Batcher do
       {:error, :ci_skip}
     else
       toml =
-        Batcher.GetBorsToml.get(
-          repo_conn,
-          if(
-            BorsNG.Worker.ManualApproval.scoped?(
-              Repo.get!(Project, patch.project_id),
-              patch.into_branch
-            ),
-            do: patch.into_branch,
-            else: patch.commit
-          )
-        )
+        if BorsNG.Worker.ManualApproval.scoped?(
+             Repo.get!(Project, patch.project_id),
+             patch.into_branch
+           ),
+           do: Batcher.GetBorsToml.get_required(repo_conn, patch.into_branch),
+           else: Batcher.GetBorsToml.get(repo_conn, patch.commit)
 
       patch_preflight(repo_conn, patch, toml)
     end

@@ -831,7 +831,12 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
     patch = manual_review(p)
     state = GitHub.ServerMock.get_state()
     files = state[@conn].files
-    update_repo(:files, Map.put(files, "main", %{}))
+
+    update_repo(
+      :files,
+      Map.put(files, "main", %{".travis.yml" => "legacy CI is not the required main config"})
+    )
+
     comments = GitHub.ServerMock.get_state()[@conn].comments
     Batcher.handle_info(:recover_queue, p.id)
     refute Repo.exists?(Batch.all_for_project(p.id, :incomplete))

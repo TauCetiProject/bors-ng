@@ -175,7 +175,8 @@ integration failures are excluded. Existing stopped approvals are recovered
 without another command or CI request, and active exact-head membership is
 excluded by the same durable recovery query.
 
-Missing or invalid main Bors configuration defers TauCeti preflight; it never
+The explicit main `bors.toml` is read with a bounded call and no legacy CI-file
+inference. Missing or invalid main Bors configuration defers TauCeti preflight; it never
 means that required checks can be skipped. Restoration clears a stopped prerun
 generation, so a stale in-memory marker cannot suppress the resumed admission.
 Preflight blocks such as labels or requested changes can resume only after those
