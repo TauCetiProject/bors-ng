@@ -43,6 +43,9 @@ the updated verdict before bisection or promotion; a held failure never posts
 a successful Bors status. Running holds arm the existing batch recheck message
 for their deadline, bypassing the coarse regular poll. Startup re-arms these
 timers from durable deadlines; stale rechecks cannot revive a terminal attempt.
+Transient database or status-read failures retain a prompt retry instead of
+losing the wake-up or breaking worker startup. Infrastructure retries report
+their members as waiting in queue; repeated-problem alerts remain separate.
 
 A confirmed cancelled build retains approval and creates a native retry child
 with the same exact-head membership through the existing transactional divider.

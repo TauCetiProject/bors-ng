@@ -89,6 +89,8 @@ defmodule BorsNG.Worker.BatcherCancelledCITest do
     assert patch.queue_approval == ctx.patch.queue_approval and patch.queue_pending
     assert Repo.get!(LinkPatchBatch, ctx.link.id).head_sha == "N"
     assert Repo.all(Batch.all_for_project(ctx.project.id)) |> length() == 2
+    statuses = GitHub.ServerMock.get_state()[{{:installation, 91}, 14}][:statuses]
+    assert statuses["N"]["bors"] == :running
 
     # A duplicate completion or poll during backoff does not create more work.
     Batcher.handle_info({:poll, :once}, ctx.project.id)
@@ -283,13 +285,28 @@ defmodule BorsNG.Worker.BatcherCancelledCITest do
     assert Repo.get!(Patch, ctx.patch.id).queue_approval == ctx.patch.queue_approval
   end
 
-  test "boot restores a running hold's timer from its durable deadline", ctx do
+  test "timer restoration reads a running hold's durable deadline", ctx do
     deadline = DateTime.to_unix(DateTime.utc_now()) + 60
     ctx.batch |> Batch.changeset(%{recovery_after: deadline}) |> Repo.update!()
-    assert {:ok, _} = Batcher.init(ctx.project.id)
+    # Exercise the boot message without registering this ExUnit process as
+    # a real batcher in the application's shared registry.
+    Batcher.handle_info(:restore_rechecks, ctx.project.id)
     timer = Process.get({:batch_recheck, ctx.batch.id})
     assert is_reference(timer)
     assert Process.read_timer(timer) <= 61_000
     Process.cancel_timer(timer)
+  end
+
+  test "a failed status read from the hold timer keeps a prompt recheck", ctx do
+    GitHub.ServerMock.put_state(
+      Map.put(GitHub.ServerMock.get_state(), :get_commit_status_error, 1)
+    )
+
+    Batcher.handle_info({:retry_promotion, ctx.batch.id, ctx.batch.commit}, ctx.project.id)
+    timer = Process.get({:batch_recheck, ctx.batch.id})
+    assert is_reference(timer)
+    assert Process.read_timer(timer) <= 61_000
+    assert Repo.get!(Batch, ctx.batch.id).state == :running
+    assert Repo.get!(Patch, ctx.patch.id).queue_approval == ctx.patch.queue_approval
   end
 end

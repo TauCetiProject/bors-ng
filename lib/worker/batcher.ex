@@ -111,13 +111,7 @@ defmodule BorsNG.Worker.Batcher do
 
     # Timers do not survive a process restart; their deadlines do. Re-arm
     # existing running holds rather than waiting for the coarse normal poll.
-    project_id
-    |> Batch.all_for_project(:running)
-    |> Repo.all()
-    |> Enum.each(fn batch ->
-      deadline = max(batch.recovery_after || 0, batch.promotion_retry_at || 0)
-      if deadline > 0 and is_binary(batch.commit), do: schedule_recheck(batch, deadline)
-    end)
+    send(self(), :restore_rechecks)
 
     {:ok, project_id}
   end
@@ -572,6 +566,24 @@ defmodule BorsNG.Worker.Batcher do
     {:noreply, project_id}
   end
 
+  def handle_info(:restore_rechecks, project_id) do
+    try do
+      project_id
+      |> Batch.all_for_project(:running)
+      |> Repo.all()
+      |> Enum.each(fn batch ->
+        deadline = max(batch.recovery_after || 0, batch.promotion_retry_at || 0)
+        if deadline > 0 and is_binary(batch.commit), do: schedule_recheck(batch, deadline)
+      end)
+    rescue
+      error ->
+        Logger.warning("batch retry timer restoration deferred: #{inspect(error.__struct__)}")
+        Process.send_after(self(), :restore_rechecks, 60_000)
+    end
+
+    {:noreply, project_id}
+  end
+
   def handle_info({:retry_promotion, batch_id, head}, project_id) do
     cancel_recheck(batch_id)
 
@@ -583,7 +595,7 @@ defmodule BorsNG.Worker.Batcher do
           schedule_recheck(batch, deadline)
         else
           Process.delete({:promotion_retry, batch_id})
-          poll_running_batch(Repo.preload(batch, :project))
+          poll_running_batch(Repo.preload(batch, :project), true)
         end
 
       _ ->
@@ -1966,7 +1978,7 @@ defmodule BorsNG.Worker.Batcher do
     :ok
   end
 
-  defp poll_running_batch(batch) do
+  defp poll_running_batch(batch, from_recheck \\ false) do
     repo_conn = get_repo_conn(batch.project)
 
     case GitHub.get_commit_status(repo_conn, batch.commit) do
@@ -1990,6 +2002,8 @@ defmodule BorsNG.Worker.Batcher do
         batch
         |> Batch.changeset(%{last_polled: now})
         |> Repo.update!()
+
+        if from_recheck, do: schedule_recheck(batch, now + 60)
     end
   end
 
@@ -2007,20 +2021,28 @@ defmodule BorsNG.Worker.Batcher do
     now = DateTime.to_unix(DateTime.utc_now(), :second)
     repo_conn = get_repo_conn(batch.project)
 
-    next_status =
+    {next_status, report_terminal} =
       if initial_status != :running do
         # some repositories require an OK status to push
         if initial_status == :ok, do: send_status(repo_conn, batch, :ok)
         # need to change status (could go from :ok to :error if non-ff push)
-        maybe_completed_status = complete_batch(initial_status, batch, statuses)
-        # status can change so send_status should come after complete_batch
-        if maybe_completed_status != :running,
-          do: send_status(repo_conn, batch, maybe_completed_status)
+        outcome = complete_batch(initial_status, batch, statuses)
+
+        result =
+          if outcome == :ci_retry do
+            # The old attempt is terminal but its members are still queued.
+            # Report their live intent without a false failure notification.
+            send_status(repo_conn, batch, :waiting)
+            {:canceled, false}
+          else
+            if outcome != :running, do: send_status(repo_conn, batch, outcome)
+            {outcome, outcome != :running}
+          end
 
         Project.ping!(batch.project_id)
-        maybe_completed_status
+        result
       else
-        initial_status
+        {initial_status, false}
       end
 
     batch
@@ -2029,7 +2051,7 @@ defmodule BorsNG.Worker.Batcher do
 
     if next_status != :running do
       cancel_recheck(batch.id)
-      send_zulip(batch, next_status)
+      if report_terminal, do: send_zulip(batch, next_status)
     end
 
     if next_status != :running do
@@ -2047,7 +2069,7 @@ defmodule BorsNG.Worker.Batcher do
     end
   end
 
-  @spec complete_batch(Status.state(), Batch.t(), [Status.t()]) :: Batch.state()
+  @spec complete_batch(Status.state(), Batch.t(), [Status.t()]) :: Batch.state() | :ci_retry
   defp complete_batch(:ok, batch, statuses) do
     conn = get_repo_conn(batch.project)
     links = Repo.all(LinkPatchBatch.from_batch(batch.id))
@@ -2162,7 +2184,7 @@ defmodule BorsNG.Worker.Batcher do
         case result do
           {:ok, _} ->
             Process.put(:last_commit, nil)
-            :canceled
+            :ci_retry
 
           {:error, _} ->
             batch |> Batch.changeset(changes) |> Repo.update!()
