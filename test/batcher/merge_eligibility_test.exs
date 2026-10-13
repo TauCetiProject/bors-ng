@@ -39,6 +39,7 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
 
     GitHub.ServerMock.put_state(%{
       @conn => %{
+        admin_permissions: %{1001 => {:ok, true}},
         pulls: %{1 => pr},
         labels: %{1 => []},
         comments: %{1 => []},
@@ -615,7 +616,7 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
       Syncer.sync_patch(project.id, get_in(GitHub.ServerMock.get_state(), [@conn, :pulls, 1]))
 
     Batcher.do_handle_cast(
-      {:maintainer_reviewed, patch.id, @head, 477_956, "kim-em", DateTime.utc_now()},
+      {:maintainer_reviewed, patch.id, @head, 1001, "maintainer", DateTime.utc_now()},
       project.id
     )
 
@@ -633,13 +634,64 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
   test "scope authority follows the actual GitHub user ID, not a claimed reviewer name", %{
     project: p
   } do
-    assert ManualApproval.authorized?(p, %User{user_xref: 477_956, login: "renamed"})
-    refute ManualApproval.authorized?(p, %User{user_xref: 1, login: "kim-em"})
-    refute ManualApproval.authorized?(%{p | name: "fork/TauCeti"}, %User{user_xref: 477_956})
+    assert ManualApproval.authorized?(p, %User{user_xref: 1001, login: "renamed"})
+    refute ManualApproval.authorized?(p, %User{user_xref: 1, login: "maintainer"})
+    refute ManualApproval.authorized?(%{p | name: "fork/TauCeti"}, %User{user_xref: 1001})
     patch = Syncer.sync_patch(p.id, get_in(GitHub.ServerMock.get_state(), [@conn, :pulls, 1]))
     assert {:error, _} = ManualApproval.grant(@conn, p, patch, 1, @head)
-    assert {:error, _} = ManualApproval.grant(@conn, p, patch, 477_956, @base)
+    assert {:error, _} = ManualApproval.grant(@conn, p, patch, 1001, @base)
     assert is_nil(Repo.get!(Patch, patch.id).manual_approval)
+  end
+
+  test "a newly appointed admin's command records their ID and requests trusted CI", %{project: p} do
+    actor = 1002
+
+    update_repo(:admin_permissions, %{actor => {:ok, true}})
+    assert ManualApproval.authorized?(p, %User{user_xref: actor, login: "renamed"})
+    refute ManualApproval.authorized?(p, %User{user_xref: 1001, login: "new-admin"})
+    scope_ci()
+    patch = Syncer.sync_patch(p.id, get_in(GitHub.ServerMock.get_state(), [@conn, :pulls, 1]))
+
+    BorsNG.Command.run(
+      %BorsNG.Command{
+        project: p,
+        patch: patch,
+        commenter: %User{user_xref: actor, login: "new-admin"},
+        approval_created_at: DateTime.to_iso8601(DateTime.utc_now())
+      },
+      :activate
+    )
+
+    pid = Batcher.Registry.get(p.id)
+    :sys.get_state(pid)
+    approved = Repo.get!(Patch, patch.id)
+    assert ManualApproval.valid?(approved)
+    assert approved.manual_approval["actor_id"] == actor
+    assert approved.manual_approval["head_sha"] == @head
+    assert approved.manual_approval["merge_base_sha"] == @base
+    assert :ok == ManualApproval.preflight(@conn, approved)
+    assert get_in(GitHub.ServerMock.get_state(), [@conn, :pr_build_dispatches]) == [1]
+    refute Repo.exists?(Batch.all_for_project(p.id, :incomplete))
+    :ok = DynamicSupervisor.terminate_child(Batcher.Supervisor, pid)
+
+    update_repo(:admin_permissions, %{})
+    refute ManualApproval.authorized?(p, %User{user_xref: actor})
+    assert {:error, :manual_approval_changed} = ManualApproval.preflight(@conn, approved)
+
+    assert {:error, :manual_approval_changed} =
+             ManualApproval.grant(@conn, p, patch, actor, @head)
+  end
+
+  test "missing role observations defer approval and preflight", %{project: p} do
+    patch = manual_review(p)
+    # The mock's missing field mirrors an unavailable authenticated GitHub read.
+    state =
+      GitHub.ServerMock.get_state() |> update_in([@conn], &Map.delete(&1, :admin_permissions))
+
+    GitHub.ServerMock.put_state(state)
+    refute ManualApproval.authorized?(p, %User{user_xref: 1001})
+    assert :waiting = ManualApproval.preflight(@conn, patch)
+    assert :waiting = ManualApproval.grant(@conn, p, patch, 1001, @head)
   end
 
   test "human approval requests CI and waits for real scope success", %{project: p} do
@@ -647,11 +699,11 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
     patch = manual_review(p)
     assert ManualApproval.valid?(patch)
     assert patch.manual_approval["merge_base_sha"] == @base
-    assert patch.bundle_reviewer == "kim-em"
+    assert patch.bundle_reviewer == "maintainer"
     assert get_in(GitHub.ServerMock.get_state(), [@conn, :pr_build_dispatches]) == [1]
     refute Repo.exists?(Batch.all_for_project(p.id, :incomplete))
     update_repo(:statuses, %{@head => %{"build" => :ok, "bump-guard" => :ok, "scope" => :ok}})
-    Batcher.do_handle_cast({:reviewed, patch.id, "kim-em"}, p.id)
+    Batcher.do_handle_cast({:reviewed, patch.id, "maintainer"}, p.id)
     batch = Repo.one!(Batch.all_for_project(p.id, :incomplete))
     link = Repo.one!(LinkPatchBatch.from_batch(batch.id))
     assert link.manual_approval == patch.manual_approval
@@ -700,7 +752,7 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
     for changes <- [%{head_sha: @base}, %{base_ref: "pilot"}, %{draft: true}, %{state: :closed}] do
       pr = get_in(GitHub.ServerMock.get_state(), [@conn, :pulls, 1])
       patch = Syncer.sync_patch(p.id, pr)
-      assert {:ok, _} = ManualApproval.grant(@conn, p, patch, 477_956, @head)
+      assert {:ok, _} = ManualApproval.grant(@conn, p, patch, 1001, @head)
       synced = Syncer.sync_patch(p.id, struct(pr, changes))
       assert is_nil(synced.manual_approval)
       Syncer.sync_patch(p.id, pr)
@@ -710,10 +762,10 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
   test "failed observations cannot grant human approval or admit stale diffs", %{project: p} do
     patch = Syncer.sync_patch(p.id, get_in(GitHub.ServerMock.get_state(), [@conn, :pulls, 1]))
     update_repo(:merge_bases, %{{1, @head} => {:error, :unavailable}})
-    assert :waiting = ManualApproval.grant(@conn, p, patch, 477_956, @head)
+    assert :waiting = ManualApproval.grant(@conn, p, patch, 1001, @head)
     assert is_nil(Repo.get!(Patch, patch.id).manual_approval)
     update_repo(:merge_bases, %{{1, @head} => {:ok, @base}})
-    assert {:ok, patch} = ManualApproval.grant(@conn, p, patch, 477_956, @head)
+    assert {:ok, patch} = ManualApproval.grant(@conn, p, patch, 1001, @head)
     update_repo(:merge_bases, %{{1, @head} => {:error, :unavailable}})
     assert :waiting = ManualApproval.preflight(@conn, patch)
   end
@@ -744,10 +796,10 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
     old = DateTime.add(patch.manual_revision_at, -60, :second) |> DateTime.to_iso8601()
 
     assert {:error, :manual_approval_changed} =
-             ManualApproval.grant(@conn, p, patch, 477_956, @head, old)
+             ManualApproval.grant(@conn, p, patch, 1001, @head, old)
 
     assert {:error, :manual_approval_changed} =
-             ManualApproval.grant(@conn, p, patch, 477_956, @head, nil)
+             ManualApproval.grant(@conn, p, patch, 1001, @head, nil)
   end
 
   test "legacy automatic cancellation preserves human approval", %{project: p} do
@@ -758,12 +810,12 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
     refute ManualApproval.valid?(Repo.get!(Patch, patch.id))
   end
 
-  test "a retry by another member cannot extend kim-em's scope authority after a push", %{
+  test "a retry by another member cannot extend maintainer's scope authority after a push", %{
     project: p
   } do
     scope_ci()
     patch = manual_review(p)
-    kim = Repo.insert!(%User{user_xref: 477_956, login: "kim-em"})
+    kim = Repo.insert!(%User{user_xref: 1001, login: "maintainer"})
     BorsNG.Database.Context.Logging.log_cmd(patch, kim, :activate)
     state = GitHub.ServerMock.get_state()
     pr = get_in(state, [@conn, :pulls, 1])
@@ -794,7 +846,7 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
     :ok = DynamicSupervisor.terminate_child(Batcher.Supervisor, pid)
   end
 
-  test "kim-em's command on a non-main base retains ordinary bors behavior", %{project: p} do
+  test "maintainer's command on a non-main base retains ordinary bors behavior", %{project: p} do
     pr = get_in(GitHub.ServerMock.get_state(), [@conn, :pulls, 1])
     update_repo(:pulls, %{1 => %{pr | base_ref: "pilot"}})
     patch = Syncer.sync_patch(p.id, %{pr | base_ref: "pilot"})
@@ -803,7 +855,7 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
       %BorsNG.Command{
         project: p,
         patch: patch,
-        commenter: %User{user_xref: 477_956, login: "kim-em"}
+        commenter: %User{user_xref: 1001, login: "maintainer"}
       },
       :activate
     )

@@ -128,7 +128,7 @@ defmodule BorsNG.ApiControllerTest do
   } do
     head = String.duplicate("a", 40)
     base = String.duplicate("b", 40)
-    approval = %{"actor_id" => 477_956, "head_sha" => head, "merge_base_sha" => base}
+    approval = %{"actor_id" => 1001, "head_sha" => head, "merge_base_sha" => base}
 
     patch =
       Repo.insert!(%BorsNG.Database.Patch{

@@ -495,6 +495,15 @@ defmodule BorsNG.GitHub do
     )
   end
 
+  @spec repository_admin?(tconn, pos_integer) :: {:ok, boolean} | {:error, term}
+  def repository_admin?(repo_conn, actor) do
+    GenServer.call(
+      BorsNG.GitHub,
+      {:repository_admin, repo_conn, {actor}},
+      Confex.fetch_env!(:bors, :api_github_timeout)
+    )
+  end
+
   @spec get_app!() :: String.t()
   def get_app! do
     {:ok, app_link} =

@@ -1,14 +1,15 @@
 # Human approval of restricted TauCeti paths
 
-After reviewing a TauCeti PR, kim-em can issue the existing `bors r+` or `bors merge`
-command. Bors checks the actual authenticated command author's GitHub user ID
-(477956), records the live head and merge base when accepting the command, and
-requests a rerun of TauCeti's trusted `pr-build` workflow. Bors confirms the accepted
-head and merge base in a comment. Plain comments follow bors's live-head semantics,
+After reviewing a TauCeti PR, a repository admin can issue the existing `bors r+`
+or `bors merge` command. Bors checks the actual authenticated command author's
+current GitHub repository admin role, records their user ID and the live head and
+merge base when accepting the command, and requests a rerun of TauCeti's trusted
+`pr-build` workflow. Bors confirms the accepted head and merge base in a comment.
+Plain comments follow bors's live-head semantics,
 with an additional check that the comment does not predate a head or target change
 observed by bors. Review and inline review commands also pin the reviewed commit ID.
 A claimed reviewer name
-in `bors r=kim-em` does not grant this authority. Other users and repositories keep
+in `bors r=an-admin` does not grant this authority. Other users and repositories keep
 the existing policy. `bors retry` reuses ordinary review intent and never extends
 human scope authority to a new revision.
 
@@ -28,7 +29,13 @@ The observation exposes `scope_approvals` entries containing `pr`, `actor_id`,
 against that endpoint, and requires approval for every member with restricted
 paths. Every restricted path in the combined diff must also belong to an approved
 member's diff. File listings must be complete and include rename sources and deletions.
-Dispatch payloads cannot authorize a scope exception.
+Both bors and TauCeti CI resolve admin authority from GitHub's live repository
+effective permissions, including roles inherited through teams, rather than a
+list of identities in the source. Removing the approving
+account's admin role invalidates scope authority; an unavailable role lookup
+fails closed. Dispatch payloads cannot authorize a scope exception.
+The corresponding TauCeti CI verifier must also be deployed before additional
+admins can approve restricted paths under this policy.
 
 Approval survives a negative automatic `merge eligibility` verdict. TauCetiReview
 continues publishing its usual policy verdict without knowing about this mechanism.
@@ -46,8 +53,8 @@ already queued automatic approval.
    The standard deployment runs migrations before serving requests.
 2. Merge TauCeti's CI change. Until that workflow is on main, the new dispatch is
    ignored and restricted-path PRs continue to fail scope; no bypass is enabled.
-3. After reviewing a restricted-path PR, issue `bors merge` as kim-em. Observe the
-   requested PR CI rerun, green scope, staging CI and the eventual bors merge.
+3. After reviewing a restricted-path PR, issue `bors merge` as a repository admin.
+   Observe the requested PR CI rerun, green scope, staging CI and the eventual bors merge.
 
 The initial CI change itself is subject to the previous scope policy. The new
 approval cannot bootstrap it: both PR and staging CI still use main's old workflow.
@@ -59,4 +66,5 @@ no waiting or running bors batches, merge the reviewed CI change, then restore
 reports failure: bors has already failed that batch. After this rollout, ordinary
 restricted-path PRs use only the existing human bors command.
 
-No repository permissions, secrets, labels or new commands are required.
+Authority is managed through the repository admin role. Adding or removing admins
+requires no source edits, secrets, labels or new commands.
