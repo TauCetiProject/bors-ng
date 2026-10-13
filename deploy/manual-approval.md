@@ -30,7 +30,8 @@ against that endpoint, and requires approval for every member with restricted
 paths. Every restricted path in the combined diff must also belong to an approved
 member's diff. File listings must be complete and include rename sources and deletions.
 Both bors and TauCeti CI resolve admin authority from GitHub's live repository
-roles, rather than a list of identities in the source. Removing the approving
+effective permissions, including roles inherited through teams, rather than a
+list of identities in the source. Removing the approving
 account's admin role invalidates scope authority; an unavailable role lookup
 fails closed. Dispatch payloads cannot authorize a scope exception.
 

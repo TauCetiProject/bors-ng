@@ -39,9 +39,7 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
 
     GitHub.ServerMock.put_state(%{
       @conn => %{
-        repository_admins: [
-          %{user: %GitHub.User{id: 1001, login: "maintainer"}, perms: %{admin: true}}
-        ],
+        admin_permissions: %{1001 => {:ok, true}},
         pulls: %{1 => pr},
         labels: %{1 => []},
         comments: %{1 => []},
@@ -353,10 +351,7 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
   test "a newly appointed admin's command records their ID and requests trusted CI", %{project: p} do
     actor = 1002
 
-    update_repo(:repository_admins, [
-      %{user: %GitHub.User{id: actor, login: "new-admin"}, perms: %{admin: true}}
-    ])
-
+    update_repo(:admin_permissions, %{actor => {:ok, true}})
     assert ManualApproval.authorized?(p, %User{user_xref: actor, login: "renamed"})
     refute ManualApproval.authorized?(p, %User{user_xref: 1001, login: "new-admin"})
     scope_ci()
@@ -384,7 +379,7 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
     refute Repo.exists?(Batch.all_for_project(p.id, :incomplete))
     :ok = DynamicSupervisor.terminate_child(Batcher.Supervisor, pid)
 
-    update_repo(:repository_admins, [])
+    update_repo(:admin_permissions, %{})
     refute ManualApproval.authorized?(p, %User{user_xref: actor})
     assert {:error, :manual_approval_changed} = ManualApproval.preflight(@conn, approved)
 
@@ -396,7 +391,7 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
     patch = manual_review(p)
     # The mock's missing field mirrors an unavailable authenticated GitHub read.
     state =
-      GitHub.ServerMock.get_state() |> update_in([@conn], &Map.delete(&1, :repository_admins))
+      GitHub.ServerMock.get_state() |> update_in([@conn], &Map.delete(&1, :admin_permissions))
 
     GitHub.ServerMock.put_state(state)
     refute ManualApproval.authorized?(p, %User{user_xref: 1001})

@@ -94,11 +94,8 @@ defmodule BorsNG.Worker.ManualApproval do
     end
   end
 
-  defp administrator?(conn, actor) when is_integer(actor) and actor > 0 do
-    with {:ok, users} <- GitHub.get_repository_admins(conn) do
-      {:ok, Enum.any?(users, &(&1.user.id == actor and &1.perms[:admin] == true))}
-    end
-  end
+  defp administrator?(conn, actor) when is_integer(actor) and actor > 0,
+    do: GitHub.repository_admin?(conn, actor)
 
   defp administrator?(_, _), do: {:ok, false}
 

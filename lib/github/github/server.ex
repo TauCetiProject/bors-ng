@@ -807,12 +807,24 @@ defmodule BorsNG.GitHub.Server do
     )
   end
 
-  def do_handle_call(:get_repository_admins, {{:raw, token}, repo_xref}, {}) do
-    get_collaborators_by_repo_(
-      token,
-      "#{site()}/repositories/#{repo_xref}/collaborators?permission=admin&per_page=100",
-      []
-    )
+  def do_handle_call(:repository_admin, {{:raw, token}, repo_xref}, {actor}) do
+    client = tesla_client("token #{token}")
+
+    with {:ok, %{status: 200, body: user_body}} <- Tesla.get(client, "/user/#{actor}"),
+         {:ok, %{"id" => ^actor, "login" => login}} <- Jason.decode(user_body),
+         true <- is_binary(login),
+         {:ok, %{status: 200, body: permission_body}} <-
+           Tesla.get(
+             client,
+             "/repositories/#{repo_xref}/collaborators/#{URI.encode_www_form(login)}/permission"
+           ),
+         {:ok, %{"user" => %{"id" => ^actor}, "permission" => permission}} <-
+           Jason.decode(permission_body) do
+      {:ok, permission == "admin"}
+    else
+      {:ok, %{status: 404}} -> {:ok, false}
+      _ -> {:error, :repository_admin_unavailable}
+    end
   end
 
   def do_handle_call(
