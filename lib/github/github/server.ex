@@ -352,6 +352,36 @@ defmodule BorsNG.GitHub.Server do
     _ -> {:error, :merge_base_unavailable}
   end
 
+  def do_handle_call(:get_staging_base, conn, {head}) do
+    with true <- Regex.match?(~r/\A[0-9a-f]{40}\z/, head),
+         %{status: 200, body: raw} <- get!(conn, "git/commits/#{head}"),
+         %{"sha" => ^head, "parents" => [%{"sha" => base} | _]} <- Jason.decode!(raw),
+         true <- Regex.match?(~r/\A[0-9a-f]{40}\z/, base) do
+      {:ok, base}
+    else
+      _ -> {:error, :staging_base_unavailable}
+    end
+  rescue
+    _ -> {:error, :staging_base_unavailable}
+  end
+
+  def do_handle_call(:post_bump_failure, conn, {head, batch}) do
+    body =
+      Jason.encode!(%{
+        context: "bump-integration",
+        state: "failure",
+        description: "Confirmed singleton integration failure; bump repair required",
+        target_url: "https://bors.taucetiproject.org/batches/#{batch}"
+      })
+
+    case post!(conn, "statuses/#{head}", body) do
+      %{status: 201} -> :ok
+      _ -> {:error, :bump_failure_status}
+    end
+  rescue
+    _ -> {:error, :bump_failure_status}
+  end
+
   def do_handle_call(:reset_scope, conn, {head}) do
     body =
       Jason.encode!(%{

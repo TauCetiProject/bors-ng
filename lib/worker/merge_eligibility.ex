@@ -4,7 +4,7 @@ defmodule BorsNG.Worker.MergeEligibility do
   require Logger
   alias BorsNG.Database.{Batch, LinkPatchBatch, Patch, Project, Repo}
   alias BorsNG.GitHub
-  alias BorsNG.Worker.{Batcher, QueueApproval, Syncer}
+  alias BorsNG.Worker.{Batcher, BumpRecovery, QueueApproval, Syncer}
 
   @name "merge eligibility"
   @repo "TauCetiProject/TauCeti"
@@ -103,6 +103,9 @@ defmodule BorsNG.Worker.MergeEligibility do
   def reconcile(_, _), do: :ok
 
   defp apply_decision(project, conn, pr, patch, d) do
+    retry = BumpRecovery.plan(conn, project, pr, patch, d)
+    if is_nil(retry), do: BumpRecovery.ensure_repair_signal(conn, patch)
+
     cond do
       patch.manual_approval != nil ->
         # Automatic policy cannot retract this human decision. It remains bound
@@ -123,13 +126,13 @@ defmodule BorsNG.Worker.MergeEligibility do
       not d["eligible"] or pr.state != :open or pr.base_ref != "main" or pr.draft ->
         :ok
 
-      QueueApproval.blocked?(patch) ->
+      QueueApproval.blocked?(patch) and is_nil(retry) ->
         :ok
 
-      patch.merge_eligibility_id == d["id"] ->
+      patch.merge_eligibility_id == d["id"] and is_nil(retry) ->
         :ok
 
-      represented_or_terminal?(patch) ->
+      represented_or_terminal?(patch) and is_nil(retry) ->
         :ok
 
       true ->
@@ -143,7 +146,7 @@ defmodule BorsNG.Worker.MergeEligibility do
             patch
             |> Patch.changeset(%{
               merge_eligibility_id: d["id"],
-              merge_eligibility: d,
+              merge_eligibility: BumpRecovery.record(d, patch, retry),
               queue_pending: true,
               queue_approval: %{
                 "head_sha" => patch.commit,

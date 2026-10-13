@@ -71,14 +71,6 @@ are not evidence that the PRs passed integration. The configured public
 TauCeti repository's Actions metadata is readable with the existing Bors App;
 a private repository would also need the appropriate Actions read permission.
 
-The project observation also exposes `queue_stops`: only current-head failed or
-withdrawn intent on open PRs for the requested base, without reviewer metadata.
-`pr=N` selects the newest batch containing that PR's current head; `batch_id=N`
-continues to select a specific historical attempt. Consumers must check complete
-observation coverage, exact membership, current holds and withdrawals before
-acting. These fields permit deterministic dependency-branch recovery; they do
-not grant approval or change queue state.
-
 ## Deployment and verification
 
 Merge the reviewed change into master after CI passes. The existing Cloudflare
@@ -120,3 +112,29 @@ on the affected PR, which withdraws its intent and preserves unrelated siblings,
 then explicitly review and queue it again once fixed. Bundles withdraw as units.
 Human scope approvals must be granted again by the authorized human after
 withdrawal. Do not clear database records or replay historical approval comments.
+
+## Dependency bumps after a confirmed integration failure
+
+The existing heartbeat offers the known open dependency bump every five minutes,
+including when GraphQL candidate discovery fails. This reserves one of the four
+eligibility reads; it adds no scheduler or branch updates. The serialized batcher
+may retry an unchanged, automatically reviewed singleton bump when current main
+is a strict descendant of its failed staging base. Legacy batches resolve that
+base from the staging commit's first parent. The normal current-head eligibility,
+CI, backend, label, and merge-base checks still apply. Pending approvals, active
+membership, explicit withdrawals, bundles and human approvals are excluded.
+
+Three retries are allowed per head, each requiring a new main revision. The
+counter survives restarts and new check IDs and resets on a genuinely new head.
+A failed observation spends no retry. The decision and base are persisted with
+the existing exact-head approval before normal queue admission.
+
+A confirmed singleton build failure publishes the `bump-integration` failure
+status. Multi-PR batch failures and cancelled CI do not publish it. The public
+observation's `bump_repairs` lists only current stopped singleton heads, excluding
+pending/active work and withdrawals. Worker bump selection can therefore repair
+an integration-only proof failure even when standalone CI is green. It rereads
+both the live PR and this handoff before launching an editor. Observation outages
+skip this candidate without stalling unrelated worker work. A missed status
+publication is retried by the same heartbeat. Recovery that succeeds unchanged
+requires neither a branch push nor another AI editing or review session.

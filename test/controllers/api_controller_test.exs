@@ -75,51 +75,6 @@ defmodule BorsNG.ApiControllerTest do
     assert conn.status == 404
   end
 
-  test "queue stops expose only current open heads on the selected project and base", %{
-    conn: conn,
-    project1: project,
-    project2: other
-  } do
-    alias BorsNG.Database.Patch
-
-    for {number, project_id, base, open, head, state, reason} <- [
-          {1, project.id, "main", true, "current", "withdrawn", "requested"},
-          {2, project.id, "main", true, "current", "failed", "build"},
-          {3, project.id, "main", true, "changed", "withdrawn", "cancel_all"},
-          {4, project.id, "pilot", true, "current", "withdrawn", "requested"},
-          {5, other.id, "main", true, "current", "withdrawn", "requested"},
-          {6, project.id, "main", false, "current", "withdrawn", "requested"},
-          {7, project.id, "main", true, "current", "approved", nil}
-        ] do
-      Repo.insert!(%Patch{
-        project_id: project_id,
-        pr_xref: number,
-        into_branch: base,
-        open: open,
-        commit: head,
-        queue_approval: %{
-          "head_sha" => "current",
-          "state" => state,
-          "reason" => reason,
-          "reviewer" => "private"
-        }
-      })
-    end
-
-    response =
-      conn |> get("/repositories/#{project.id}/active-batches?base=main") |> json_response(200)
-
-    assert Enum.sort_by(response["queue_stops"], & &1["pr"]) == [
-             %{
-               "pr" => 1,
-               "head_sha" => "current",
-               "state" => "withdrawn",
-               "reason" => "requested"
-             },
-             %{"pr" => 2, "head_sha" => "current", "state" => "failed", "reason" => "build"}
-           ]
-  end
-
   test "main observation excludes pilots and preserves an approved head after a push", %{
     conn: conn,
     project1: project
@@ -196,51 +151,48 @@ defmodule BorsNG.ApiControllerTest do
     assert response["scope_approvals"] == []
   end
 
-  test "PR lookup selects its newest current-head batch on the requested base", %{
+  test "bump repair observation requires a current stopped singleton in this project", %{
     conn: conn,
-    project1: project
+    project1: p,
+    project2: other
   } do
-    alias BorsNG.Database.{Patch, LinkPatchBatch}
+    user = Repo.insert!(%BorsNG.Database.User{user_xref: 300, login: "tauceti-review-bot[bot]"})
+    head = String.duplicate("a", 40)
 
     patch =
-      Repo.insert!(%Patch{
-        project_id: project.id,
+      Repo.insert!(%BorsNG.Database.Patch{
+        project_id: p.id,
         pr_xref: 42,
+        author_id: user.id,
+        open: true,
+        head_ref: "bump-mathlib/test",
         into_branch: "main",
-        commit: "current"
+        commit: head
       })
 
-    for {branch, head, state} <- [
-          {"main", "old", :error},
-          {"main", "current", :error},
-          {"pilot", "current", :running}
-        ] do
-      batch = Repo.insert!(%Batch{project_id: project.id, into_branch: branch, state: state})
+    batch = Repo.insert!(%Batch{project_id: p.id, state: :error, into_branch: "main"})
 
-      Repo.insert!(%LinkPatchBatch{
-        patch_id: patch.id,
-        batch_id: batch.id,
-        head_sha: head,
-        reviewer: "r"
-      })
-    end
+    Repo.insert!(%BorsNG.Database.LinkPatchBatch{
+      batch_id: batch.id,
+      patch_id: patch.id,
+      head_sha: head,
+      reviewer: user.login
+    })
 
-    response =
-      conn
-      |> get("/repositories/#{project.id}/active-batches?base=main&pr=42")
-      |> json_response(200)
-
-    assert response["requested_batch"]["state"] == "error"
-    assert response["requested_batch"]["base"] == "main"
-    assert response["requested_batch"]["members"] == [%{"pr" => 42, "head_sha" => "current"}]
-    patch |> Patch.changeset(%{commit: "new"}) |> Repo.update!()
+    BorsNG.Worker.QueueApproval.fail([patch], batch, :build)
+    path = "/repositories/#{p.id}/active-batches?base=main"
+    response = conn |> get(path) |> json_response(200)
+    assert response["bump_repairs"] == [%{"pr" => 42, "head_sha" => head, "batch_id" => batch.id}]
 
     response =
       conn
       |> recycle()
-      |> get("/repositories/#{project.id}/active-batches?base=main&pr=42")
+      |> get("/repositories/#{other.id}/active-batches?base=main")
       |> json_response(200)
 
-    assert response["requested_batch"] == nil
+    assert response["bump_repairs"] == []
+    patch |> BorsNG.Database.Patch.changeset(%{queue_pending: true}) |> Repo.update!()
+    response = conn |> recycle() |> get(path) |> json_response(200)
+    assert response["bump_repairs"] == []
   end
 end

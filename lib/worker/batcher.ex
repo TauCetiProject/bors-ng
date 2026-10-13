@@ -2238,6 +2238,7 @@ defmodule BorsNG.Worker.Batcher do
     else
       # Terminal failure: the PR is dropped and needs a maintainer to
       QueueApproval.fail(patches, batch, :build)
+      BorsNG.Worker.BumpRecovery.report_failure(repo_conn, batch, patches)
       # re-queue it. Flag it. The queue labels are taken off once the batch
       # state is committed to :error.
       Labeler.mark_awaiting_requeue(repo_conn, batch.into_branch, patches)

@@ -404,6 +404,28 @@ defmodule BorsNG.GitHub.ServerMock do
     end
   end
 
+  def do_handle_call(:get_staging_base, conn, {head}, state) do
+    case get_in(state, [conn, :commits, head, :parents]) do
+      [base | _] -> {{:ok, base}, state}
+      _ -> {{:error, :staging_base_unavailable}, state}
+    end
+  end
+
+  def do_handle_call(:post_bump_failure, conn, {head, _batch}, state) do
+    repo = Map.get(state, conn, %{})
+    statuses = Map.get(repo, :statuses, %{})
+
+    statuses =
+      Map.update(
+        statuses,
+        head,
+        %{"bump-integration" => :error},
+        &Map.put(&1, "bump-integration", :error)
+      )
+
+    {:ok, Map.put(state, conn, Map.put(repo, :statuses, statuses))}
+  end
+
   def do_handle_call(:get_pr_commits, repo_conn, {pr_xref}, state) do
     with(
       {:ok, repo} <- Map.fetch(state, repo_conn),
