@@ -53,6 +53,13 @@ defmodule BorsNG.Worker.Batcher.GetBorsToml do
   defp entry_ttl({:error, _}, ttl), do: min(ttl, error_ttl())
   defp error_ttl, do: Confex.get_env(:bors, :bors_toml_cache_error_ttl_ms, 15_000)
 
+  def get_required(repo_conn, branch) do
+    case GitHub.get_required_bors_config(repo_conn, branch) do
+      {:ok, content} when is_binary(content) -> BorsToml.new(content)
+      _ -> {:error, :fetch_failed}
+    end
+  end
+
   @spec get(GitHub.tconn(), binary) :: {:ok, BorsToml.t()} | {:error, terror}
   def get(repo_conn, branch) do
     toml =

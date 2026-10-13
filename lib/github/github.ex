@@ -398,6 +398,12 @@ defmodule BorsNG.GitHub do
     call_with_retry(:get_reviews, repo_conn, {issue_xref, sha}, 500, 4_000)
   end
 
+  # Admission to TauCeti requires its explicit main config. An outage or
+  # missing file must not trigger inference from unrelated legacy CI files.
+  def get_required_bors_config(repo_conn, branch) do
+    safe_genserver_call(:get_file, repo_conn, {branch, "bors.toml"}, 15_000)
+  end
+
   @spec get_file!(tconn, binary, binary) :: binary | nil
   def get_file!(repo_conn, branch, path) do
     case call_with_retry(:get_file, repo_conn, {branch, path}, 500, 4_000) do

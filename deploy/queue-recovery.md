@@ -158,3 +158,27 @@ promotion changes queue order without the manual priority command's preemption
 side effect. Ordinary priority-zero batches follow the bump; explicitly higher
 maintainer priorities remain respected. New bump heads and bisected children use
 the same policy on each normal queue poll.
+
+## Scope approvals stopped before admission
+
+A cancelled standalone CI run can briefly post failure while its replacement
+builds the same head. Preflight stops admission, but the recorded human scope
+decision stays bound to that head and merge base. The existing four-candidate
+queue-recovery heartbeat also discovers such preflight/preflight-timeout stops.
+A given stopped head is rechecked at most once per five minutes; the in-memory
+cooldown resets safely after a restart and a new head is never throttled by it.
+It resumes only after current administrator permission, live PR revision, merge
+base, required CI and ordinary policy checks all pass. While checks are red or
+observations unavailable, it leaves intent unchanged and posts no retry comments.
+Changed authority or diff revokes the decision; withdrawals, bundles and genuine
+integration failures are excluded. Existing stopped approvals are recovered
+without another command or CI request, and active exact-head membership is
+excluded by the same durable recovery query.
+
+The explicit main `bors.toml` is read with a bounded call and no legacy CI-file
+inference. Missing or invalid main Bors configuration defers TauCeti preflight; it never
+means that required checks can be skipped. Restoration clears a stopped prerun
+generation, so a stale in-memory marker cannot suppress the resumed admission.
+Preflight blocks such as labels or requested changes can resume only after those
+blocks clear and the unchanged human scope decision passes every current guard.
+An explicit `bors r-` or cancel-all remains a withdrawal and is never recovered.

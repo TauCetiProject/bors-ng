@@ -551,6 +551,50 @@ defmodule BorsNG.Worker.Batcher do
                 :ok
             end
 
+          %{"head_sha" => head, "state" => "withdrawn", "reason" => reason}
+          when head == patch.commit and reason in ["preflight", "preflight_timeout"] ->
+            # A failed/cancelled standalone check stops admission, not the
+            # exact-head human scope decision. Recover only once all live
+            # admission guards pass; red checks cause no writes or comments.
+            now = System.monotonic_time(:second)
+            key = {:scope_recovery_after, patch.id}
+
+            if not match?({^head, due} when due > now, Process.get(key)) do
+              Process.put(key, {head, now + 300})
+
+              admission =
+                with {:ok, labels} <- GitHub.get_labels(conn, patch.pr_xref),
+                     true <-
+                       MapSet.disjoint?(
+                         MapSet.new(labels, &String.downcase/1),
+                         MapSet.new(~w(keep hold wip human do-not-close))
+                       ) do
+                  patch_preflight(conn, patch)
+                else
+                  _ -> :waiting
+                end
+
+              case admission do
+                {:ok, _} ->
+                  actor = get_in(patch.manual_approval || %{}, ["actor_id"])
+
+                  user =
+                    if is_integer(actor), do: Repo.get_by(BorsNG.Database.User, user_xref: actor)
+
+                  if user && is_binary(user.login) do
+                    # No live held approval or active membership remains.
+                    Process.delete({:approval_pending, patch.id})
+                    do_handle_cast({:recover_reviewed, patch.id, head, user.login}, project_id)
+                  end
+
+                {:error, :manual_approval_changed} ->
+                  do_handle_cast({:cancel, patch.id, :eligibility_changed}, project_id)
+
+                _ ->
+                  :ok
+              end
+            end
+
           _ ->
             QueueApproval.stop([patch], :revision_changed)
         end
@@ -2687,24 +2731,24 @@ defmodule BorsNG.Worker.Batcher do
       {:error, :ci_skip}
     else
       toml =
-        Batcher.GetBorsToml.get(
-          repo_conn,
-          if(
-            BorsNG.Worker.ManualApproval.scoped?(
-              Repo.get!(Project, patch.project_id),
-              patch.into_branch
-            ),
-            do: patch.into_branch,
-            else: patch.commit
-          )
-        )
+        if BorsNG.Worker.ManualApproval.scoped?(
+             Repo.get!(Project, patch.project_id),
+             patch.into_branch
+           ),
+           do: Batcher.GetBorsToml.get_required(repo_conn, patch.into_branch),
+           else: Batcher.GetBorsToml.get(repo_conn, patch.commit)
 
       patch_preflight(repo_conn, patch, toml)
     end
   end
 
-  defp patch_preflight(_repo_conn, _patch, {:error, _}) do
-    {:ok, nil}
+  defp patch_preflight(_repo_conn, patch, {:error, _}) do
+    if BorsNG.Worker.ManualApproval.scoped?(
+         Repo.get!(Project, patch.project_id),
+         patch.into_branch
+       ),
+       do: :waiting,
+       else: {:ok, nil}
   end
 
   defp patch_preflight(repo_conn, patch, {:ok, toml}) do
