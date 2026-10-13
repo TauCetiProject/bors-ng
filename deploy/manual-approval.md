@@ -34,6 +34,8 @@ effective permissions, including roles inherited through teams, rather than a
 list of identities in the source. Removing the approving
 account's admin role invalidates scope authority; an unavailable role lookup
 fails closed. Dispatch payloads cannot authorize a scope exception.
+The corresponding TauCeti CI verifier must also be deployed before additional
+admins can approve restricted paths under this policy.
 
 Approval survives a negative automatic `merge eligibility` verdict. TauCetiReview
 continues publishing its usual policy verdict without knowing about this mechanism.

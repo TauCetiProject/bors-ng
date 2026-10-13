@@ -1,15 +1,21 @@
 defmodule BorsNG.MergeEligibilityHttpTest do
   use ExUnit.Case
 
-  for {returned_actor, permission, expected} <- [
-        {1001, "admin", {:ok, true}},
-        {1001, "write", {:ok, false}},
-        {1002, "admin", {:error, :repository_admin_unavailable}}
+  for {returned_actor, permission, user_status, permission_status, expected} <- [
+        {1001, "admin", 200, 200, {:ok, true}},
+        {1001, "write", 200, 200, {:ok, false}},
+        {1002, "admin", 200, 200, {:error, :repository_admin_unavailable}},
+        {1001, "admin", 404, 200, {:ok, false}},
+        {1001, "admin", 200, 404, {:error, :repository_admin_unavailable}},
+        {1001, "admin", 403, 200, {:error, :repository_admin_unavailable}},
+        {1001, "admin", 200, 500, {:error, :repository_admin_unavailable}}
       ] do
     @returned_actor returned_actor
     @permission permission
+    @user_status user_status
+    @permission_status permission_status
     @expected expected
-    test "effective admin lookup verifies actor #{returned_actor} with #{@permission} permission" do
+    test "effective admin lookup actor #{returned_actor}, #{@permission}, HTTP #{user_status}/#{permission_status}" do
       {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true])
       {:ok, {_, port}} = :inet.sockname(listener)
       old_root = Application.get_env(:bors, :api_github_root)
@@ -25,13 +31,17 @@ defmodule BorsNG.MergeEligibilityHttpTest do
 
       parent = self()
 
-      responses = [
-        %{id: 1001, login: "renamed-admin"},
-        %{user: %{id: @returned_actor}, permission: @permission}
-      ]
+      responses = [{@user_status, %{id: 1001, login: "renamed-admin"}}]
+
+      responses =
+        if @user_status == 200,
+          do:
+            responses ++
+              [{@permission_status, %{user: %{id: @returned_actor}, permission: @permission}}],
+          else: responses
 
       spawn_link(fn ->
-        for response <- responses do
+        for {status, response} <- responses do
           {:ok, socket} = :gen_tcp.accept(listener, 5_000)
           {:ok, request} = :gen_tcp.recv(socket, 0, 5_000)
           send(parent, {:request, request})
@@ -39,7 +49,7 @@ defmodule BorsNG.MergeEligibilityHttpTest do
 
           :gen_tcp.send(
             socket,
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: #{byte_size(body)}\r\nConnection: close\r\n\r\n#{body}"
+            "HTTP/1.1 #{status} Test\r\nContent-Type: application/json\r\nContent-Length: #{byte_size(body)}\r\nConnection: close\r\n\r\n#{body}"
           )
 
           :gen_tcp.close(socket)
@@ -56,12 +66,15 @@ defmodule BorsNG.MergeEligibilityHttpTest do
 
       assert_receive {:request, request}
       assert String.starts_with?(request, "GET /user/1001 ")
-      assert_receive {:request, request}
 
-      assert String.starts_with?(
-               request,
-               "GET /repositories/14/collaborators/renamed-admin/permission "
-             )
+      if @user_status == 200 do
+        assert_receive {:request, request}
+
+        assert String.starts_with?(
+                 request,
+                 "GET /repositories/14/collaborators/renamed-admin/permission "
+               )
+      end
 
       assert_receive :server_done
     end

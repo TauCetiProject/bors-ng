@@ -810,20 +810,15 @@ defmodule BorsNG.GitHub.Server do
   def do_handle_call(:repository_admin, {{:raw, token}, repo_xref}, {actor}) do
     client = tesla_client("token #{token}")
 
-    with {:ok, %{status: 200, body: user_body}} <- Tesla.get(client, "/user/#{actor}"),
-         {:ok, %{"id" => ^actor, "login" => login}} <- Jason.decode(user_body),
-         true <- is_binary(login),
-         {:ok, %{status: 200, body: permission_body}} <-
-           Tesla.get(
-             client,
-             "/repositories/#{repo_xref}/collaborators/#{URI.encode_www_form(login)}/permission"
-           ),
-         {:ok, %{"user" => %{"id" => ^actor}, "permission" => permission}} <-
-           Jason.decode(permission_body) do
-      {:ok, permission == "admin"}
-    else
-      {:ok, %{status: 404}} -> {:ok, false}
-      _ -> {:error, :repository_admin_unavailable}
+    case Tesla.get(client, "/user/#{actor}") do
+      {:ok, %{status: 404}} ->
+        {:ok, false}
+
+      {:ok, %{status: 200, body: user_body}} ->
+        repository_admin_permission(client, repo_xref, actor, user_body)
+
+      _ ->
+        {:error, :repository_admin_unavailable}
     end
   end
 
@@ -1153,6 +1148,22 @@ defmodule BorsNG.GitHub.Server do
       error ->
         IO.inspect(error)
         {:error, :get_pr_commits}
+    end
+  end
+
+  defp repository_admin_permission(client, repo_xref, actor, user_body) do
+    with {:ok, %{"id" => ^actor, "login" => login}} <- Jason.decode(user_body),
+         true <- is_binary(login),
+         {:ok, %{status: 200, body: permission_body}} <-
+           Tesla.get(
+             client,
+             "/repositories/#{repo_xref}/collaborators/#{URI.encode_www_form(login)}/permission"
+           ),
+         {:ok, %{"user" => %{"id" => ^actor}, "permission" => permission}} <-
+           Jason.decode(permission_body) do
+      {:ok, permission == "admin"}
+    else
+      _ -> {:error, :repository_admin_unavailable}
     end
   end
 
