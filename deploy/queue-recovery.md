@@ -148,7 +148,8 @@ requires neither a branch push nor another AI editing or review session.
 ## Dependency bump scheduling
 
 The serialized queue poll gives an already-approved dependency singleton
-priority 50. This applies to existing waiting memberships after deployment and
+priority 50 without changing the PR priority. Explicit nonzero maintainer
+priorities are respected. This applies to existing waiting memberships after deployment and
 requires the bot author/reviewer, current accepted single-head policy proof and
 exact-head approved intent. Withdrawals, drafts, bundles, manual approvals and
 multi-member batches are excluded. The scheduler adds no GitHub reads or AI work.

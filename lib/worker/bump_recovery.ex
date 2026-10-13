@@ -39,7 +39,7 @@ defmodule BorsNG.Worker.BumpRecovery do
               is_nil(l.manual_approval) and l.head_sha == p.commit and l.reviewer == ^@reviewer and
               u.login == ^@reviewer and
               (like(p.head_ref, "bump-mathlib/%") or p.head_ref == "hopscotch/lkg-bump") and
-              (b.priority < ^@queue_priority or p.priority < ^@queue_priority),
+              (b.priority < ^@queue_priority and p.priority == 0),
           select: {b, p}
         )
       )
@@ -56,9 +56,6 @@ defmodule BorsNG.Worker.BumpRecovery do
              when head == patch.commit,
              patch.queue_approval
            ) do
-        if patch.priority < @queue_priority,
-          do: patch |> Patch.changeset(%{priority: @queue_priority}) |> Repo.update!()
-
         # Deliberately avoid the manual priority command's preemption side effect.
         if batch.priority < @queue_priority,
           do: batch |> Batch.changeset(%{priority: @queue_priority}) |> Repo.update!()

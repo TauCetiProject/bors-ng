@@ -148,7 +148,7 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
       })
 
     BorsNG.Worker.BumpRecovery.prioritize_waiting(p)
-    assert Repo.get!(Patch, patch.id).priority == 50
+    assert Repo.get!(Patch, patch.id).priority == 0
     assert Repo.get!(Batch, bump.id).priority == 50
     assert Repo.get!(Batch, running.id).state == :running
     assert Repo.get!(Batch, running.id).commit == "staged"
