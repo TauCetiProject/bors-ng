@@ -104,4 +104,8 @@ defmodule BorsNG.StagingFailureTest do
       assert StagingFailure.build_source(data, @head, @repo) == {:lookup, 123}
     end
   end
+
+  test "a cancelled older native attempt is propagation, not a new cancellation" do
+    assert StagingFailure.classify_run(run(), 8, @head, "main", @base) == :pending
+  end
 end

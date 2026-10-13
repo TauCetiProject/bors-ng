@@ -40,6 +40,9 @@ defmodule BorsNG.Worker.StagingFailure do
   def classify_run(run, batch, head, branch, base) when is_map(run) do
     title = "bors branch=#{branch} batch=#{batch} head=#{head} base=#{base}"
 
+    older =
+      ~r/^bors branch=#{Regex.escape(branch)} batch=(\d+) head=#{Regex.escape(head)} base=#{Regex.escape(base || "")}$/
+
     if run["event"] == "repository_dispatch" and
          run["path"] == ".github/workflows/pr-build.yml" and
          run["display_title"] == title do
@@ -50,7 +53,17 @@ defmodule BorsNG.Worker.StagingFailure do
         _ -> :unavailable
       end
     else
-      :unavailable
+      case Regex.run(older, run["display_title"] || "") do
+        [_, previous] ->
+          if run["event"] == "repository_dispatch" and
+               run["path"] == ".github/workflows/pr-build.yml" and
+               String.to_integer(previous) < batch,
+             do: :pending,
+             else: :unavailable
+
+        _ ->
+          :unavailable
+      end
     end
   end
 

@@ -40,11 +40,18 @@ guard failures posted before the build finalizer. An in-progress finalizer or
 newer pending/successful status gets a one-minute propagation hold without
 incrementing the failure count or extending its CI deadline. The poll consumes
 the updated verdict before bisection or promotion; a held failure never posts
-a successful Bors status.
+a successful Bors status. Running holds arm the existing batch recheck message
+for their deadline, bypassing the coarse regular poll. Startup re-arms these
+timers from durable deadlines; stale rechecks cannot revive a terminal attempt.
 
-A confirmed cancelled build retains approval and membership in the same batch,
-clears its obsolete staging/CI attempt, and returns to the normal waiting-batch
-preflight. The existing infrastructure failure count drives backoff from five
+A confirmed cancelled build retains approval and creates a native retry child
+with the same exact-head membership through the existing transactional divider.
+The old attempt retains historical links and CI records while releasing the
+unique staging SHA; the child's distinct batch ID keeps an old
+cancellation from cancelling a newer attempt on the same SHA. Statuses for
+older matching attempts are propagation holds until the current verdict arrives.
+The child returns to normal waiting-batch preflight. The existing infrastructure
+failure count drives backoff from five
 minutes to hourly; prior process failures can make the initial delay longer.
 Restart never shortens an existing deadline. Other due waiting batches can use
 the slot during cancellation backoff. Withdrawals, changed heads and holds

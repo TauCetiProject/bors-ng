@@ -71,18 +71,24 @@ defmodule BorsNG.Worker.BatcherCancelledCITest do
     {:ok, project: project, patch: patch, batch: batch, link: link}
   end
 
+  defp active_child(project) do
+    [batch] = Repo.all(Batch.all_for_project(project.id, :incomplete))
+    batch
+  end
+
   test "cancelled singleton retains exact-head intent and membership", ctx do
     Batcher.handle_info({:poll, :once}, ctx.project.id)
-    batch = Repo.get!(Batch, ctx.batch.id)
+    assert Repo.get!(Batch, ctx.batch.id).state == :canceled
+    batch = active_child(ctx.project)
     patch = Repo.get!(Patch, ctx.patch.id)
     assert batch.state == :waiting
-    assert batch.commit == nil and batch.base_sha == nil and batch.timeout_at == 0
+    assert batch.commit == nil and batch.base_sha == nil and batch.timeout_at in [nil, 0]
     assert batch.recovery_failures == 1
     assert batch.recovery_after > DateTime.to_unix(DateTime.utc_now())
     assert Repo.all(Status.all_for_batch(batch.id)) == []
     assert patch.queue_approval == ctx.patch.queue_approval and patch.queue_pending
     assert Repo.get!(LinkPatchBatch, ctx.link.id).head_sha == "N"
-    assert Repo.all(Batch.all_for_project(ctx.project.id)) |> length() == 1
+    assert Repo.all(Batch.all_for_project(ctx.project.id)) |> length() == 2
 
     # A duplicate completion or poll during backoff does not create more work.
     Batcher.handle_info({:poll, :once}, ctx.project.id)
@@ -103,11 +109,12 @@ defmodule BorsNG.Worker.BatcherCancelledCITest do
 
   test "withdrawal during backoff remains withdrawn", ctx do
     Batcher.handle_info({:poll, :once}, ctx.project.id)
+    child = active_child(ctx.project)
     Batcher.handle_cast({:cancel, ctx.patch.id, :requested}, ctx.project.id)
     patch = Repo.get!(Patch, ctx.patch.id)
     assert patch.queue_approval["state"] == "withdrawn"
     refute patch.queue_pending
-    assert Repo.get(LinkPatchBatch, ctx.link.id) == nil
+    assert Repo.all(LinkPatchBatch.from_batch(child.id)) == []
   end
 
   test "a conclusive failed singleton still loses approval", ctx do
@@ -139,11 +146,12 @@ defmodule BorsNG.Worker.BatcherCancelledCITest do
 
   test "early scope and bump-guard failures are classified before bisection", ctx do
     for guard <- ["scope", "bump-guard"] do
-      Repo.delete_all(Status.all_for_batch(ctx.batch.id))
-      Repo.insert!(%Status{batch_id: ctx.batch.id, identifier: guard, state: :error})
-      Repo.insert!(%Status{batch_id: ctx.batch.id, identifier: "build", state: :running})
+      batch = active_child(ctx.project)
+      Repo.delete_all(Status.all_for_batch(batch.id))
+      Repo.insert!(%Status{batch_id: batch.id, identifier: guard, state: :error})
+      Repo.insert!(%Status{batch_id: batch.id, identifier: "build", state: :running})
 
-      ctx.batch
+      batch
       |> Batch.changeset(%{state: :running, commit: "staged", last_polled: 0, recovery_after: 0})
       |> Repo.update!()
 
@@ -157,7 +165,7 @@ defmodule BorsNG.Worker.BatcherCancelledCITest do
       )
 
       Batcher.handle_info({:poll, :once}, ctx.project.id)
-      assert Repo.get!(Batch, ctx.batch.id).state == :waiting
+      assert active_child(ctx.project).state == :waiting
       assert Repo.get!(Patch, ctx.patch.id).queue_approval == ctx.patch.queue_approval
     end
   end
@@ -177,7 +185,8 @@ defmodule BorsNG.Worker.BatcherCancelledCITest do
     end
 
     batch = Repo.get!(Batch, ctx.batch.id)
-    assert batch.state == :waiting and batch.commit == nil
+    assert batch.state == :canceled
+    assert active_child(ctx.project).state == :waiting
     assert Repo.get!(Patch, ctx.patch.id).queue_approval == ctx.patch.queue_approval
   end
 
@@ -187,7 +196,8 @@ defmodule BorsNG.Worker.BatcherCancelledCITest do
     |> Repo.update!()
 
     Batcher.handle_info({:poll, :once}, ctx.project.id)
-    assert Repo.get!(Batch, ctx.batch.id).state == :waiting
+    assert Repo.get!(Batch, ctx.batch.id).state == :canceled
+    assert active_child(ctx.project).state == :waiting
     assert Repo.get!(Patch, ctx.patch.id).queue_approval == ctx.patch.queue_approval
   end
 
@@ -203,13 +213,14 @@ defmodule BorsNG.Worker.BatcherCancelledCITest do
     )
 
     Batcher.handle_info({:poll, :once}, ctx.project.id)
-    assert Repo.get!(Batch, ctx.batch.id).state == :waiting
+    assert Repo.get!(Batch, ctx.batch.id).state == :canceled
+    assert active_child(ctx.project).state == :waiting
     assert Repo.get!(Patch, ctx.patch.id).queue_approval == ctx.patch.queue_approval
   end
 
-  test "repeated cancellation persists exponential backoff without new memberships", ctx do
+  test "repeated cancellation preserves backoff and one active membership", ctx do
     for count <- 1..6 do
-      batch = Repo.get!(Batch, ctx.batch.id)
+      batch = active_child(ctx.project)
 
       batch
       |> Batch.changeset(%{
@@ -225,13 +236,60 @@ defmodule BorsNG.Worker.BatcherCancelledCITest do
       Repo.delete_all(Status.all_for_batch(batch.id))
       Repo.insert!(%Status{batch_id: batch.id, identifier: "build", state: :error})
       Batcher.handle_info({:poll, :once}, ctx.project.id)
-      observed = Repo.get!(Batch, batch.id)
+      assert Repo.get!(Batch, batch.id).state == :canceled
+      observed = active_child(ctx.project)
       assert observed.recovery_failures == count
       delay = min(300 * Integer.pow(2, min(count - 1, 4)), 3_600)
       assert observed.recovery_after >= DateTime.to_unix(DateTime.utc_now()) + delay - 1
       assert observed.state == :waiting
       assert Repo.get!(Patch, ctx.patch.id).queue_approval == ctx.patch.queue_approval
-      assert Repo.all(LinkPatchBatch.from_batch(batch.id)) |> length() == 1
+      assert Repo.all(LinkPatchBatch.from_batch(observed.id)) |> length() == 1
     end
+  end
+
+  test "a due recheck bypasses the coarse poll and resolves genuine failure", ctx do
+    state = GitHub.ServerMock.get_state()
+
+    GitHub.ServerMock.put_state(
+      put_in(state, [{{:installation, 91}, 14}, :staging_failures, "staged"], :pending)
+    )
+
+    Batcher.handle_info({:poll, :once}, ctx.project.id)
+    timer = Process.get({:batch_recheck, ctx.batch.id})
+    assert is_reference(timer)
+    assert Process.read_timer(timer) <= 61_000
+    batch = Repo.get!(Batch, ctx.batch.id)
+    refute Batch.next_poll_is_past(Repo.preload(batch, :project))
+    batch |> Batch.changeset(%{recovery_after: 0}) |> Repo.update!()
+    state = GitHub.ServerMock.get_state()
+
+    GitHub.ServerMock.put_state(
+      put_in(state, [{{:installation, 91}, 14}, :staging_failures, "staged"], :conclusive)
+    )
+
+    Batcher.handle_info({:retry_promotion, batch.id, batch.commit}, ctx.project.id)
+    assert Repo.get!(Batch, batch.id).state == :error
+    assert Repo.get!(Patch, ctx.patch.id).queue_approval["state"] == "failed"
+    assert Process.get({:batch_recheck, batch.id}) == nil
+  end
+
+  test "old retry timer and status do not reactivate a cancelled attempt", ctx do
+    Batcher.handle_info({:poll, :once}, ctx.project.id)
+    child = active_child(ctx.project)
+    Batcher.handle_info({:retry_promotion, ctx.batch.id, "staged"}, ctx.project.id)
+    Batcher.handle_cast({:status, {"staged", "build", :error, "old-run"}}, ctx.project.id)
+    assert Repo.get!(Batch, ctx.batch.id).state == :canceled
+    assert active_child(ctx.project).id == child.id
+    assert Repo.get!(Patch, ctx.patch.id).queue_approval == ctx.patch.queue_approval
+  end
+
+  test "boot restores a running hold's timer from its durable deadline", ctx do
+    deadline = DateTime.to_unix(DateTime.utc_now()) + 60
+    ctx.batch |> Batch.changeset(%{recovery_after: deadline}) |> Repo.update!()
+    assert {:ok, _} = Batcher.init(ctx.project.id)
+    timer = Process.get({:batch_recheck, ctx.batch.id})
+    assert is_reference(timer)
+    assert Process.read_timer(timer) <= 61_000
+    Process.cancel_timer(timer)
   end
 end
