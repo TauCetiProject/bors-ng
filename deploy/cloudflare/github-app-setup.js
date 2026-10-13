@@ -11,7 +11,7 @@ const MANIFEST = {
   public: false,
   default_permissions: {
     contents: "write", issues: "write", pull_requests: "write",
-    statuses: "write", checks: "write", members: "read",
+    statuses: "write", checks: "write", members: "read", workflows: "write",
   },
   default_events: [
     "repository", "status", "issue_comment", "pull_request",

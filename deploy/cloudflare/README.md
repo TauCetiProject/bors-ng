@@ -39,6 +39,16 @@ The private GitHub App `tau-ceti-bors` is registered and installed only on
 have been installed. Their source files and the Cloudflare Builds API token
 are under `/home/kim/.config/tauceti-bors/` with private permissions.
 
+The App and its installation need `Workflows: write` in addition to
+`Contents: write`. Human-approved infrastructure PRs can change
+`.github/workflows/`; GitHub also checks this permission when bors merges
+their heads into its temporary staging branch. Without it, the merge returns
+HTTP 403 (`Resource not accessible by integration`) and prevents staging.
+After changing App permissions, approve the updated permissions on the
+TauCeti installation too. Bors refreshes failed installation tokens and its
+existing restart recovery retries retained batches; no PR reapproval or direct
+merge is needed. Check actual staging progress after the recovery backoff.
+
 Cloudflare Builds is connected to `TauCetiProject/bors-ng` and automatically
 builds pushes to `master`. The build command is `npm ci`, the deploy command is
 `npx wrangler deploy`, and the root directory is `/`. Workers Builds has Docker
