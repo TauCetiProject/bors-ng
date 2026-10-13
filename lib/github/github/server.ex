@@ -583,6 +583,33 @@ defmodule BorsNG.GitHub.Server do
          do: {:ok, Map.merge(status, check)}
   end
 
+  def do_handle_call(:staging_failure, repo_conn, {head, repo, batch, branch, base}) do
+    alias BorsNG.Worker.StagingFailure
+
+    # The combined /status response omits creator identity. The exact-head
+    # status list includes it and is returned newest first. Limit this
+    # failure-only lookup to one page; incomplete evidence remains a hold.
+    with %{status: 200, body: raw} <- get!(repo_conn, "commits/#{head}/statuses?per_page=100"),
+         {:ok, statuses} when is_list(statuses) <- Jason.decode(raw) do
+      case StagingFailure.build_source(%{"sha" => head, "statuses" => statuses}, head, repo) do
+        {:lookup, id} ->
+          with %{status: 200, body: raw} <- get!(repo_conn, "actions/runs/#{id}"),
+               {:ok, run} <- Jason.decode(raw) do
+            {:ok, StagingFailure.classify_run(run, batch, head, branch, base)}
+          else
+            _ -> {:ok, :unavailable}
+          end
+
+        result ->
+          {:ok, result}
+      end
+    else
+      _ -> {:ok, :unavailable}
+    end
+  rescue
+    _ -> {:ok, :unavailable}
+  end
+
   def do_handle_call(:get_labels, repo_conn, {issue_xref}) do
     repo_conn
     |> get!("issues/#{issue_xref}/labels")

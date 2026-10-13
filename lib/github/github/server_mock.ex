@@ -693,6 +693,11 @@ defmodule BorsNG.GitHub.ServerMock do
     {{:error, :get_commit_status, 502}, %{state | :get_commit_status_error => n - 1}}
   end
 
+  def do_handle_call(:staging_failure, repo_conn, {head, _, _, _, _}, state) do
+    outcome = get_in(state, [repo_conn, :staging_failures, head]) || :conclusive
+    {{:ok, outcome}, state}
+  end
+
   def do_handle_call(:get_commit_status, repo_conn, {sha}, state) do
     with(
       {:ok, repo} <- Map.fetch(state, repo_conn),

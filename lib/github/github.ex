@@ -313,6 +313,10 @@ defmodule BorsNG.GitHub do
     call_with_retry(:get_commit_status, repo_conn, {sha}, 500, 4_000)
   end
 
+  def staging_failure(repo_conn, head, repo, batch, branch, base) do
+    call_with_retry(:staging_failure, repo_conn, {head, repo, batch, branch, base})
+  end
+
   @spec get_labels!(tconn, integer | bitstring) :: [bitstring]
   def get_labels!(repo_conn, issue_xref) do
     {:ok, labels} = get_labels(repo_conn, issue_xref)
@@ -696,6 +700,10 @@ defmodule BorsNG.GitHub do
        when action in [:add_labels, :remove_label, :list_issues_by_label] do
     Confex.get_env(:bors, :api_github_retry_label_max_elapsed_ms, 1_000)
   end
+
+  # Failure classification is best-effort and bounded; the durable batch
+  # backoff owns retries rather than blocking the batcher on GitHub reads.
+  defp max_retry_elapsed_ms(:staging_failure), do: 1_000
 
   defp max_retry_elapsed_ms(_action) do
     Confex.get_env(:bors, :api_github_retry_write_max_elapsed_ms, 30_000)

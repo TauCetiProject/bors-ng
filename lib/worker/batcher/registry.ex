@@ -227,14 +227,17 @@ defmodule BorsNG.Worker.Batcher.Registry do
       import Ecto.Query
 
       Repo.update_all(from(b in Batch, where: b.id == ^batch.id),
-        set: [recovery_failures: count, recovery_after: now + delay]
+        set: [
+          recovery_failures: count,
+          recovery_after: max(batch.recovery_after || 0, now + delay)
+        ]
       )
 
       if count == 6,
         do:
           Zulip.send_message(
-            "Bors restart recovery stuck: project #{project_id}, batch #{batch.id} has survived six " <>
-              "crashes. Queue intent and CI state are retained; retries back off up to hourly. " <>
+            "Bors restart recovery stuck: project #{project_id}, batch #{batch.id} has reached six " <>
+              "infrastructure recovery failures. Queue intent and CI state are retained; retries back off up to hourly. " <>
               "Inspect the recorded crash before withdrawing or retrying members."
           )
     end)

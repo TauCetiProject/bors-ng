@@ -35,6 +35,8 @@ defmodule BorsNG.Worker.RegistryRestartTest do
     proj = project!()
 
     {:ok, pid} = BorsNG.Worker.Batcher.Supervisor.start(proj.id)
+    # Drain startup restoration before stopping a process sharing our sandbox.
+    :sys.get_state(pid)
     ref = Process.monitor(pid)
 
     BorsNG.Worker.Batcher.Supervisor.terminate_all()
@@ -149,6 +151,7 @@ defmodule BorsNG.Worker.RegistryRestartTest do
 
     # Stand in for the pre-restart batcher the old supervisor still holds.
     {:ok, orphan} = BorsNG.Worker.Batcher.Supervisor.start(proj.id)
+    :sys.get_state(orphan)
     ref = Process.monitor(orphan)
 
     {:ok, {_names, _refs}} = BorsNG.Worker.Batcher.Registry.init(:ok)
@@ -162,6 +165,7 @@ defmodule BorsNG.Worker.RegistryRestartTest do
 
     assert length(pids) == 1
     refute orphan in pids
+    Enum.each(pids, &:sys.get_state/1)
 
     # Leave the supervisor as this test found it: the batcher init/1 started
     # would otherwise poll a project that vanishes with the sandbox rollback.

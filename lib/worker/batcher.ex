@@ -109,6 +109,10 @@ defmodule BorsNG.Worker.Batcher do
       trunc(Confex.fetch_env!(:bors, :poll_period) * :rand.uniform(2) * 0.5)
     )
 
+    # Timers do not survive a process restart; their deadlines do. Re-arm
+    # existing running holds rather than waiting for the coarse normal poll.
+    send(self(), :restore_rechecks)
+
     {:ok, project_id}
   end
 
@@ -290,22 +294,18 @@ defmodule BorsNG.Worker.Batcher do
 
   def do_handle_cast({:status, {commit, identifier, state, url}}, project_id) do
     project_id
-    |> Batch.get_assoc_by_commit(commit)
+    |> Batch.get_assoc_by_commit(commit, :incomplete)
     |> Repo.all()
-    |> case do
-      [batch] ->
-        {updated, _} =
-          batch.id
-          |> Status.get_for_batch(identifier)
-          |> Repo.update_all(set: [state: state, url: url, identifier: identifier])
+    |> Enum.each(fn batch ->
+      {updated, _} =
+        batch.id
+        |> Status.get_for_batch(identifier)
+        |> Repo.update_all(set: [state: state, url: url, identifier: identifier])
 
-        if updated > 0 and batch.state == :running do
-          maybe_complete_batch(batch)
-        end
-
-      [] ->
-        :ok
-    end
+      if updated > 0 and batch.state == :running do
+        maybe_complete_batch(batch)
+      end
+    end)
   end
 
   def do_handle_cast({:cancel, patch_id, :review_unsafe}, project_id) do
@@ -566,11 +566,37 @@ defmodule BorsNG.Worker.Batcher do
     {:noreply, project_id}
   end
 
+  def handle_info(:restore_rechecks, project_id) do
+    try do
+      project_id
+      |> Batch.all_for_project(:running)
+      |> Repo.all()
+      |> Enum.each(fn batch ->
+        deadline = max(batch.recovery_after || 0, batch.promotion_retry_at || 0)
+        if deadline > 0 and is_binary(batch.commit), do: schedule_recheck(batch, deadline)
+      end)
+    rescue
+      error ->
+        Logger.warning("batch retry timer restoration deferred: #{inspect(error.__struct__)}")
+        Process.send_after(self(), :restore_rechecks, 60_000)
+    end
+
+    {:noreply, project_id}
+  end
+
   def handle_info({:retry_promotion, batch_id, head}, project_id) do
+    cancel_recheck(batch_id)
+
     case Repo.get(Batch, batch_id) do
       %Batch{project_id: ^project_id, state: :running, commit: ^head} = batch ->
-        Process.delete({:promotion_retry, batch_id})
-        poll_running_batch(Repo.preload(batch, :project))
+        deadline = max(batch.recovery_after || 0, batch.promotion_retry_at || 0)
+
+        if deadline > DateTime.to_unix(DateTime.utc_now()) do
+          schedule_recheck(batch, deadline)
+        else
+          Process.delete({:promotion_retry, batch_id})
+          poll_running_batch(Repo.preload(batch, :project), true)
+        end
 
       _ ->
         :ok
@@ -1146,6 +1172,11 @@ defmodule BorsNG.Worker.Batcher do
         # promotion of the same staged commit, not classify it as a CI timeout.
         poll_running_batch(batch)
 
+      Batch.timeout_is_past(batch) and staging_failure_pending?(batch) ->
+        # Establish the CI outcome before converting an elapsed deadline
+        # into an individual proof verdict.
+        poll_running_batch(batch)
+
       Batch.timeout_is_past(batch) ->
         timeout_batch(batch)
 
@@ -1160,6 +1191,29 @@ defmodule BorsNG.Worker.Batcher do
   defp green_staged?(batch) do
     statuses = Repo.all(Status.all_for_batch(batch.id))
     is_binary(batch.commit) and statuses != [] and Enum.all?(statuses, &(&1.state == :ok))
+  end
+
+  defp cancel_recheck(batch_id) do
+    if timer = Process.delete({:batch_recheck, batch_id}), do: Process.cancel_timer(timer)
+  end
+
+  defp schedule_recheck(batch, deadline) do
+    cancel_recheck(batch.id)
+    delay = max(deadline - DateTime.to_unix(DateTime.utc_now()) + 1, 1)
+    timer = Process.send_after(self(), {:retry_promotion, batch.id, batch.commit}, delay * 1_000)
+    Process.put({:batch_recheck, batch.id}, timer)
+  end
+
+  defp staging_failure_pending?(batch) do
+    staged_failure?(batch, Repo.all(Status.all_for_batch(batch.id)))
+  end
+
+  defp staged_failure?(batch, statuses) do
+    System.get_env("BORS_STAGE_DISPATCH_PROJECT") == batch.project.name and
+      Enum.any?(
+        statuses,
+        &(&1.identifier in ["build", "bump-guard", "scope"] and &1.state == :error)
+      )
   end
 
   defp start_waiting_batch(batch) do
@@ -1924,7 +1978,7 @@ defmodule BorsNG.Worker.Batcher do
     :ok
   end
 
-  defp poll_running_batch(batch) do
+  defp poll_running_batch(batch, from_recheck \\ false) do
     repo_conn = get_repo_conn(batch.project)
 
     case GitHub.get_commit_status(repo_conn, batch.commit) do
@@ -1948,6 +2002,8 @@ defmodule BorsNG.Worker.Batcher do
         batch
         |> Batch.changeset(%{last_polled: now})
         |> Repo.update!()
+
+        if from_recheck, do: schedule_recheck(batch, now + 60)
     end
   end
 
@@ -1965,27 +2021,38 @@ defmodule BorsNG.Worker.Batcher do
     now = DateTime.to_unix(DateTime.utc_now(), :second)
     repo_conn = get_repo_conn(batch.project)
 
-    next_status =
+    {next_status, report_terminal} =
       if initial_status != :running do
         # some repositories require an OK status to push
-        send_status(repo_conn, batch, :ok)
+        if initial_status == :ok, do: send_status(repo_conn, batch, :ok)
         # need to change status (could go from :ok to :error if non-ff push)
-        maybe_completed_status = complete_batch(initial_status, batch, statuses)
-        # status can change so send_status should come after complete_batch
-        if maybe_completed_status != :running,
-          do: send_status(repo_conn, batch, maybe_completed_status)
+        outcome = complete_batch(initial_status, batch, statuses)
+
+        result =
+          if outcome == :ci_retry do
+            # The old attempt is terminal but its members are still queued.
+            # Report their live intent without a false failure notification.
+            send_status(repo_conn, batch, :waiting)
+            {:canceled, false}
+          else
+            if outcome != :running, do: send_status(repo_conn, batch, outcome)
+            {outcome, outcome != :running}
+          end
 
         Project.ping!(batch.project_id)
-        maybe_completed_status
+        result
       else
-        initial_status
+        {initial_status, false}
       end
 
     batch
     |> Batch.changeset(%{state: next_status, last_polled: now})
     |> Repo.update!()
 
-    if next_status != :running, do: send_zulip(batch, next_status)
+    if next_status != :running do
+      cancel_recheck(batch.id)
+      if report_terminal, do: send_zulip(batch, next_status)
+    end
 
     if next_status != :running do
       # A successful merge deliberately leaves the PR's labels untouched: the PR
@@ -2002,7 +2069,7 @@ defmodule BorsNG.Worker.Batcher do
     end
   end
 
-  @spec complete_batch(Status.state(), Batch.t(), [Status.t()]) :: Batch.state()
+  @spec complete_batch(Status.state(), Batch.t(), [Status.t()]) :: Batch.state() | :ci_retry
   defp complete_batch(:ok, batch, statuses) do
     conn = get_repo_conn(batch.project)
     links = Repo.all(LinkPatchBatch.from_batch(batch.id))
@@ -2045,6 +2112,110 @@ defmodule BorsNG.Worker.Batcher do
   end
 
   defp complete_batch(:error, batch, statuses) do
+    project = batch.project
+
+    if staged_failure?(batch, statuses) do
+      case GitHub.staging_failure(
+             get_repo_conn(project),
+             batch.commit,
+             project.name,
+             batch.id,
+             batch.into_branch,
+             batch.base_sha
+           ) do
+        {:ok, :conclusive} -> complete_failed_batch(batch, statuses)
+        {:ok, :pending} -> defer_pending_result(batch)
+        {:ok, :cancelled} -> defer_inconclusive_build(batch, :cancelled)
+        _ -> defer_inconclusive_build(batch, :unavailable)
+      end
+    else
+      complete_failed_batch(batch, statuses)
+    end
+  end
+
+  defp defer_pending_result(batch) do
+    if Batch.timeout_is_past(batch) do
+      # The CI deadline is still bounded; an incomplete run provides no
+      # individual proof verdict. Retry through ordinary preflight instead.
+      defer_inconclusive_build(batch, :deadline)
+    else
+      deadline = DateTime.to_unix(DateTime.utc_now()) + 60
+      batch |> Batch.changeset(%{recovery_after: deadline}) |> Repo.update!()
+      schedule_recheck(batch, deadline)
+
+      :running
+    end
+  end
+
+  defp defer_inconclusive_build(batch, cause) do
+    count = (batch.recovery_failures || 0) + 1
+    delay = min(300 * Integer.pow(2, min(count - 1, 4)), 3_600)
+    # Never monopolize staging indefinitely on unverifiable CI evidence.
+    # After three infrastructure observations, retry the ordinary preflight
+    # while retaining intent, rather than fabricating a failed singleton.
+    reset_attempt = cause in [:cancelled, :deadline] or count >= 3 or Batch.timeout_is_past(batch)
+    deadline = DateTime.to_unix(DateTime.utc_now()) + delay
+    changes = %{recovery_failures: count, recovery_after: deadline}
+
+    state =
+      if reset_attempt do
+        result =
+          Repo.transaction(fn ->
+            links = Repo.all(LinkPatchBatch.from_batch(batch.id))
+            child = Divider.clone_batch(links, batch.project_id, batch.into_branch)
+            if is_nil(child), do: Repo.rollback(:retry_membership_unavailable)
+
+            if child.state == :waiting do
+              child
+              |> Batch.changeset(%{
+                recovery_failures: max(child.recovery_failures || 0, count),
+                recovery_after: max(child.recovery_after || 0, deadline)
+              })
+              |> Repo.update!()
+            end
+
+            # The staging commit has a unique index. Release it so a singleton
+            # child can test the same SHA, keeping old links and CI URLs as history.
+            batch
+            |> Batch.changeset(Map.merge(changes, %{state: :canceled, commit: nil}))
+            |> Repo.update!()
+          end)
+
+        case result do
+          {:ok, _} ->
+            Process.put(:last_commit, nil)
+            :ci_retry
+
+          {:error, _} ->
+            batch |> Batch.changeset(changes) |> Repo.update!()
+            schedule_recheck(batch, deadline)
+            :running
+        end
+      else
+        batch |> Batch.changeset(changes) |> Repo.update!()
+        schedule_recheck(batch, deadline)
+        :running
+      end
+
+    if count >= 3 and (count == 3 or rem(count, 6) == 0) do
+      Zulip.send_message(
+        "Bors CI recovery needs attention: #{batch.project.name} batch #{batch.id}; " <>
+          "CI has no conclusive result. Approval and membership are retained; " <>
+          "the infrastructure failure count is #{count} and retries back off up to hourly. " <>
+          "Inspect CI and API access; this is not an individual proof-failure verdict."
+      )
+    end
+
+    # Retain approval and membership. The normal waiting-batch preflight will
+    # re-check heads and withdrawals before a cancelled build is retried.
+    Logger.warning(
+      "staging CI inconclusive batch=#{batch.id} cause=#{cause} retry=#{count} delay=#{delay}"
+    )
+
+    state
+  end
+
+  defp complete_failed_batch(batch, statuses) do
     project = batch.project
     repo_conn = get_repo_conn(project)
     erred = Enum.filter(statuses, &(&1.state == :error))
@@ -2301,7 +2472,10 @@ defmodule BorsNG.Worker.Batcher do
           )
     end
 
-    Process.send_after(self(), {:retry_promotion, batch.id, batch.commit}, delay * 1000)
+    schedule_recheck(
+      batch,
+      max(DateTime.to_unix(DateTime.utc_now()) + delay, batch.recovery_after || 0)
+    )
   end
 
   # Terminal-failure handling for the bundled patches of a batch: drop every
