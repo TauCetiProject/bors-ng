@@ -770,6 +770,76 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
     assert :waiting = ManualApproval.grant(@conn, p, patch, 1001, @head)
   end
 
+  test "green CI automatically recovers scope approval stopped by a temporary red result", %{
+    project: p
+  } do
+    Repo.insert!(%User{user_xref: 1001, login: "maintainer"})
+    scope_ci()
+    update_repo(:statuses, %{@head => %{"build" => :error, "bump-guard" => :ok, "scope" => :ok}})
+    patch = manual_review(p)
+    assert ManualApproval.valid?(patch)
+    assert patch.queue_approval["reason"] == "preflight"
+    refute patch.queue_pending
+    assert [candidate] = QueueApproval.candidates(p.id, 0, 4)
+    assert candidate.id == patch.id
+    comments = GitHub.ServerMock.get_state()[@conn].comments
+    Batcher.handle_info(:recover_queue, p.id)
+    refute Repo.exists?(Batch.all_for_project(p.id, :incomplete))
+    assert GitHub.ServerMock.get_state()[@conn].comments == comments
+    update_repo(:statuses, %{@head => %{"build" => :ok, "bump-guard" => :ok, "scope" => :ok}})
+    Batcher.handle_info(:recover_queue, p.id)
+    batch = Repo.one!(Batch.all_for_project(p.id, :incomplete))
+    link = Repo.one!(LinkPatchBatch.from_batch(batch.id))
+    assert link.head_sha == @head
+    assert link.manual_approval == patch.manual_approval
+    assert Repo.get!(Patch, patch.id).queue_pending
+    Batcher.handle_info(:recover_queue, p.id)
+    assert Repo.aggregate(LinkPatchBatch, :count, :id) == 1
+  end
+
+  test "recovery never resurrects a withdrawn or invalid human scope approval", %{project: p} do
+    Repo.insert!(%User{user_xref: 1001, login: "maintainer"})
+    scope_ci()
+    update_repo(:statuses, %{@head => %{"build" => :error, "bump-guard" => :ok, "scope" => :ok}})
+    patch = manual_review(p)
+    update_repo(:statuses, %{@head => %{"build" => :ok, "bump-guard" => :ok, "scope" => :ok}})
+
+    for reason <- [:requested, :cancel_all, :automatic_review_rejected, :revision_changed] do
+      QueueApproval.stop([Repo.get!(Patch, patch.id)], reason)
+      assert QueueApproval.candidates(p.id, 0, 4) == []
+      Batcher.handle_info(:recover_queue, p.id)
+      refute Repo.exists?(Batch.all_for_project(p.id, :incomplete))
+    end
+
+    QueueApproval.stop([Repo.get!(Patch, patch.id)], :preflight_timeout)
+    update_repo(:admin_permissions, %{1001 => {:ok, false}})
+    Batcher.handle_info(:recover_queue, p.id)
+    assert is_nil(Repo.get!(Patch, patch.id).manual_approval)
+    refute Repo.exists?(Batch.all_for_project(p.id, :incomplete))
+  end
+
+  test "scope recovery respects holds, API uncertainty and changed merge bases", %{project: p} do
+    Repo.insert!(%User{user_xref: 1001, login: "maintainer"})
+    scope_ci()
+    update_repo(:statuses, %{@head => %{"build" => :error, "bump-guard" => :ok, "scope" => :ok}})
+    patch = manual_review(p)
+    update_repo(:statuses, %{@head => %{"build" => :ok, "bump-guard" => :ok, "scope" => :ok}})
+    update_repo(:labels, %{1 => ["hold"]})
+    Batcher.handle_info(:recover_queue, p.id)
+    refute Repo.exists?(Batch.all_for_project(p.id, :incomplete))
+    assert ManualApproval.valid?(Repo.get!(Patch, patch.id))
+    update_repo(:labels, %{1 => []})
+    update_repo(:admin_permissions, %{1001 => {:error, :unavailable}})
+    Batcher.handle_info(:recover_queue, p.id)
+    refute Repo.exists?(Batch.all_for_project(p.id, :incomplete))
+    assert ManualApproval.valid?(Repo.get!(Patch, patch.id))
+    update_repo(:admin_permissions, %{1001 => {:ok, true}})
+    update_repo(:merge_bases, %{{1, @head} => {:ok, String.duplicate("c", 40)}})
+    Batcher.handle_info(:recover_queue, p.id)
+    assert is_nil(Repo.get!(Patch, patch.id).manual_approval)
+    refute Repo.exists?(Batch.all_for_project(p.id, :incomplete))
+  end
+
   test "human approval requests CI and waits for real scope success", %{project: p} do
     scope_ci()
     patch = manual_review(p)

@@ -158,3 +158,17 @@ promotion changes queue order without the manual priority command's preemption
 side effect. Ordinary priority-zero batches follow the bump; explicitly higher
 maintainer priorities remain respected. New bump heads and bisected children use
 the same policy on each normal queue poll.
+
+## Scope approvals stopped before admission
+
+A cancelled standalone CI run can briefly post failure while its replacement
+builds the same head. Preflight stops admission, but the recorded human scope
+decision stays bound to that head and merge base. The existing four-candidate
+queue-recovery heartbeat also discovers such preflight/preflight-timeout stops.
+It resumes only after current administrator permission, live PR revision, merge
+base, required CI and ordinary policy checks all pass. While checks are red or
+observations unavailable, it leaves intent unchanged and posts no retry comments.
+Changed authority or diff revokes the decision; withdrawals, bundles and genuine
+integration failures are excluded. Existing stopped approvals are recovered
+without another command or CI request, and active exact-head membership is
+excluded by the same durable recovery query.
