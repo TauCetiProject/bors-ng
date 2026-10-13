@@ -78,6 +78,34 @@ defmodule BorsNG.ApiController do
 
         held = Repo.all(held_query) |> Enum.map(&%{pr: &1.pr_xref, head_sha: &1.commit})
 
+        stops_query =
+          from(p in BorsNG.Database.Patch,
+            where: p.project_id == ^project.id and p.open and not is_nil(p.queue_approval)
+          )
+
+        stops_query =
+          if base, do: from(p in stops_query, where: p.into_branch == ^base), else: stops_query
+
+        queue_stops =
+          Repo.all(stops_query)
+          |> Enum.flat_map(fn patch ->
+            approval = patch.queue_approval
+
+            if approval["head_sha"] == patch.commit and
+                 approval["state"] in ["withdrawn", "failed"] do
+              [
+                %{
+                  pr: patch.pr_xref,
+                  head_sha: patch.commit,
+                  state: approval["state"],
+                  reason: approval["reason"]
+                }
+              ]
+            else
+              []
+            end
+          end)
+
         approvals =
           Repo.all(
             from(p in BorsNG.Database.Patch,
@@ -101,7 +129,28 @@ defmodule BorsNG.ApiController do
               end
 
             _ ->
-              nil
+              case Integer.parse(params["pr"] || "") do
+                {pr, ""} when pr > 0 ->
+                  request =
+                    from(b in query,
+                      join: l in BorsNG.Database.LinkPatchBatch,
+                      on: l.batch_id == b.id,
+                      join: p in BorsNG.Database.Patch,
+                      on: p.id == l.patch_id,
+                      where: p.pr_xref == ^pr and p.open and l.head_sha == p.commit,
+                      order_by: [desc: b.id],
+                      limit: 1,
+                      select: b
+                    )
+
+                  case Repo.one(request) do
+                    nil -> nil
+                    batch -> batch_detail(batch)
+                  end
+
+                _ ->
+                  nil
+              end
           end
 
         conn
@@ -113,6 +162,7 @@ defmodule BorsNG.ApiController do
           batch_ids: Enum.map(active, & &1.id),
           batches: details,
           held: held,
+          queue_stops: queue_stops,
           outcomes: outcomes,
           scope_approvals: approvals,
           requested_batch: requested,

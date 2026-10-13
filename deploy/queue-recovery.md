@@ -71,6 +71,14 @@ are not evidence that the PRs passed integration. The configured public
 TauCeti repository's Actions metadata is readable with the existing Bors App;
 a private repository would also need the appropriate Actions read permission.
 
+The project observation also exposes `queue_stops`: only current-head failed or
+withdrawn intent on open PRs for the requested base, without reviewer metadata.
+`pr=N` selects the newest batch containing that PR's current head; `batch_id=N`
+continues to select a specific historical attempt. Consumers must check complete
+observation coverage, exact membership, current holds and withdrawals before
+acting. These fields permit deterministic dependency-branch recovery; they do
+not grant approval or change queue state.
+
 ## Deployment and verification
 
 Merge the reviewed change into master after CI passes. The existing Cloudflare
