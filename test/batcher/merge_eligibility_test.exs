@@ -304,7 +304,11 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
       |> Patch.changeset(%{
         merge_eligibility: metadata,
         queue_pending: true,
-        queue_approval: %{"state" => "approved", "head_sha" => @head},
+        queue_approval: %{
+          "state" => "approved",
+          "head_sha" => @head,
+          "reviewer" => "tauceti-review-bot[bot]"
+        },
         bundle_reviewer: "tauceti-review-bot[bot]"
       })
       |> Repo.update!()

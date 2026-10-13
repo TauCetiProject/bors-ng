@@ -177,7 +177,8 @@ defmodule BorsNG.Worker.BumpRecovery do
     with true <- automatic?(patch),
          true <- metadata["head_sha"] == patch.commit,
          true <- is_integer(count) and count > 0,
-         %{"state" => "approved", "head_sha" => head} when head == patch.commit <-
+         %{"state" => "approved", "head_sha" => head, "reviewer" => @reviewer}
+         when head == patch.commit <-
            patch.queue_approval,
          true <- confirmed_singleton?(patch, batch_id),
          false <- active?(patch) do
