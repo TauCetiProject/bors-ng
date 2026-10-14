@@ -165,6 +165,16 @@ defmodule BorsNG.GitHub.ServerMock do
   # below is a mock-only shape, so a caller that only handles *it* looks
   # correct under test and raises in production. Reach for this knob when a
   # test needs a realistic failed read.
+  def do_handle_call(:get_commit_tree, conn, {sha}, state) do
+    {{:ok, get_in(state, [conn, :commit_trees, sha]) || sha}, state}
+  end
+
+  def do_handle_call(:local_git_mode, conn, {}, state) do
+    {{:ok, get_in(state, [conn, :local_git_mode]) || "off"}, state}
+  end
+
+  def do_handle_call(:git_token, _conn, {}, state), do: {{:ok, "test-token"}, state}
+
   def do_handle_call(:merge_backend_snapshot, conn, {}, state) do
     {get_in(state, [conn, :backend_snapshot]) || {:error, :unavailable}, state}
   end

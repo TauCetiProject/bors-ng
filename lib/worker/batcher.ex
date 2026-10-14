@@ -1443,12 +1443,129 @@ defmodule BorsNG.Worker.Batcher do
       Project.ping!(project.id)
       :canceled
     else
-      stmp = "#{project.staging_branch}.tmp"
-
       base = get_base(repo_conn, batch.into_branch)
       candidate = CandidateJournal.begin(batch, patch_links, base.commit)
       batch = %{batch | candidate_id: candidate.id}
 
+      mode = BorsNG.Worker.LocalGit.mode(project, batch.into_branch, repo_conn)
+      {status, commit} = assemble_candidate_batch(batch, patch_links, base, candidate, mode)
+
+      if status == :waiting and mode == "local" do
+        Repo.update_all(from(b in Batch, where: b.id == ^batch.id),
+          set: [recovery_after: DateTime.to_unix(DateTime.utc_now()) + 300]
+        )
+      end
+
+      if status != :running do
+        CandidateJournal.event(candidate, "construction_stopped", "bors.assembly", %{
+          state: status
+        })
+      end
+
+      now = DateTime.to_unix(DateTime.utc_now(), :second)
+
+      send_status(repo_conn, batch, status)
+
+      case status do
+        :running ->
+          # when a batch starts set priority to 100
+          # so that we can move patches to the "front of the line" without interrupting running batches
+          raise_batch_priority(batch, 100)
+
+        _ ->
+          :ok
+      end
+
+      batch
+      |> Batch.changeset(%{state: status, commit: commit, last_polled: now})
+      |> Repo.update!()
+
+      send_zulip(batch, status)
+
+      # Now that the batch state is committed, reflect it in the queue labels:
+      # a `:running` batch is "building", while a failed merge (:conflict /
+      # :error) takes its patches off the queue.
+      Labeler.reconcile_queue(repo_conn, batch.into_branch, Enum.map(patch_links, & &1.patch))
+
+      Project.ping!(batch.project_id)
+      status
+    end
+  end
+
+  defp assemble_candidate_batch(batch, links, base, candidate, "local") do
+    conn = get_repo_conn(batch.project)
+
+    with {:ok, toml} <- Batcher.GetBorsToml.get_required(conn, base.commit),
+         true <- toml.use_squash_merge and batch.project.staging_branch == "staging",
+         {:ok, result, context} <- local_assembly(batch, links, candidate, toml),
+         %{commit: expected} <- GitHub.get_branch!(conn, batch.project.staging_branch),
+         :ok <- BorsNG.Worker.CandidateAssembler.validate_result(candidate, result),
+         :ok <- local_live_heads(conn, links) do
+      setup_statuses(batch, toml)
+
+      case BorsNG.Worker.LocalGit.push(result, context, expected) do
+        %{"status" => "ok"} ->
+          CandidateJournal.event(candidate, "staging_pushed", "bors.local_git", %{
+            commit: result.commit,
+            expected: expected,
+            ref: "refs/heads/staging"
+          })
+
+          dispatch_staging(
+            batch,
+            conn,
+            result.commit,
+            base.commit,
+            result.tree,
+            base.commit,
+            toml,
+            "bors.local_git"
+          )
+
+          {:running, result.commit}
+
+        %{"details" => details} ->
+          CandidateJournal.event(candidate, "local_push_error", "bors.local_git", details)
+          {:waiting, nil}
+      end
+    else
+      false ->
+        assemble_candidate_batch(batch, links, base, candidate, "off")
+
+      {:conflict, details} ->
+        CandidateJournal.event(candidate, "local_conflict", "bors.local_git", details)
+        start_waiting_merged_batch(batch, links, base, :conflict)
+
+      :race ->
+        start_waiting_merged_batch(batch, links, base, :race)
+
+      {:error, details} ->
+        CandidateJournal.event(candidate, "local_error", "bors.local_git", %{error: details})
+        # Unavailable evidence retains immutable heads and standing approvals.
+        {:waiting, nil}
+
+      _ ->
+        {:waiting, nil}
+    end
+  end
+
+  defp assemble_candidate_batch(batch, patch_links, base, candidate, mode) do
+    repo_conn = get_repo_conn(batch.project)
+    stmp = "#{batch.project.staging_branch}.tmp"
+
+    shadow =
+      if mode == "shadow" do
+        with {:ok, toml} <- Batcher.GetBorsToml.get_required(repo_conn, base.commit),
+             true <- toml.use_squash_merge do
+          local_assembly(batch, patch_links, candidate, toml)
+        else
+          _ -> nil
+        end
+      end
+
+    Process.put({:local_shadow, batch.id}, shadow)
+
+    try do
       tbase = %{
         tree: base.tree,
         commit:
@@ -1507,48 +1624,129 @@ defmodule BorsNG.Worker.Batcher do
 
       merge = Enum.reduce(patch_links, tbase, do_merge_patch)
 
-      {status, commit} =
-        start_waiting_merged_batch(
-          batch,
-          patch_links,
-          base,
-          merge
-        )
+      start_waiting_merged_batch(batch, patch_links, base, merge)
+    after
+      GitHub.delete_branch!(repo_conn, stmp)
+      Process.delete({:local_shadow, batch.id})
+      Process.delete({:squash_tree, batch.id})
+    end
+  end
 
-      if status != :running do
-        CandidateJournal.event(candidate, "construction_stopped", "bors.assembly", %{
-          state: status
+  defp local_assembly(batch, links, candidate, toml) do
+    conn = get_repo_conn(batch.project)
+
+    metadata =
+      Enum.reduce_while(links, {:ok, []}, fn link, {:ok, members} ->
+        if link.head_sha != link.patch.commit do
+          {:halt, :race}
+        else
+          case get_squash_pr_data(conn, link.patch, toml) do
+            {:ok, data} -> {:cont, {:ok, members ++ [Map.put(data, :pr, link.patch.pr_xref)]}}
+            {:error, :head_changed} -> {:halt, :race}
+            error -> {:halt, error}
+          end
+        end
+      end)
+
+    with {:ok, members} <- metadata do
+      context = %{
+        repository: batch.project.name,
+        conn: conn,
+        members: members
+      }
+
+      case BorsNG.Worker.LocalGit.assemble(candidate, context) do
+        {:ok, result} ->
+          CandidateJournal.event(candidate, "local_assembled", "bors.local_git", result)
+          {:ok, result, context}
+
+        other ->
+          other
+      end
+    end
+  end
+
+  defp local_live_heads(conn, links) do
+    Enum.reduce_while(links, :ok, fn link, :ok ->
+      case GitHub.get_pr(conn, link.patch.pr_xref) do
+        {:ok, pr} when pr.head_sha == link.head_sha -> {:cont, :ok}
+        {:ok, _} -> {:halt, :race}
+        _ -> {:halt, {:error, :live_head_unavailable}}
+      end
+    end)
+  end
+
+  # A read-only shadow of an already running immutable generation avoids
+  # waiting for another batch just to establish rollout parity. It allocates
+  # no generation, pushes no ref and cannot change CI/status/promotion state.
+  defp maybe_shadow_running(batch) do
+    conn = get_repo_conn(batch.project)
+    candidate = CandidateJournal.latest(batch.id)
+
+    if not is_nil(candidate) and
+         BorsNG.Worker.LocalGit.mode(batch.project, batch.into_branch, conn) == "shadow" and
+         CandidateJournal.commit_binding(candidate)["commit"] == batch.commit and
+         not Repo.exists?(
+           from(e in BorsNG.Database.CandidateEvent,
+             where:
+               e.candidate_id == ^candidate.id and
+                 e.kind in ["shadow_compared", "shadow_unavailable"]
+           )
+         ) do
+      links = Repo.all(LinkPatchBatch.from_batch(batch.id)) |> Bundles.sort_links_for_merge()
+
+      result =
+        with {:ok, toml} <-
+               Batcher.GetBorsToml.get_required(conn, candidate.snapshot["base_sha"]),
+             true <- toml.use_squash_merge,
+             {:ok, result, _context} <- local_assembly(batch, links, candidate, toml),
+             :ok <- BorsNG.Worker.CandidateAssembler.validate_result(candidate, result),
+             {:ok, tree} <- GitHub.get_commit_tree(conn, batch.commit) do
+          CandidateJournal.event(candidate, "shadow_compared", "bors.local_git", %{
+            matches: result.tree == tree,
+            local_tree: result.tree,
+            github_tree: tree,
+            github_commit: batch.commit,
+            local_commit: result.commit,
+            replay: "running_immutable_candidate"
+          })
+
+          :ok
+        end
+
+      if result != :ok do
+        CandidateJournal.event(candidate, "shadow_unavailable", "bors.local_git", %{
+          result: inspect(result)
         })
       end
+    end
+  end
 
-      now = DateTime.to_unix(DateTime.utc_now(), :second)
+  defp compare_local_shadow(batch, tree) do
+    case Process.get({:local_shadow, batch.id}) do
+      {:ok, result, _context} ->
+        CandidateJournal.event(
+          Repo.get!(BorsNG.Database.Candidate, batch.candidate_id),
+          "shadow_compared",
+          "bors.local_git",
+          %{
+            matches: result.tree == tree,
+            local_tree: result.tree,
+            github_tree: tree,
+            local_commit: result.commit
+          }
+        )
 
-      GitHub.delete_branch!(repo_conn, stmp)
-      send_status(repo_conn, batch, status)
+      nil ->
+        :ok
 
-      case status do
-        :running ->
-          # when a batch starts set priority to 100
-          # so that we can move patches to the "front of the line" without interrupting running batches
-          raise_batch_priority(batch, 100)
-
-        _ ->
-          :ok
-      end
-
-      batch
-      |> Batch.changeset(%{state: status, commit: commit, last_polled: now})
-      |> Repo.update!()
-
-      send_zulip(batch, status)
-
-      # Now that the batch state is committed, reflect it in the queue labels:
-      # a `:running` batch is "building", while a failed merge (:conflict /
-      # :error) takes its patches off the queue.
-      Labeler.reconcile_queue(repo_conn, batch.into_branch, Enum.map(patch_links, & &1.patch))
-
-      Project.ping!(batch.project_id)
-      status
+      other ->
+        CandidateJournal.event(
+          Repo.get!(BorsNG.Database.Candidate, batch.candidate_id),
+          "shadow_unavailable",
+          "bors.local_git",
+          %{result: inspect(other)}
+        )
     end
   end
 
@@ -1678,6 +1876,7 @@ defmodule BorsNG.Worker.Batcher do
                                  }
                                ) do
                             {:ok, commit_sha} ->
+                              Process.put({:squash_tree, batch.id}, merge_commit.tree)
                               commit_sha
 
                             {:error, :create_commit, status, _body, request_id} = error ->
@@ -1693,6 +1892,9 @@ defmodule BorsNG.Worker.Batcher do
                           end
                       end
 
+                    {:error, :head_changed} ->
+                      :race
+
                     {:error, reason} = error ->
                       Logger.warning(
                         "start_waiting_merged_batch: unable to build squash commit metadata for PR #{patch_link.patch.pr_xref}: #{inspect(reason)}"
@@ -1706,6 +1908,9 @@ defmodule BorsNG.Worker.Batcher do
                 case cpt do
                   :conflict ->
                     {:halt, :conflict}
+
+                  :race ->
+                    {:halt, :race}
 
                   {:error, _, _, _, _} = error ->
                     {:halt, error}
@@ -1748,11 +1953,13 @@ defmodule BorsNG.Worker.Batcher do
               # bors from polluting th git blame history with it's own name
               head = Enum.at(parents, 0)
 
-              if head == :conflict do
-                {:conflict, nil}
+              if head in [:conflict, :race] do
+                start_waiting_merged_batch(batch, patch_links, base, head)
               else
                 # Persist start intent before any write that can trigger CI.
                 # A restart must not transfer this batch as unstarted work.
+                tree = Process.get({:squash_tree, batch.id}, tree)
+                compare_local_shadow(batch, tree)
                 setup_statuses(batch, toml)
                 GitHub.force_push!(repo_conn, head, batch.project.staging_branch)
                 dispatch_staging(batch, repo_conn, head, base.commit, tree, policy_ref, toml)
@@ -1802,7 +2009,16 @@ defmodule BorsNG.Worker.Batcher do
     end
   end
 
-  defp dispatch_staging(batch, repo_conn, head, base, tree, policy_ref, toml) do
+  defp dispatch_staging(
+         batch,
+         repo_conn,
+         head,
+         base,
+         tree,
+         policy_ref,
+         toml,
+         source \\ "github.commit_response"
+       ) do
     candidate = Repo.get!(BorsNG.Database.Candidate, batch.candidate_id)
 
     toolchain =
@@ -1835,7 +2051,7 @@ defmodule BorsNG.Worker.Batcher do
           }
       end
 
-    CandidateJournal.bind(candidate, head, tree, policy_ref, toml, toolchain)
+    CandidateJournal.bind(candidate, head, tree, policy_ref, toml, toolchain, source)
     # The public observation must bind an override to the actual staging base,
     # rather than trusting caller-supplied dispatch metadata.
     batch |> Batch.changeset(%{base_sha: base, commit: head, state: :running}) |> Repo.update!()
@@ -2000,9 +2216,12 @@ defmodule BorsNG.Worker.Batcher do
   end
 
   defp get_squash_pr_data(repo_conn, patch, toml) do
-    with {:ok, commits} <- GitHub.get_pr_commits(repo_conn, patch.pr_xref),
-         {:ok, pr} <- GitHub.get_pr(repo_conn, patch.pr_xref),
-         {:ok, user_email, user_name} <- get_squash_author(repo_conn, pr) do
+    with {:ok, pr} <- GitHub.get_pr(repo_conn, patch.pr_xref),
+         true <- pr.head_sha == patch.commit,
+         {:ok, commits} <- GitHub.get_pr_commits(repo_conn, patch.pr_xref),
+         {:ok, user_email, user_name} <- get_squash_author(repo_conn, pr),
+         {:ok, current_pr} <- GitHub.get_pr(repo_conn, patch.pr_xref),
+         true <- current_pr.head_sha == patch.commit do
       commit_message =
         Batcher.Message.generate_squash_commit_message(
           pr,
@@ -2015,9 +2234,12 @@ defmodule BorsNG.Worker.Batcher do
       {:ok,
        %{
          commit_message: commit_message,
-         source_sha: pr.head_sha,
+         source_sha: patch.commit,
          committer: %{name: user_name, email: user_email}
        }}
+    else
+      false -> {:error, :head_changed}
+      error -> error
     end
   end
 
@@ -2097,6 +2319,7 @@ defmodule BorsNG.Worker.Batcher do
   end
 
   defp poll_running_batch(batch, from_recheck \\ false) do
+    maybe_shadow_running(batch)
     repo_conn = get_repo_conn(batch.project)
 
     case GitHub.get_commit_status(repo_conn, batch.commit) do
