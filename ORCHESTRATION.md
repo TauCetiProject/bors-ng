@@ -100,3 +100,12 @@ secrets and all build/lint/axiom gates are unchanged.
 
 The bounded time filters use GitHub's documented [workflow run `created` filter](https://docs.github.com/en/rest/actions/workflow-runs#list-workflow-runs-for-a-workflow)
 and [issue comment `since` filter](https://docs.github.com/en/rest/issues/comments#list-issue-comments).
+
+
+Cloudflare image rollout can preserve a running instance's old startup environment.
+The owning Durable Object applies `outbox-v1` once before serving requests: it
+sends SIGTERM, waits at most ten seconds, destroys a remaining process, then
+records the activation marker. A failure leaves the marker unset for retry.
+The next start uses the deployed async environment. This stops only the singleton
+Container process; its Durable Object storage, webhook Queue and PostgreSQL queue
+state remain intact. Later Worker constructors do not repeat the restart.

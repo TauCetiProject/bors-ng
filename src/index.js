@@ -4,6 +4,7 @@ import { needsBors, REVIEW_APP_ID } from "./webhook-filter.mjs";
 import { readObservations, archiveObservation } from "./merge-observations.mjs";
 import { githubVariables } from "./experiment-github.mjs";
 import { tickExperiment, readExperimentState } from "./merge-experiment.mjs";
+import { activateOrchestration } from "./orchestration-activation.mjs";
 
 const INSTANCE = "singleton";
 // JSON encodes a byte array at up to four characters per byte. Keep Queue
@@ -16,6 +17,8 @@ export class BorsContainer extends Container {
     this.experimentStorage = ctx.storage;
     this.experimentEnv = env;
     this.experimentTail = Promise.resolve();
+    // Lifecycle changes run before any request starts/uses the Container.
+    ctx.blockConcurrencyWhile(() => activateOrchestration(ctx.storage, ctx.container));
   }
 
   experimentTick() {
