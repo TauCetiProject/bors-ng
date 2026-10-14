@@ -5,7 +5,14 @@ defmodule BorsNG.Worker.QueueApproval do
 
   def remember(patch, reviewer) do
     approval = %{"head_sha" => patch.commit, "reviewer" => reviewer, "state" => "approved"}
-    patch |> Patch.changeset(%{queue_approval: approval, queue_pending: true}) |> Repo.update!()
+
+    patch
+    |> Patch.changeset(%{
+      queue_approval: approval,
+      queue_pending: true,
+      orchestration_approval_token: Base.encode16(:crypto.strong_rand_bytes(16))
+    })
+    |> Repo.update!()
   end
 
   def stop(patches, reason) do
@@ -18,7 +25,11 @@ defmodule BorsNG.Worker.QueueApproval do
 
       unless BorsNG.Worker.BumpRecovery.restore_failed_preflight(patch, reason) do
         patch
-        |> Patch.changeset(%{queue_approval: approval, queue_pending: false})
+        |> Patch.changeset(%{
+          queue_approval: approval,
+          queue_pending: false,
+          orchestration_approval_token: Base.encode16(:crypto.strong_rand_bytes(16))
+        })
         |> Repo.update!()
       end
     end)
@@ -47,7 +58,11 @@ defmodule BorsNG.Worker.QueueApproval do
         }
 
         patch
-        |> Patch.changeset(%{queue_approval: approval, queue_pending: false})
+        |> Patch.changeset(%{
+          queue_approval: approval,
+          queue_pending: false,
+          orchestration_approval_token: Base.encode16(:crypto.strong_rand_bytes(16))
+        })
         |> Repo.update!()
       end
     end)

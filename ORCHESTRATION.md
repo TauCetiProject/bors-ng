@@ -109,3 +109,11 @@ records the activation marker. A failure leaves the marker unset for retry.
 The next start uses the deployed async environment. This stops only the singleton
 Container process; its Durable Object storage, webhook Queue and PostgreSQL queue
 state remain intact. Later Worker constructors do not repeat the restart.
+
+## Disabled depth-two canary
+
+N adds durable staging reservations and immutable generation refs to this same
+repository lane. Production still sets `BORS_SPECULATIVE_TRAINS=false`; deployment
+alone grants no extra staging capacity. B/E/F evidence and the trusted workflow
+change must be verified before a separate small canary activation. See
+[depth-two scheduling, exact promotion, caps and rollback](deploy/speculative-trains.md).

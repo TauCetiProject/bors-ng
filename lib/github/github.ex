@@ -255,6 +255,12 @@ defmodule BorsNG.GitHub do
     )
   end
 
+  def active_staging_count(conn), do: safe_genserver_call(:active_staging_count, conn, {}, 30_000)
+
+  def staging_run(conn, head, base, batch, branch, since) do
+    safe_genserver_call(:staging_run, conn, {head, base, batch, branch, since}, 15_000)
+  end
+
   @doc "Request existing trusted PR CI after a maintainer approves its scope."
   def dispatch_pr_build(repo_conn, pr) do
     call_with_retry(:dispatch_pr_build, repo_conn, {pr})
@@ -265,6 +271,8 @@ defmodule BorsNG.GitHub do
   end
 
   @spec get_branch!(tconn, binary) :: %{commit: bitstring, tree: bitstring}
+  def get_branch(conn, branch), do: safe_genserver_call(:get_branch, conn, {branch}, 15_000)
+
   def get_branch!(repo_conn, from) do
     {:ok, commit} = call_with_retry(:get_branch, repo_conn, {from}, 500, 4_000)
     commit

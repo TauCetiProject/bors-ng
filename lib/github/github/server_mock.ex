@@ -527,10 +527,13 @@ defmodule BorsNG.GitHub.ServerMock do
           sha -> sha
         end
 
-      {{:ok, %{commit: sha, tree: sha}}, state}
+      if is_nil(branches[from]) and String.starts_with?(from, "staging-candidate-"),
+        do: {{:error, :get_branch, 404, "missing"}, state},
+        else: {{:ok, %{commit: sha, tree: sha}}, state}
     end
     |> case do
       {{:ok, _}, _} = res -> res
+      {{:error, :get_branch, 404, _}, _} = res -> res
       _ -> {{:error, :get_branch}, state}
     end
   end
@@ -730,6 +733,14 @@ defmodule BorsNG.GitHub.ServerMock do
       )
       when is_integer(n) and n > 0 do
     {{:error, :get_commit_status, 502}, %{state | :get_commit_status_error => n - 1}}
+  end
+
+  def do_handle_call(:active_staging_count, conn, {}, state) do
+    {{:ok, get_in(state, [conn, :active_staging_count]) || 0}, state}
+  end
+
+  def do_handle_call(:staging_run, conn, {head, _base, batch, _branch, _since}, state) do
+    {{:ok, get_in(state, [conn, :staging_runs, {head, batch}])}, state}
   end
 
   def do_handle_call(

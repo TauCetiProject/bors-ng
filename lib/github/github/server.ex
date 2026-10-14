@@ -297,7 +297,49 @@ defmodule BorsNG.GitHub.Server do
     end
   end
 
+  def do_handle_call(:active_staging_count, conn, {}) do
+    Enum.reduce_while(
+      ["queued", "in_progress", "waiting", "requested", "pending"],
+      {:ok, MapSet.new()},
+      fn status, {:ok, ids} ->
+        path =
+          "actions/workflows/pr-build.yml/runs?event=repository_dispatch&status=#{status}&per_page=100"
+
+        case get!(conn, path) do
+          %{status: 200, body: raw} ->
+            body = Jason.decode!(raw)
+            runs = body["workflow_runs"]
+
+            if is_list(runs) and length(runs) < 100 and body["total_count"] == length(runs) and
+                 Enum.all?(runs, &(is_integer(&1["id"]) and is_binary(&1["display_title"]))) do
+              staged =
+                Enum.filter(runs, &String.starts_with?(&1["display_title"], "bors branch="))
+
+              {:cont, {:ok, Enum.reduce(staged, ids, &MapSet.put(&2, &1["id"]))}}
+            else
+              {:halt, {:error, :active_staging_incomplete}}
+            end
+
+          _ ->
+            {:halt, {:error, :active_staging_unavailable}}
+        end
+      end
+    )
+    |> case do
+      {:ok, ids} -> {:ok, MapSet.size(ids)}
+      error -> error
+    end
+  end
+
   def do_handle_call(:staging_dispatch_seen, conn, {_repo, head, base, batch, branch, since}) do
+    case do_handle_call(:staging_run, conn, {head, base, batch, branch, since}) do
+      {:ok, nil} -> {:ok, false}
+      {:ok, _run} -> {:ok, true}
+      error -> error
+    end
+  end
+
+  def do_handle_call(:staging_run, conn, {head, base, batch, branch, since}) do
     expected = "bors branch=#{branch} batch=#{batch} head=#{head} base=#{base}"
 
     created =
@@ -320,14 +362,18 @@ defmodule BorsNG.GitHub.Server do
           not is_list(runs) or not is_integer(body["total_count"]) or body["total_count"] < 0 ->
             {:error, :dispatch_lookup_invalid}
 
-          Enum.any?(
-            runs,
-            &(&1["display_title"] == expected and &1["event"] == "repository_dispatch")
-          ) ->
-            {:ok, true}
-
           length(runs) < 100 and body["total_count"] == length(runs) ->
-            {:ok, false}
+            matches =
+              Enum.filter(
+                runs,
+                &(&1["display_title"] == expected and &1["event"] == "repository_dispatch")
+              )
+
+            case matches do
+              [] -> {:ok, nil}
+              [run] -> {:ok, run}
+              _ -> {:error, :duplicate_staging_runs}
+            end
 
           true ->
             {:error, :dispatch_lookup_truncated}

@@ -60,6 +60,9 @@ export class BorsContainer extends Container {
     // Conservative rollout: one executing operation, serialized per repository.
     BORS_ASYNC_ORCHESTRATION: "true",
     BORS_ASYNC_WORKERS: "1",
+    // N is deployed dark; B/E/F verification and a separate canary activation
+    // are mandatory before changing this flag or supplying gate evidence.
+    BORS_SPECULATIVE_TRAINS: "false",
     TAUCETI_REVIEW_APP_ID: REVIEW_APP_ID,
   };
 }

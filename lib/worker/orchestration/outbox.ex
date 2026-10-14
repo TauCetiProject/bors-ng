@@ -13,6 +13,7 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
   def enqueue(project_id, kind, payload, key \\ nil, available_at \\ now()) do
     {kind, subject} =
       case {kind, payload} do
+        {"cast", {:cancel_generation, id, _, _, _}} -> {"cancel", id}
         {"cast", {:cancel, id, _}} -> {"cancel", id}
         {"cast", {:cancel, id}} -> {"cancel", id}
         {"cast", {:cancel_all}} -> {"cancel_all", nil}

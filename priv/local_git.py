@@ -262,6 +262,14 @@ class Mirror:
         finally:
             self.deadline = previous_deadline
 
+    def promote(self):
+        self.initialize()
+        self.fetch([self.request['expected'], self.request['commit']])
+        if self.git('merge-base', '--is-ancestor', self.request['expected'],
+                    self.request['commit'], check=False)[1]:
+            raise Failure('non_descendant_promotion')
+        return self.publish()
+
     def publish(self):
         commit = self.request['commit']
         ref = self.request['ref']
@@ -344,7 +352,7 @@ def local_imports(content):
 def validate(request):
     if not REPO.fullmatch(request['repository']) or '..' in request['repository']:
         raise Failure('invalid_repository')
-    if request['operation'] not in ['assemble', 'publish']:
+    if request['operation'] not in ['assemble', 'publish', 'promote']:
         raise Failure('invalid_operation')
     if request['operation'] == 'assemble':
         if not request['members']:
@@ -352,7 +360,10 @@ def validate(request):
         shas = [request['identity']['base_sha']] + [m['head_sha'] for m in request['members']]
     else:
         shas = [request['commit'], request['expected']]
-        if request['ref'] != 'refs/heads/staging':
+        if request['operation'] == 'promote':
+            if request['ref'] != 'refs/heads/main':
+                raise Failure('invalid_ref')
+        elif not re.fullmatch(r'refs/heads/staging(?:-candidate-[1-9][0-9]*-[1-9][0-9]*)?', request['ref']):
             raise Failure('invalid_ref')
     if any(not SHA.fullmatch(sha) for sha in shas):
         raise Failure('invalid_sha')

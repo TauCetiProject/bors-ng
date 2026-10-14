@@ -192,7 +192,21 @@ defmodule BorsNG.ApiController do
       promotion_failures: batch.promotion_failures,
       recovery_after: batch.recovery_after,
       recovery_failures: batch.recovery_failures,
+      train: train_detail(batch),
       members: members
     }
+  end
+
+  defp train_detail(batch) do
+    candidate = BorsNG.Worker.CandidateJournal.current(batch)
+
+    if BorsNG.Worker.SpeculativeTrain.tracked?(candidate) do
+      %{
+        candidate_id: candidate.id,
+        generation: candidate.generation,
+        staging_ref: BorsNG.Worker.SpeculativeTrain.ref(candidate),
+        predecessor_id: candidate.snapshot["speculative_predecessor_id"]
+      }
+    end
   end
 end

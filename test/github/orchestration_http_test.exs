@@ -95,6 +95,51 @@ defmodule BorsNG.OrchestrationHttpTest do
     refute_receive {:request, _}, 10
   end
 
+  test "duplicate exact workflow identities cannot authorize a train verdict" do
+    run = %{
+      "event" => "repository_dispatch",
+      "display_title" => "bors branch=main batch=7 head=head base=base"
+    }
+
+    assert {:error, :duplicate_staging_runs} ==
+             response(200, %{"total_count" => 2, "workflow_runs" => [run, run]}, &seen/0)
+
+    assert_receive {:request, _}
+  end
+
+  test "exact run lookup retains authoritative status and attempt" do
+    run = %{
+      "id" => 10,
+      "run_attempt" => 2,
+      "status" => "completed",
+      "conclusion" => "success",
+      "event" => "repository_dispatch",
+      "display_title" => "bors branch=main batch=7 head=head base=base"
+    }
+
+    result =
+      response(200, %{"total_count" => 1, "workflow_runs" => [run]}, fn ->
+        Server.do_handle_call(
+          :staging_run,
+          {{:raw, "test-token"}, 14},
+          {"head", "base", 7, "main", @since}
+        )
+      end)
+
+    assert result == {:ok, run}
+  end
+
+  test "active staging lookup fails closed on incomplete capacity evidence" do
+    assert {:error, :active_staging_incomplete} ==
+             response(200, %{"total_count" => 100, "workflow_runs" => []}, fn ->
+               Server.do_handle_call(:active_staging_count, {{:raw, "test-token"}, 14}, {})
+             end)
+
+    assert_receive {:request, request}
+    assert request =~ "status=queued"
+    refute_receive {:request, _}, 10
+  end
+
   test "notice replay searches only comments updated in its request window" do
     since = "2026-10-14T04:00:00Z"
 
