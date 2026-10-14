@@ -10,7 +10,7 @@ defmodule BorsNG.Worker.CandidateAssembler do
   The serial GitHub path records the same result envelope at its existing
   combined create/push boundary; see CANDIDATES.md.
   """
-  alias BorsNG.Database.{Candidate, Repo}
+  alias BorsNG.Database.{Candidate, LinkPatchBatch, Repo}
   alias BorsNG.Worker.CandidateJournal
 
   @type input :: Candidate.t()
@@ -51,8 +51,31 @@ defmodule BorsNG.Worker.CandidateAssembler do
       not is_binary(result[:commit]) or not is_binary(result[:tree]) ->
         {:error, :incomplete_result}
 
+      not members_current?(candidate) ->
+        {:error, :membership_changed}
+
       true ->
         :ok
     end
+  end
+
+  defp members_current?(candidate) do
+    fields = ~w(link_id patch_id head_sha reviewer manual_approval assembly_head_sha)
+    expected = candidate.snapshot["members"] |> Enum.map(&Map.take(&1, fields))
+
+    actual =
+      Repo.all(LinkPatchBatch.from_batch(candidate.batch_id))
+      |> Enum.map(fn link ->
+        %{
+          "link_id" => link.id,
+          "patch_id" => link.patch_id,
+          "head_sha" => link.head_sha,
+          "reviewer" => link.reviewer,
+          "manual_approval" => link.manual_approval,
+          "assembly_head_sha" => link.patch.commit
+        }
+      end)
+
+    Enum.sort_by(expected, & &1["link_id"]) == Enum.sort_by(actual, & &1["link_id"])
   end
 end

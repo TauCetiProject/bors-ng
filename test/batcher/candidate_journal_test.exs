@@ -256,4 +256,23 @@ defmodule BorsNG.Worker.CandidateJournalTest do
 
     assert Journal.commit_binding(first) == %{}
   end
+
+  test "assembly result cannot bind after a head change or partial withdrawal", ctx do
+    link = member(ctx.batch, ctx.patch)
+    candidate = begin(ctx.batch)
+    assembler = BorsNG.Worker.CandidateAssembler
+    result = Map.merge(assembler.identity(candidate), %{commit: "built", tree: "tree"})
+    ctx.patch |> Patch.changeset(%{commit: "changed"}) |> Repo.update!()
+    assert assembler.validate_result(candidate, result) == {:error, :membership_changed}
+    Repo.get!(Patch, ctx.patch.id) |> Patch.changeset(%{commit: "head"}) |> Repo.update!()
+    assert assembler.validate_result(candidate, result) == :ok
+    Repo.delete!(link)
+    assert assembler.validate_result(candidate, result) == {:error, :membership_changed}
+
+    assert_raise ArgumentError, "assembly result rejected: membership_changed", fn ->
+      bind(candidate, "built")
+    end
+
+    assert Journal.commit_binding(candidate) == %{}
+  end
 end

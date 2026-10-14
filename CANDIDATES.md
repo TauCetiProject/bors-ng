@@ -26,7 +26,7 @@ Speculation remains disabled; recording a predecessor does not enable it.
 4. Call `bind/7` once after GitHub returns the assembled commit. Record exact
    commit, tree and base, effective policy and its read ref, and toolchain bytes
    fetched at the exact constructed commit. Binding is serialized and rejects a
-   second bind or a result from an abandoned generation. The assembler result
+   second bind, an abandoned generation, or changed/withdrawn database membership. The assembler result
    envelope binds candidate ID, generation, base SHA and ordered-member digest,
    and returns commit/tree or structured conflict/error details. Validate it
    before any async result becomes visible. Live eligibility and main advance

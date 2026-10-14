@@ -103,6 +103,7 @@ defmodule BorsNG.Worker.CandidateJournal do
               a ->
                 Map.put(a.snapshot, "admission_id", a.id)
             end
+            |> Map.put("link_id", link.id)
             |> Map.put("assembly_head_sha", link.patch.commit)
           end)
 
