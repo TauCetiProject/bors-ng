@@ -245,6 +245,9 @@ defmodule BorsNG.Worker.SpeculativeTrain do
 
     if tracked?(candidate) or (candidate && candidate.snapshot["speculative_predecessor_id"]) do
       cond do
+        candidate.snapshot["base_sha"] != batch.base_sha ->
+          {:invalidate, :base_mismatch}
+
         not valid?(candidate) or
             CandidateJournal.commit_binding(candidate)["commit"] != batch.commit ->
           {:invalidate, :generation_changed}
@@ -315,7 +318,16 @@ defmodule BorsNG.Worker.SpeculativeTrain do
         if current.state == :running do
           candidate = CandidateJournal.current(current)
           links = Repo.all(LinkPatchBatch.from_batch(current.id))
-          Divider.clone_batch(links, current.project_id, current.into_branch, "train_invalidated")
+
+          retry =
+            Divider.clone_batch(
+              links,
+              current.project_id,
+              current.into_branch,
+              "train_invalidated"
+            )
+
+          if links != [] and is_nil(retry), do: Repo.rollback(:retry_membership_unavailable)
           CandidateJournal.event(candidate, "train_invalidated", "bors.train", %{reason: reason})
           current |> Batch.changeset(%{state: :canceled, commit: nil}) |> Repo.update!()
         end

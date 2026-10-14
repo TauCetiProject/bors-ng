@@ -519,6 +519,37 @@ defmodule BorsNG.Worker.SpeculativeTrainTest do
     refute Train.barrier_free?(ca, @conn)
   end
 
+  test "incomplete retry transaction cannot discard an innocent approval", %{project: project} do
+    {a, ca, _} = candidate(project, 1)
+    {b, _, links} = candidate(project, 2, a.commit, ca, 2)
+    bundle = Repo.insert!(%BorsNG.Database.PatchBundle{project_id: project.id})
+
+    for link <- links,
+        do:
+          Repo.get!(Patch, link.patch_id)
+          |> Ecto.Changeset.change(bundle_id: bundle.id)
+          |> Repo.update!()
+
+    other = Repo.insert!(Batch.new(project.id, "main"))
+    first = hd(links)
+
+    CandidateJournal.insert_member(
+      LinkPatchBatch.changeset(%LinkPatchBatch{}, %{
+        batch_id: other.id,
+        patch_id: first.patch_id,
+        head_sha: first.head_sha,
+        reviewer: first.reviewer
+      })
+    )
+
+    assert_raise MatchError, fn -> Train.invalidate(b, :predecessor_invalid) end
+    assert Repo.get!(Batch, b.id).state == :running
+    assert length(Repo.all(LinkPatchBatch.from_batch(b.id))) == 2
+    assert Enum.all?(links, &Repo.get!(Patch, &1.patch_id).queue_pending)
+    Train.reserve(ca, @conn)
+    assert Train.guard(%{a | base_sha: "changed"}, @conn) == {:invalidate, :base_mismatch}
+  end
+
   test "stale cancellation cannot revoke a reapproved same head", %{project: project} do
     {_a, _ca, [link]} = candidate(project, 1)
     patch = Repo.get!(Patch, link.patch_id)
