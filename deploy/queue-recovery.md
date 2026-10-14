@@ -71,6 +71,14 @@ are not evidence that the PRs passed integration. The configured public
 TauCeti repository's Actions metadata is readable with the existing Bors App;
 a private repository would also need the appropriate Actions read permission.
 
+At the original CI deadline, configured staging attempts refresh their status
+even if no terminal status was delivered. A newly green result can still promote;
+a conclusive failure uses the normal source classification. Missing or pending
+CI, or a failed status read, releases staging through the same native retry and
+durable backoff without revoking approval. This deadline path adds no metadata
+lookups for missing CI; failure classification retains its two-read bound. Other
+projects retain their ordinary timeout policy.
+
 ## Deployment and verification
 
 Merge the reviewed change into master after CI passes. The existing Cloudflare

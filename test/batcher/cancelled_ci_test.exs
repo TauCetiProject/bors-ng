@@ -220,6 +220,146 @@ defmodule BorsNG.Worker.BatcherCancelledCITest do
     assert Repo.get!(Patch, ctx.patch.id).queue_approval == ctx.patch.queue_approval
   end
 
+  test "missing terminal CI at the deadline retains intent and backs off", ctx do
+    ctx.batch
+    |> Batch.changeset(%{timeout_at: DateTime.to_unix(DateTime.utc_now()) - 1})
+    |> Repo.update!()
+
+    Repo.update_all(Status.all_for_batch(ctx.batch.id), set: [state: :running])
+    state = GitHub.ServerMock.get_state()
+
+    GitHub.ServerMock.put_state(
+      put_in(state, [{{:installation, 91}, 14}, :statuses, "staged"], %{})
+    )
+
+    Batcher.handle_info({:poll, :once}, ctx.project.id)
+    assert Repo.get!(Batch, ctx.batch.id).state == :canceled
+    child = active_child(ctx.project)
+    assert child.state == :waiting and child.recovery_failures == 1
+    assert child.recovery_after >= DateTime.to_unix(DateTime.utc_now()) + 299
+    assert Repo.get!(Patch, ctx.patch.id).queue_approval == ctx.patch.queue_approval
+    assert Repo.all(LinkPatchBatch.from_batch(child.id)) |> length() == 1
+
+    # Duplicate polls during durable backoff must not spend another API read.
+    GitHub.ServerMock.put_state(
+      Map.put(GitHub.ServerMock.get_state(), :get_commit_status_error, 1)
+    )
+
+    Batcher.handle_info({:poll, :once}, ctx.project.id)
+    assert GitHub.ServerMock.get_state()[:get_commit_status_error] == 1
+    assert active_child(ctx.project).id == child.id
+  end
+
+  test "a status API outage at the CI deadline cannot revoke approval", ctx do
+    ctx.batch
+    |> Batch.changeset(%{timeout_at: DateTime.to_unix(DateTime.utc_now()) - 1})
+    |> Repo.update!()
+
+    Repo.update_all(Status.all_for_batch(ctx.batch.id), set: [state: :running])
+
+    GitHub.ServerMock.put_state(
+      Map.put(GitHub.ServerMock.get_state(), :get_commit_status_error, 1)
+    )
+
+    Batcher.handle_info({:poll, :once}, ctx.project.id)
+    assert Repo.get!(Batch, ctx.batch.id).state == :canceled
+    assert active_child(ctx.project).state == :waiting
+    assert Repo.get!(Patch, ctx.patch.id).queue_approval == ctx.patch.queue_approval
+  end
+
+  test "an ordinary project still handles its CI deadline as a timeout", ctx do
+    System.delete_env("BORS_STAGE_DISPATCH_PROJECT")
+
+    ctx.batch
+    |> Batch.changeset(%{timeout_at: DateTime.to_unix(DateTime.utc_now()) - 1})
+    |> Repo.update!()
+
+    Repo.update_all(Status.all_for_batch(ctx.batch.id), set: [state: :running])
+    Batcher.handle_info({:poll, :once}, ctx.project.id)
+    assert Repo.get!(Batch, ctx.batch.id).state == :error
+    assert Repo.get!(Patch, ctx.patch.id).queue_approval["reason"] == "timeout"
+  end
+
+  test "success arriving at the deadline supersedes cached pending CI", ctx do
+    ctx.batch
+    |> Batch.changeset(%{timeout_at: DateTime.to_unix(DateTime.utc_now()) - 1})
+    |> Repo.update!()
+
+    Repo.update_all(Status.all_for_batch(ctx.batch.id), set: [state: :running])
+    state = GitHub.ServerMock.get_state()
+    repo = state[{{:installation, 91}, 14}]
+
+    repo =
+      repo
+      |> Map.put(:branches, %{"master" => "base"})
+      |> put_in([:statuses, "staged"], %{"build" => :ok})
+      |> put_in([:files, "staging"], %{"bors.toml" => ~s/status = [ "build" ]/})
+
+    GitHub.ServerMock.put_state(Map.put(state, {{:installation, 91}, 14}, repo))
+    Batcher.handle_info({:poll, :once}, ctx.project.id)
+    assert Repo.get!(Batch, ctx.batch.id).state == :ok
+    assert Repo.get!(Batch, ctx.batch.id).recovery_failures == 0
+    assert Repo.all(Batch.all_for_project(ctx.project.id)) |> length() == 1
+  end
+
+  test "a conclusive failure arriving at the deadline still fails the singleton", ctx do
+    ctx.batch
+    |> Batch.changeset(%{timeout_at: DateTime.to_unix(DateTime.utc_now()) - 1})
+    |> Repo.update!()
+
+    Repo.update_all(Status.all_for_batch(ctx.batch.id), set: [state: :running])
+    state = GitHub.ServerMock.get_state()
+
+    GitHub.ServerMock.put_state(
+      put_in(state, [{{:installation, 91}, 14}, :staging_failures, "staged"], :conclusive)
+    )
+
+    Batcher.handle_info({:poll, :once}, ctx.project.id)
+    assert Repo.get!(Batch, ctx.batch.id).state == :error
+    assert Repo.get!(Patch, ctx.patch.id).queue_approval["state"] == "failed"
+    assert Repo.all(Batch.all_for_project(ctx.project.id)) |> length() == 1
+  end
+
+  test "repeated missing CI uses the cancellation backoff and respects withdrawal", ctx do
+    for count <- 1..6 do
+      batch = active_child(ctx.project)
+
+      batch
+      |> Batch.changeset(%{
+        state: :running,
+        commit: "staged",
+        base_sha: "base",
+        last_polled: 0,
+        recovery_after: 0,
+        timeout_at: DateTime.to_unix(DateTime.utc_now()) - 1
+      })
+      |> Repo.update!()
+
+      Repo.delete_all(Status.all_for_batch(batch.id))
+      Repo.insert!(%Status{batch_id: batch.id, identifier: "build", state: :running})
+      state = GitHub.ServerMock.get_state()
+
+      GitHub.ServerMock.put_state(
+        put_in(state, [{{:installation, 91}, 14}, :statuses, "staged"], %{})
+      )
+
+      Batcher.handle_info({:poll, :once}, ctx.project.id)
+      child = active_child(ctx.project)
+      assert child.recovery_failures == count
+      delay = min(300 * Integer.pow(2, min(count - 1, 4)), 3_600)
+      assert child.recovery_after >= DateTime.to_unix(DateTime.utc_now()) + delay - 1
+      assert Repo.get!(Patch, ctx.patch.id).queue_approval == ctx.patch.queue_approval
+      assert Repo.all(LinkPatchBatch.from_batch(child.id)) |> length() == 1
+    end
+
+    child = active_child(ctx.project)
+    Batcher.handle_cast({:cancel, ctx.patch.id, :requested}, ctx.project.id)
+    Batcher.handle_cast({:status, {"staged", "build", :error, "old-run"}}, ctx.project.id)
+    assert Repo.get!(Patch, ctx.patch.id).queue_approval["state"] == "withdrawn"
+    refute Repo.get!(Patch, ctx.patch.id).queue_pending
+    assert Repo.all(LinkPatchBatch.from_batch(child.id)) == []
+  end
+
   test "repeated cancellation preserves backoff and one active membership", ctx do
     for count <- 1..6 do
       batch = active_child(ctx.project)
