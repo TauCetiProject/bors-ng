@@ -27,6 +27,11 @@ defmodule BorsNG.GitHub do
   @type tcollaborator :: %{user: tuser, perms: tuser_repo_perms}
   @type tcommitter :: %{name: bitstring, email: bitstring}
 
+  # Credentials stay inside trusted Git plumbing, never candidate processes.
+  def git_token(conn), do: safe_genserver_call(:git_token, conn, {}, 15_000)
+  def get_commit_tree(conn, sha), do: safe_genserver_call(:get_commit_tree, conn, {sha}, 15_000)
+  def local_git_mode(conn), do: safe_genserver_call(:local_git_mode, conn, {}, 15_000)
+
   def merge_backend_snapshot(repo_conn, timeout \\ 15_000) do
     safe_genserver_call(:merge_backend_snapshot, repo_conn, {}, timeout)
   end

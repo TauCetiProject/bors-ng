@@ -96,6 +96,27 @@ defmodule BorsNG.GitHub.Server do
     {:reply, {:ok, list}, state}
   end
 
+  def do_handle_call(:git_token, {{:raw, token}, _}, {}), do: {:ok, token}
+
+  def do_handle_call(:get_commit_tree, conn, {sha}) do
+    case get!(conn, "git/commits/#{sha}") do
+      %{status: 200, body: body} -> {:ok, Jason.decode!(body)["tree"]["sha"]}
+      _ -> {:error, :commit_tree_unavailable}
+    end
+  rescue
+    _ -> {:error, :commit_tree_unavailable}
+  end
+
+  def do_handle_call(:local_git_mode, conn, {}) do
+    case get!(conn, "actions/variables/BORS_CANDIDATE_ASSEMBLER") do
+      %{status: 200, body: body} -> {:ok, Jason.decode!(body)["value"]}
+      %{status: 404} -> {:ok, "off"}
+      _ -> {:error, :local_git_setting_unavailable}
+    end
+  rescue
+    _ -> {:error, :local_git_setting_unavailable}
+  end
+
   def do_handle_call(:get_pr_files, {{:raw, token}, repo_xref}, {pr_xref}) do
     get_pr_files_(
       token,

@@ -146,7 +146,15 @@ defmodule BorsNG.Worker.CandidateJournal do
     :ok
   end
 
-  def bind(candidate, commit, tree, policy_ref, toml, toolchain) do
+  def bind(
+        candidate,
+        commit,
+        tree,
+        policy_ref,
+        toml,
+        toolchain,
+        source \\ "github.commit_response"
+      ) do
     # Rebinding would destroy the identity of a generation. A restart begins
     # a new generation instead, even when GitHub returns the same commit SHA.
     {:ok, :ok} =
@@ -165,7 +173,7 @@ defmodule BorsNG.Worker.CandidateJournal do
           {:error, reason} -> raise(ArgumentError, "assembly result rejected: #{reason}")
         end
 
-        event(candidate, "constructed", "github.commit_response", %{
+        event(candidate, "constructed", source, %{
           commit: commit,
           tree: tree,
           assembly_identity: BorsNG.Worker.CandidateAssembler.identity(candidate),

@@ -86,3 +86,11 @@ batches, links, approvals or timestamps. Table/index creation tolerates replay
 following interrupted MySQL DDL. It deliberately does not backfill historical
 facts. Journal rows have no cascading foreign keys and survive queue deletion.
 Rolling back removes the journal; rolling forward cannot reconstruct lost facts.
+
+## Local Git implementation
+
+`Worker.LocalGit` implements the callback with ordered immutable inputs and
+structured errors/conflicts. The caller validates the envelope and live heads
+before authorizing a leased staging push. Local construction is sourced as
+`bors.local_git`; shadow comparisons never allocate generations or change
+CI/promotion identity. See [rollout and mirror limits](deploy/local-git.md).

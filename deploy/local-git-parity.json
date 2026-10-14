@@ -1,0 +1,1038 @@
+{
+  "source": "Oct 13 investigation immutable telemetry replayed Oct 14; Git tree parity only, no policy/CI authority",
+  "git_version": "2.55.0",
+  "rows": [
+    {
+      "batch": 639,
+      "members": 15,
+      "elapsed_seconds": 4.243,
+      "status": "ok",
+      "expected_tree": "eba3125c33ce7948508017e7f12fc3309c461472",
+      "tree": "eba3125c33ce7948508017e7f12fc3309c461472",
+      "matches": true,
+      "base_sha": "0a4ee4102c6ab9af0285c16cf172b60f0dbac162",
+      "github_commit": "74a93ca106dbacd84f94e7868d103e2715db7cd7",
+      "workflow": {
+        "conclusion": "success",
+        "html_url": "https://github.com/TauCetiProject/TauCeti/actions/runs/38481431732",
+        "status": "completed"
+      },
+      "members_order": [
+        {
+          "head_sha": "da36128c3704d5e4af27d1683a55184745f43084",
+          "pr": 15640
+        },
+        {
+          "head_sha": "95c381fe20fc8ef9a8db16aecc6c5844bcd77312",
+          "pr": 15863
+        },
+        {
+          "head_sha": "f35b8fb3b248adc413f89c560af629ceca779586",
+          "pr": 15909
+        },
+        {
+          "head_sha": "b0fcfc84fa2329d07356c48eb56baffeb77ae876",
+          "pr": 15932
+        },
+        {
+          "head_sha": "e0859941bc1b69a820d685bbc7ed25ef945cbcf5",
+          "pr": 15933
+        },
+        {
+          "head_sha": "4f7f3b9dbf50e894b08221c95deb75e780b8adcc",
+          "pr": 15946
+        },
+        {
+          "head_sha": "1439f4627ed7bfbd4e1aaa0556b95f7b7812faf7",
+          "pr": 15953
+        },
+        {
+          "head_sha": "e87953ee798206375f06cbe70bef86284da29800",
+          "pr": 15978
+        },
+        {
+          "head_sha": "ba57c04170a9e27a3c8f0b68bb9a3661eb8e6ccd",
+          "pr": 15979
+        },
+        {
+          "head_sha": "9284e8fc9ff4deb2a677c4f4aa55ede48c909fb3",
+          "pr": 15982
+        },
+        {
+          "head_sha": "aed50bfec3c6fceaa17bde72647d6c0815035136",
+          "pr": 15983
+        },
+        {
+          "head_sha": "d590d075313cfb5665cd64763b8e83d80e596c59",
+          "pr": 15987
+        },
+        {
+          "head_sha": "a9463ead42f9e4e2bfcd58d006b682c2ea6849e7",
+          "pr": 15996
+        },
+        {
+          "head_sha": "faad57b2722b0a21ed316b6a29fe332cf9ae01ca",
+          "pr": 15997
+        },
+        {
+          "head_sha": "be166d05f24fc48d653ad698a50d1b0bec72c3ba",
+          "pr": 16013
+        }
+      ]
+    },
+    {
+      "batch": 637,
+      "members": 11,
+      "elapsed_seconds": 4.047,
+      "status": "ok",
+      "expected_tree": "c2fc2f8c66e167bf94a206c117d441d0f9259bc8",
+      "tree": "c2fc2f8c66e167bf94a206c117d441d0f9259bc8",
+      "matches": true,
+      "base_sha": "71a2d40843173844be8de9be22b2cb49522b74cc",
+      "github_commit": "5a9ceb62c81b6e1f2784d7f739938686a87ca278",
+      "workflow": {
+        "conclusion": "success",
+        "html_url": "https://github.com/TauCetiProject/TauCeti/actions/runs/38474587338",
+        "status": "completed"
+      },
+      "members_order": [
+        {
+          "head_sha": "94a548109aaaf73b739806d6de6e66012ef5bb2e",
+          "pr": 15894
+        },
+        {
+          "head_sha": "8707d963526a88d628bea9f653de2ae7b645231b",
+          "pr": 15907
+        },
+        {
+          "head_sha": "c7b7d3e6c0663691aba5b04605f73aed9a78c446",
+          "pr": 15912
+        },
+        {
+          "head_sha": "bcf5fb80f59943cdddb353e4ab43ee612329c330",
+          "pr": 15923
+        },
+        {
+          "head_sha": "8cc46d42fef79530fd4aba6cbdbb708f84e0212d",
+          "pr": 15928
+        },
+        {
+          "head_sha": "76d44dcd550024226934aba8ad0c29689789ea82",
+          "pr": 15930
+        },
+        {
+          "head_sha": "cdae2479b3a95f807af77e0551bc0612edb58d12",
+          "pr": 15937
+        },
+        {
+          "head_sha": "e718ffe09685ef2128ba488dba5e8414b3d5a45b",
+          "pr": 15938
+        },
+        {
+          "head_sha": "1439e17e901d74a02eb3a35c519611329f15bc5a",
+          "pr": 15941
+        },
+        {
+          "head_sha": "7073892d4ab138c32c853efd2c49ed426723b521",
+          "pr": 15952
+        },
+        {
+          "head_sha": "30e9688cb0477edcd238d4cd48e13ea08970ca7d",
+          "pr": 15956
+        }
+      ]
+    },
+    {
+      "batch": 635,
+      "members": 4,
+      "elapsed_seconds": 3.89,
+      "status": "ok",
+      "expected_tree": "d664e6345232fa368a3d7f1cef63a0802db0fc3a",
+      "tree": "d664e6345232fa368a3d7f1cef63a0802db0fc3a",
+      "matches": true,
+      "base_sha": "205510517279d669a3f483f4ec3fa05860f7dd02",
+      "github_commit": "71a2d40843173844be8de9be22b2cb49522b74cc",
+      "workflow": {
+        "conclusion": "success",
+        "html_url": "https://github.com/TauCetiProject/TauCeti/actions/runs/38472317296",
+        "status": "completed"
+      },
+      "members_order": [
+        {
+          "head_sha": "53c610ad25938f19458852e33f55620afc4c074f",
+          "pr": 13564
+        },
+        {
+          "head_sha": "0c58b9e18d4f27f27c818e5000adc360aecd5b4c",
+          "pr": 15489
+        },
+        {
+          "head_sha": "0f6ae55d33232f352fe6fe54a80ee286db5bf1d7",
+          "pr": 16000
+        },
+        {
+          "head_sha": "abd0ae696b4bc69ac48ed75408300809b4f104df",
+          "pr": 16015
+        }
+      ]
+    },
+    {
+      "batch": 636,
+      "members": 19,
+      "elapsed_seconds": 3.259,
+      "status": "ok",
+      "expected_tree": "504aa9d257f1af8232b2fcc6cd87818bfebdce22",
+      "tree": "504aa9d257f1af8232b2fcc6cd87818bfebdce22",
+      "matches": true,
+      "base_sha": "5a9ceb62c81b6e1f2784d7f739938686a87ca278",
+      "github_commit": "0a4ee4102c6ab9af0285c16cf172b60f0dbac162",
+      "workflow": {
+        "conclusion": "success",
+        "html_url": "https://github.com/TauCetiProject/TauCeti/actions/runs/38477878883",
+        "status": "completed"
+      },
+      "members_order": [
+        {
+          "head_sha": "a3066eb4cc6f540560b8c3c8ae85b1965e46898c",
+          "pr": 15077
+        },
+        {
+          "head_sha": "ba3f0cb3cc693f3e9295e3b366c2d794d5cea949",
+          "pr": 15619
+        },
+        {
+          "head_sha": "aba0719c455e363f53133aab873ec8843de03dff",
+          "pr": 15627
+        },
+        {
+          "head_sha": "34a283e0675f70a3f8c01e1c118f35651bebbd1b",
+          "pr": 15655
+        },
+        {
+          "head_sha": "07710fc3a6d7c2284ff259bdd72dea15c2ef36c9",
+          "pr": 15670
+        },
+        {
+          "head_sha": "25e99bb778c59a5139d90f2ba47c9a991c1dc129",
+          "pr": 15733
+        },
+        {
+          "head_sha": "a170183f09f00c363ddc2abc6ee8a3f73050ab5c",
+          "pr": 15759
+        },
+        {
+          "head_sha": "fc39b8c48ca6b750257601f4d648bdd71e15b603",
+          "pr": 15800
+        },
+        {
+          "head_sha": "5be838dbfce0ebf89afb74b71e40b428b9109d73",
+          "pr": 15849
+        },
+        {
+          "head_sha": "28e440091aaef9a3f66865f69e2224d1da6e4aa0",
+          "pr": 15853
+        },
+        {
+          "head_sha": "ee991ab1e5d2c57918b616075c840ba10574862e",
+          "pr": 15969
+        },
+        {
+          "head_sha": "564481f64106fdcbbeaa991f142743c5b98cf5f8",
+          "pr": 15976
+        },
+        {
+          "head_sha": "8146ce1d6c68eca79fbd993317322a30a5bfdf3e",
+          "pr": 15984
+        },
+        {
+          "head_sha": "9033becb51af184cc1eef409d737db85d15e546a",
+          "pr": 15994
+        },
+        {
+          "head_sha": "fc42e608a36cd600d5bb8f10e754e49be1badfeb",
+          "pr": 15999
+        },
+        {
+          "head_sha": "8e98041466c2eb90b75da7feaecf4bdf99e88e0c",
+          "pr": 16005
+        },
+        {
+          "head_sha": "4f185b110a83ac47f85ea1eb5370d1beebac5902",
+          "pr": 16008
+        },
+        {
+          "head_sha": "eee744904c6a64d1b62df853a647bafb5b9fee8b",
+          "pr": 16009
+        },
+        {
+          "head_sha": "ff9e610500c205e70a3723c9d31b697eaacd3966",
+          "pr": 16010
+        }
+      ]
+    },
+    {
+      "batch": 634,
+      "members": 9,
+      "elapsed_seconds": 3.992,
+      "status": "ok",
+      "expected_tree": "9307fb543034a1efabdc90b9646135d8070be442",
+      "tree": "9307fb543034a1efabdc90b9646135d8070be442",
+      "matches": true,
+      "base_sha": "205510517279d669a3f483f4ec3fa05860f7dd02",
+      "github_commit": "0ecd744f7401badaa2187560cff6bca0af6f440e",
+      "workflow": {
+        "conclusion": "failure",
+        "html_url": "https://github.com/TauCetiProject/TauCeti/actions/runs/38470193367",
+        "status": "completed"
+      },
+      "members_order": [
+        {
+          "head_sha": "5b7fbe3e4f67355a817b75df5e0c73c674c9487d",
+          "pr": 15476
+        },
+        {
+          "head_sha": "9df683dc5f40fd93022556334c1274d8dd8b2e93",
+          "pr": 15530
+        },
+        {
+          "head_sha": "6e7a42727daf01ffce05b854f4e27348c9f89a1e",
+          "pr": 15789
+        },
+        {
+          "head_sha": "95a420a4a75af07f5019e6b294bcc28040b42836",
+          "pr": 15868
+        },
+        {
+          "head_sha": "5b3e67bf47fc43c38b211f0c2d9079235cd2d2a5",
+          "pr": 15948
+        },
+        {
+          "head_sha": "e925d3537eb0413aef4218dc274d370598b7f9ea",
+          "pr": 15972
+        },
+        {
+          "head_sha": "1c1066fa9547c8642ff38da4467d4de2a4bce44e",
+          "pr": 16001
+        },
+        {
+          "head_sha": "bc71d1caddbafd6fbb626da966443060a122c6f9",
+          "pr": 16016
+        },
+        {
+          "head_sha": "fce02ab4dd8f1d0f3b39d786dad327e234feba5c",
+          "pr": 16020
+        }
+      ]
+    },
+    {
+      "batch": 628,
+      "members": 23,
+      "elapsed_seconds": 5.234,
+      "status": "ok",
+      "expected_tree": "0e5b4c6580c646024ef8546e5fd8a10a06bd03f9",
+      "tree": "0e5b4c6580c646024ef8546e5fd8a10a06bd03f9",
+      "matches": true,
+      "base_sha": "eae7f76da7948d09c56f491e3315d690f7227b29",
+      "github_commit": "926074e20d242d79d860c429ec488b42094bfbec",
+      "workflow": {
+        "conclusion": "success",
+        "html_url": "https://github.com/TauCetiProject/TauCeti/actions/runs/38456015013",
+        "status": "completed"
+      },
+      "members_order": [
+        {
+          "head_sha": "6dde745f39c8f8192bedaebc1c9c13370931c89a",
+          "pr": 13709
+        },
+        {
+          "head_sha": "c2f61e6972bad8bab22ee1ff51f4d6993d747dc8",
+          "pr": 14993
+        },
+        {
+          "head_sha": "dd1cb4cead7e4a64800afe693c0cac93b82dc19f",
+          "pr": 15523
+        },
+        {
+          "head_sha": "b2a52d4ca39241d4b7ec61f5adc01b4e1a8d5384",
+          "pr": 15643
+        },
+        {
+          "head_sha": "4374369e3f78aed98092097c84edd71fec7257cc",
+          "pr": 15729
+        },
+        {
+          "head_sha": "38aba72f4bb3d0aa76de28c92f93fa7eb5cbe8d9",
+          "pr": 15745
+        },
+        {
+          "head_sha": "2c7f93b15f6092b21a81c3448b91c8ede81305df",
+          "pr": 15792
+        },
+        {
+          "head_sha": "6024145bec6a6ab44c53a93ec0aef6ccecc9868d",
+          "pr": 15793
+        },
+        {
+          "head_sha": "8860b621b683080ddaf8b98e282327a83949c55f",
+          "pr": 15794
+        },
+        {
+          "head_sha": "8455fd2bdbd807228e5c3cb471f8e698147da503",
+          "pr": 15797
+        },
+        {
+          "head_sha": "645104cd6bc64a29ea65e16b60bef88b481f26fc",
+          "pr": 15798
+        },
+        {
+          "head_sha": "310c31a99ba9c28e1f9bf3fe9fc8f35a46e2bcb5",
+          "pr": 15799
+        },
+        {
+          "head_sha": "0ddef549db427443b262e94c2db6f4bea4abd6a8",
+          "pr": 15801
+        },
+        {
+          "head_sha": "b7d020ded482611a48a0d5684c307a3131098fb1",
+          "pr": 15802
+        },
+        {
+          "head_sha": "bc8dd36b2167e273fde06b56bef27497601b1f2c",
+          "pr": 15803
+        },
+        {
+          "head_sha": "78fe53ca969135d4429dbe3a1e7064dad9c13164",
+          "pr": 15805
+        },
+        {
+          "head_sha": "c3f61f8a2f2b3ad5f6f0c4c303636eae6a3fbe5d",
+          "pr": 15809
+        },
+        {
+          "head_sha": "9af1dc7da390bcbf60e510467da9a05562b19b29",
+          "pr": 15810
+        },
+        {
+          "head_sha": "f31cfa7e2432df3fa16d6d7a3c2a402d742c567c",
+          "pr": 15811
+        },
+        {
+          "head_sha": "5b02febf1765ac35bd74458298e97547dfe6e77e",
+          "pr": 15814
+        },
+        {
+          "head_sha": "2cf44894180112f110e81c4c841200424630689a",
+          "pr": 15815
+        },
+        {
+          "head_sha": "95c290e9d10498523dddadc16d70d7a4e31c7d6c",
+          "pr": 15816
+        },
+        {
+          "head_sha": "aa1282fba012e51307ad0f0ae053b3a4156662dd",
+          "pr": 15819
+        }
+      ]
+    },
+    {
+      "batch": 633,
+      "members": 6,
+      "elapsed_seconds": 3.798,
+      "status": "ok",
+      "expected_tree": "922f8310ee4a295f88462a76eefb09072c1d0cad",
+      "tree": "922f8310ee4a295f88462a76eefb09072c1d0cad",
+      "matches": true,
+      "base_sha": "926074e20d242d79d860c429ec488b42094bfbec",
+      "github_commit": "205510517279d669a3f483f4ec3fa05860f7dd02",
+      "workflow": {
+        "conclusion": "success",
+        "html_url": "https://github.com/TauCetiProject/TauCeti/actions/runs/38467708541",
+        "status": "completed"
+      },
+      "members_order": [
+        {
+          "head_sha": "5258f7683026241381735b3b9ca730c01a3b3f47",
+          "pr": 15512
+        },
+        {
+          "head_sha": "a2fb79f3d7b0dd6b77d06f14d4cf8c3bb94f04ae",
+          "pr": 15958
+        },
+        {
+          "head_sha": "4f4f6b79accbf4c45bc48170c6bec6722062d049",
+          "pr": 15981
+        },
+        {
+          "head_sha": "a995978c0a101c0eadd8d3ac7e2502ce485a914f",
+          "pr": 15990
+        },
+        {
+          "head_sha": "d98b63257017715db097b76c492a88ee11b159b6",
+          "pr": 16006
+        },
+        {
+          "head_sha": "f1e7d9e5d7c410ecf74e7ba61ea6245780d405ef",
+          "pr": 16018
+        }
+      ]
+    },
+    {
+      "batch": 631,
+      "members": 52,
+      "elapsed_seconds": 4.555,
+      "status": "ok",
+      "expected_tree": "fce48dae8ec60a0a3f7145c9695aedb0097652f9",
+      "tree": "fce48dae8ec60a0a3f7145c9695aedb0097652f9",
+      "matches": true,
+      "base_sha": "926074e20d242d79d860c429ec488b42094bfbec",
+      "github_commit": "d47d151d948453dad5e41ec3d4d9bade150baa54",
+      "workflow": {
+        "conclusion": "failure",
+        "html_url": "https://github.com/TauCetiProject/TauCeti/actions/runs/38462342074",
+        "status": "completed"
+      },
+      "members_order": [
+        {
+          "head_sha": "0c29850cb4e403f5632dee1b5de795be3400848c",
+          "pr": 15841
+        },
+        {
+          "head_sha": "3f0097c5d41912903d661f850993784339950544",
+          "pr": 15855
+        },
+        {
+          "head_sha": "9f322ad7fffaf1ca39b3973791fe369b758bcff8",
+          "pr": 15856
+        },
+        {
+          "head_sha": "55753769cd63ae57c7bf89a59433829c5eeba183",
+          "pr": 15857
+        },
+        {
+          "head_sha": "bc8ed8dd718b26ae2b4d809295e169a16b35c68a",
+          "pr": 15859
+        },
+        {
+          "head_sha": "7420866ecf61daabdbcec7f1dae9b048f93b0664",
+          "pr": 15860
+        },
+        {
+          "head_sha": "2164db4c075aea86408e5df1812911b4f6084cfc",
+          "pr": 15861
+        },
+        {
+          "head_sha": "38139c585fde252e52600ae833d3fdd77bb3004c",
+          "pr": 15864
+        },
+        {
+          "head_sha": "5594dd54f6e668b017312db3ccb0ad542fa5210e",
+          "pr": 15865
+        },
+        {
+          "head_sha": "d42aec3e847f3d2feb9888b105e7e3f34c6c4bb8",
+          "pr": 15866
+        },
+        {
+          "head_sha": "ced840e07e09c5edd8e4023746c0a13f8916a423",
+          "pr": 15870
+        },
+        {
+          "head_sha": "abc2261eda207dbbf50012d18cec546d4524c794",
+          "pr": 15871
+        },
+        {
+          "head_sha": "94d8f1f5ef5faf82c6d7f542e841b9e7759b4bea",
+          "pr": 15872
+        },
+        {
+          "head_sha": "c8801d8201a1c5da871cb9c46ed415d29a05dd03",
+          "pr": 15874
+        },
+        {
+          "head_sha": "b4c108dac6447a190f9069aeeec98808bd49d198",
+          "pr": 15876
+        },
+        {
+          "head_sha": "55252953c62a42b95ac5d2683d4fde2633d63405",
+          "pr": 15878
+        },
+        {
+          "head_sha": "a44b85083a33935aa496390029dadebda36f2683",
+          "pr": 15880
+        },
+        {
+          "head_sha": "11d4e3b30bd50c4e4291fdd7c30a53ba1853a269",
+          "pr": 15881
+        },
+        {
+          "head_sha": "89b9f2195d325c7389ab7dc0fe71e45da5744882",
+          "pr": 15882
+        },
+        {
+          "head_sha": "ba37fe03afed0a2015dca17e5b3447d6b74df1c8",
+          "pr": 15884
+        },
+        {
+          "head_sha": "31a14461f2bd142c8d884432613aaa1b4ab2d3af",
+          "pr": 15889
+        },
+        {
+          "head_sha": "528a81914beccc988fd152530d2d488db8e624f2",
+          "pr": 15890
+        },
+        {
+          "head_sha": "b85cc275c5f9982097f3bb633e6f8cf5b61c1262",
+          "pr": 15892
+        },
+        {
+          "head_sha": "d8c9b19a3145376cd7efe0328f597c18b80fae57",
+          "pr": 15896
+        },
+        {
+          "head_sha": "d93d3d92b6a8c9e99bb3923452fec52f792b7793",
+          "pr": 15899
+        },
+        {
+          "head_sha": "3b01dc66fa9b866770d3e4d944239d56d840e5b0",
+          "pr": 15900
+        },
+        {
+          "head_sha": "b5805970845b7185f51222e191e075317104b305",
+          "pr": 15901
+        },
+        {
+          "head_sha": "c8813c928936dd9830a9446d46b8f13707a9d576",
+          "pr": 15904
+        },
+        {
+          "head_sha": "ec2582c15dc0275be560f7f9e438411dc4c1662c",
+          "pr": 15905
+        },
+        {
+          "head_sha": "ef94484587246efe0f8c727b6f43a520f615e44c",
+          "pr": 15906
+        },
+        {
+          "head_sha": "5c6ad5fb00954e0a2e08847431c94af2b4a33071",
+          "pr": 15908
+        },
+        {
+          "head_sha": "b6fea59e906abe726880c8fd455d12664216047b",
+          "pr": 15910
+        },
+        {
+          "head_sha": "493984f8524aad867f862f895ad9cca2d0745349",
+          "pr": 15911
+        },
+        {
+          "head_sha": "fa413bd9cbb162d0fa90c6df7b19bc078d0be0f4",
+          "pr": 15913
+        },
+        {
+          "head_sha": "b3563c0a24fd342e638239152f6e62aeab34a32f",
+          "pr": 15914
+        },
+        {
+          "head_sha": "4bb461aa7119562732b5a8231438a1fa919bcb96",
+          "pr": 15916
+        },
+        {
+          "head_sha": "eb8c303a51732d549450069e00e4eedca03f5d50",
+          "pr": 15917
+        },
+        {
+          "head_sha": "d538a42b408ae6354cb75443fb54b3473bed9efe",
+          "pr": 15918
+        },
+        {
+          "head_sha": "4bd5e6b42e03b436746ab853dfae4ba52eff0cff",
+          "pr": 15920
+        },
+        {
+          "head_sha": "08bfd8ec39dca3d64e819c36c5e0123026b1b705",
+          "pr": 15922
+        },
+        {
+          "head_sha": "41c419453c165f35635740f12f96dd59d9af992e",
+          "pr": 15924
+        },
+        {
+          "head_sha": "728bb7ff2dda61dac52a537f1b7f922dd080a1b6",
+          "pr": 15925
+        },
+        {
+          "head_sha": "cd466023f14130e0a34c58f2efb0fb1aa5c5126f",
+          "pr": 15926
+        },
+        {
+          "head_sha": "fb8617fcb308f62381d8fffd4ed5add1ecd37d70",
+          "pr": 15929
+        },
+        {
+          "head_sha": "401291beb6eaad52ec807a89041dd2cefdae7a0d",
+          "pr": 15931
+        },
+        {
+          "head_sha": "87766e3f6b6218a11c9be666c3ce4a8b7b398c2b",
+          "pr": 15935
+        },
+        {
+          "head_sha": "07ad779404deb23d79c14e041bb7a24ff392b203",
+          "pr": 15936
+        },
+        {
+          "head_sha": "233241ec1b2ece23ab8d9687fe192bdf13496208",
+          "pr": 15942
+        },
+        {
+          "head_sha": "c40e16e8726a92f9995eb862adb0395a4de77f0a",
+          "pr": 15947
+        },
+        {
+          "head_sha": "6cf3641962497539bd29d55fa2f51b8f75ca2802",
+          "pr": 15949
+        },
+        {
+          "head_sha": "ea2d269c192a7aa8d45fb188201daf24674d4351",
+          "pr": 15977
+        },
+        {
+          "head_sha": "0e7d6bd2faa3dbb6dc2949e4645fa55968546afa",
+          "pr": 15980
+        }
+      ]
+    },
+    {
+      "batch": 626,
+      "members": 29,
+      "elapsed_seconds": 3.346,
+      "status": "ok",
+      "expected_tree": "81bf77823306b373168b4e79ca2f9a0009a3f133",
+      "tree": "81bf77823306b373168b4e79ca2f9a0009a3f133",
+      "matches": true,
+      "base_sha": "eae7f76da7948d09c56f491e3315d690f7227b29",
+      "github_commit": "f09101d84a731dbcb6439908e344c8458859871b",
+      "workflow": {
+        "conclusion": "failure",
+        "html_url": "https://github.com/TauCetiProject/TauCeti/actions/runs/38449506157",
+        "status": "completed"
+      },
+      "members_order": [
+        {
+          "head_sha": "da36128c3704d5e4af27d1683a55184745f43084",
+          "pr": 15640
+        },
+        {
+          "head_sha": "f8f54e060c3feb06dbba39d5bc6422b87ab3baba",
+          "pr": 15804
+        },
+        {
+          "head_sha": "95c381fe20fc8ef9a8db16aecc6c5844bcd77312",
+          "pr": 15863
+        },
+        {
+          "head_sha": "f35b8fb3b248adc413f89c560af629ceca779586",
+          "pr": 15909
+        },
+        {
+          "head_sha": "8f2d2bc1f2b6b0ab6d2d9d3353ae4cd8e07ed35b",
+          "pr": 15915
+        },
+        {
+          "head_sha": "3d58d456dbbc272861bae113361b73485194e7d7",
+          "pr": 15919
+        },
+        {
+          "head_sha": "d5bd310bef8f7f7568efb4b88b30b5d6d7ff0892",
+          "pr": 15921
+        },
+        {
+          "head_sha": "b0fcfc84fa2329d07356c48eb56baffeb77ae876",
+          "pr": 15932
+        },
+        {
+          "head_sha": "e0859941bc1b69a820d685bbc7ed25ef945cbcf5",
+          "pr": 15933
+        },
+        {
+          "head_sha": "f41ea09777640b39a6d7e5c545d405f1004c766d",
+          "pr": 15944
+        },
+        {
+          "head_sha": "1396154470ee24ce865e01819e2828d5c445c173",
+          "pr": 15945
+        },
+        {
+          "head_sha": "4f7f3b9dbf50e894b08221c95deb75e780b8adcc",
+          "pr": 15946
+        },
+        {
+          "head_sha": "1439f4627ed7bfbd4e1aaa0556b95f7b7812faf7",
+          "pr": 15953
+        },
+        {
+          "head_sha": "5456e98663f4425e96ff01d932833e6ebb604b3b",
+          "pr": 15955
+        },
+        {
+          "head_sha": "a14b62a3cd1de828f2e0ccc48fb79ab7b1f7c22d",
+          "pr": 15963
+        },
+        {
+          "head_sha": "edd430f6e8fc53831f54e32558c2e7081bcf2cfa",
+          "pr": 15966
+        },
+        {
+          "head_sha": "9ebd2abd4cbac5d24d230471856969a5e997cc6e",
+          "pr": 15971
+        },
+        {
+          "head_sha": "e87953ee798206375f06cbe70bef86284da29800",
+          "pr": 15978
+        },
+        {
+          "head_sha": "ba57c04170a9e27a3c8f0b68bb9a3661eb8e6ccd",
+          "pr": 15979
+        },
+        {
+          "head_sha": "9284e8fc9ff4deb2a677c4f4aa55ede48c909fb3",
+          "pr": 15982
+        },
+        {
+          "head_sha": "aed50bfec3c6fceaa17bde72647d6c0815035136",
+          "pr": 15983
+        },
+        {
+          "head_sha": "d470fc335d65fcd1eee11e14f57f5115a71aa41e",
+          "pr": 15986
+        },
+        {
+          "head_sha": "d590d075313cfb5665cd64763b8e83d80e596c59",
+          "pr": 15987
+        },
+        {
+          "head_sha": "4165d4dfdd8b9108f1d84d763f03002ece3b6355",
+          "pr": 15988
+        },
+        {
+          "head_sha": "f27cc1d774b69919ea6048f3d99f0a58cdcdaaf5",
+          "pr": 15991
+        },
+        {
+          "head_sha": "a9463ead42f9e4e2bfcd58d006b682c2ea6849e7",
+          "pr": 15996
+        },
+        {
+          "head_sha": "faad57b2722b0a21ed316b6a29fe332cf9ae01ca",
+          "pr": 15997
+        },
+        {
+          "head_sha": "696ed71baa2c7fda33250d5833ab37985b609294",
+          "pr": 16002
+        },
+        {
+          "head_sha": "be166d05f24fc48d653ad698a50d1b0bec72c3ba",
+          "pr": 16013
+        }
+      ]
+    },
+    {
+      "batch": 625,
+      "members": 21,
+      "elapsed_seconds": 4.358,
+      "status": "ok",
+      "expected_tree": "09a6c429623a54fe173cba2c6362bddf2a8261ed",
+      "tree": "09a6c429623a54fe173cba2c6362bddf2a8261ed",
+      "matches": true,
+      "base_sha": "eae7f76da7948d09c56f491e3315d690f7227b29",
+      "github_commit": "d63deff092a07d8b66ee56a74d022848022bd2de",
+      "workflow": {
+        "conclusion": "failure",
+        "html_url": "https://github.com/TauCetiProject/TauCeti/actions/runs/38446291836",
+        "status": "completed"
+      },
+      "members_order": [
+        {
+          "head_sha": "a3066eb4cc6f540560b8c3c8ae85b1965e46898c",
+          "pr": 15077
+        },
+        {
+          "head_sha": "ba3f0cb3cc693f3e9295e3b366c2d794d5cea949",
+          "pr": 15619
+        },
+        {
+          "head_sha": "aba0719c455e363f53133aab873ec8843de03dff",
+          "pr": 15627
+        },
+        {
+          "head_sha": "34a283e0675f70a3f8c01e1c118f35651bebbd1b",
+          "pr": 15655
+        },
+        {
+          "head_sha": "07710fc3a6d7c2284ff259bdd72dea15c2ef36c9",
+          "pr": 15670
+        },
+        {
+          "head_sha": "25e99bb778c59a5139d90f2ba47c9a991c1dc129",
+          "pr": 15733
+        },
+        {
+          "head_sha": "a170183f09f00c363ddc2abc6ee8a3f73050ab5c",
+          "pr": 15759
+        },
+        {
+          "head_sha": "5be838dbfce0ebf89afb74b71e40b428b9109d73",
+          "pr": 15849
+        },
+        {
+          "head_sha": "28e440091aaef9a3f66865f69e2224d1da6e4aa0",
+          "pr": 15853
+        },
+        {
+          "head_sha": "8dc34057b70ed163140de56d8d2cc191d345e075",
+          "pr": 15858
+        },
+        {
+          "head_sha": "94a548109aaaf73b739806d6de6e66012ef5bb2e",
+          "pr": 15894
+        },
+        {
+          "head_sha": "8707d963526a88d628bea9f653de2ae7b645231b",
+          "pr": 15907
+        },
+        {
+          "head_sha": "c7b7d3e6c0663691aba5b04605f73aed9a78c446",
+          "pr": 15912
+        },
+        {
+          "head_sha": "bcf5fb80f59943cdddb353e4ab43ee612329c330",
+          "pr": 15923
+        },
+        {
+          "head_sha": "8cc46d42fef79530fd4aba6cbdbb708f84e0212d",
+          "pr": 15928
+        },
+        {
+          "head_sha": "76d44dcd550024226934aba8ad0c29689789ea82",
+          "pr": 15930
+        },
+        {
+          "head_sha": "cdae2479b3a95f807af77e0551bc0612edb58d12",
+          "pr": 15937
+        },
+        {
+          "head_sha": "e718ffe09685ef2128ba488dba5e8414b3d5a45b",
+          "pr": 15938
+        },
+        {
+          "head_sha": "1439e17e901d74a02eb3a35c519611329f15bc5a",
+          "pr": 15941
+        },
+        {
+          "head_sha": "7073892d4ab138c32c853efd2c49ed426723b521",
+          "pr": 15952
+        },
+        {
+          "head_sha": "30e9688cb0477edcd238d4cd48e13ea08970ca7d",
+          "pr": 15956
+        }
+      ]
+    },
+    {
+      "batch": 627,
+      "members": 13,
+      "elapsed_seconds": 6.601,
+      "status": "ok",
+      "expected_tree": "2fb4e862c886a53dbc5313be4197c3afeec96ffb",
+      "tree": "2fb4e862c886a53dbc5313be4197c3afeec96ffb",
+      "matches": true,
+      "base_sha": "eae7f76da7948d09c56f491e3315d690f7227b29",
+      "github_commit": "a6848c7fbd00dd1fee25c542b3ff6f3958795958",
+      "workflow": {
+        "conclusion": "failure",
+        "html_url": "https://github.com/TauCetiProject/TauCeti/actions/runs/38453410210",
+        "status": "completed"
+      },
+      "members_order": [
+        {
+          "head_sha": "e942ca1e6f5a406aab74cd6fd5b226914d611c34",
+          "pr": 8194
+        },
+        {
+          "head_sha": "079e03fd04c986a953b994e2ed3a16c7128319a9",
+          "pr": 12411
+        },
+        {
+          "head_sha": "3443489fea41fd23b119b7183749a1350687640a",
+          "pr": 13610
+        },
+        {
+          "head_sha": "2416060801a3cbc046c1e0c82cbe9ebad4f80cd6",
+          "pr": 13637
+        },
+        {
+          "head_sha": "18fa4458ac284fb2bf37fe5afc77f684ccdbc5e6",
+          "pr": 13668
+        },
+        {
+          "head_sha": "90cceb88ab9bbc1db5b8f09b4e1acd8c88255918",
+          "pr": 13712
+        },
+        {
+          "head_sha": "0e67fef93ad8cd32a95c5a590138aa72af119163",
+          "pr": 13872
+        },
+        {
+          "head_sha": "24c442721d7866b455c8fad216d2efd5ffb9eb29",
+          "pr": 13914
+        },
+        {
+          "head_sha": "3360a5a85fa7511b806b3487092a2c9b60ccc41f",
+          "pr": 13939
+        },
+        {
+          "head_sha": "3a5241bc5cfa72b25c46065d070481cc000bd4ef",
+          "pr": 13951
+        },
+        {
+          "head_sha": "e611e5a1ee6ed68630505865af242fe6001e5105",
+          "pr": 14031
+        },
+        {
+          "head_sha": "2ba1165831e1f72dd0c2652e271325f0074bbc91",
+          "pr": 14086
+        },
+        {
+          "head_sha": "4bd4596309b611f684f9d63e412e07036ae2a69d",
+          "pr": 14093
+        }
+      ]
+    },
+    {
+      "batch": 622,
+      "members": 2,
+      "elapsed_seconds": 3.479,
+      "status": "ok",
+      "expected_tree": "956c153a68c2535836f9ab1b9c72a4cf768c303f",
+      "tree": "956c153a68c2535836f9ab1b9c72a4cf768c303f",
+      "matches": true,
+      "base_sha": "eae7f76da7948d09c56f491e3315d690f7227b29",
+      "github_commit": "2b8d1cd27d76dab6267f12f04ebf0e43f042e880",
+      "workflow": {
+        "conclusion": "failure",
+        "html_url": "https://github.com/TauCetiProject/TauCeti/actions/runs/38444646353",
+        "status": "completed"
+      },
+      "members_order": [
+        {
+          "head_sha": "5b7fbe3e4f67355a817b75df5e0c73c674c9487d",
+          "pr": 15476
+        },
+        {
+          "head_sha": "0c58b9e18d4f27f27c818e5000adc360aecd5b4c",
+          "pr": 15489
+        }
+      ]
+    }
+  ]
+}
