@@ -1714,6 +1714,15 @@ defmodule BorsNG.Worker.Batcher do
            ),
          :ok <- BorsNG.Worker.CandidateAssembler.validate_result(candidate, result),
          :ok <- local_live_heads(conn, links) do
+      if Train.tracked?(candidate) do
+        CandidateJournal.event(candidate, "train_barrier_checked", "bors.local_git", %{
+          commit: result.commit,
+          tree: result.tree,
+          base_sha: result.base_sha,
+          evidence: result.evidence["barriers"]
+        })
+      end
+
       setup_statuses(batch, toml)
 
       if Process.get(:orchestration_executor, false) do

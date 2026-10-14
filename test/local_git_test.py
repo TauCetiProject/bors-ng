@@ -109,6 +109,14 @@ class LocalGitTest(unittest.TestCase):
         self.request['members'] = [self.member(1, one), self.member(2, two)]
         result = self.run_mirror()
         self.assertEqual(result['result']['tree'], git(self.upstream, 'rev-parse', two + '^{tree}'))
+        self.assertEqual(result['barriers'], dict(complete=True, paths=['file', 'new', 'renamed']))
+
+    def test_barriers_are_exact_even_when_optional_diagnostics_are_disabled(self):
+        one = self.commit(self.base, {'scripts/new-audit.py': 'trusted tooling'})
+        self.request.update(members=[self.member(1, one)], diagnostics=False)
+        result = self.run_mirror()
+        self.assertEqual(result['barriers'], dict(complete=True, paths=['scripts/new-audit.py']))
+        self.assertFalse(result['diagnostic_hints']['complete'])
 
     def test_interacting_independent_edits(self):
         one = self.commit(self.base, {'file': 'ONE\ntwo\nthree\n'})

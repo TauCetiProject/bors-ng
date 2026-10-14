@@ -16,7 +16,9 @@ One successor reservation per parent generation bounds wasted work. Existing
 legacy candidates drain serially before a fresh root can speculate.
 
 Assembly requires local squash construction, known exact toolchain bytes, and
-unchanged effective base policy. Unknown evidence, 3000-file ceilings, more than
+unchanged effective base policy. The helper records a complete exact base/head
+Git-tree diff independently of optional diagnostics. Incomplete or 300-path
+immutable comparisons, mutable PR 3000-file ceilings, more than
 64 members, or a pin/policy/tooling path barrier stops speculative admission.
 Barriers include both sides of renames of lean-toolchain, lake-manifest.json,
 lakefiles, bors.toml, scripts/, and .github/. Such roots still run serially.

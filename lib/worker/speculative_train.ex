@@ -168,6 +168,7 @@ defmodule BorsNG.Worker.SpeculativeTrain do
     binding = CandidateJournal.commit_binding(candidate)
 
     with hash when is_binary(hash) <- get_in(binding, ["toolchain", "sha256"]),
+         true <- immutable_barriers_free?(candidate, binding),
          {:ok, content} when is_binary(content) <-
            GitHub.get_file(conn, candidate.snapshot["base_sha"], "lean-toolchain"),
          true <- CandidateJournal.digest(content) == hash,
@@ -177,6 +178,32 @@ defmodule BorsNG.Worker.SpeculativeTrain do
       links_safe?(Repo.all(LinkPatchBatch.from_batch(candidate.batch_id)), conn)
     else
       _ -> false
+    end
+  end
+
+  defp immutable_barriers_free?(candidate, binding) do
+    event =
+      Repo.one(
+        from(e in CandidateEvent,
+          where:
+            e.candidate_id == ^candidate.id and e.kind == "train_barrier_checked" and
+              e.source == "bors.local_git",
+          order_by: [desc: e.id],
+          limit: 1
+        )
+      )
+
+    if event do
+      details = event.details
+      evidence = details["evidence"] || %{}
+      paths = evidence["paths"]
+
+      details["commit"] == binding["commit"] and details["tree"] == binding["tree"] and
+        details["base_sha"] == candidate.snapshot["base_sha"] and evidence["complete"] == true and
+        is_list(paths) and length(paths) < 300 and
+        Enum.all?(paths, &(is_binary(&1) and not barrier_path?(&1)))
+    else
+      false
     end
   end
 

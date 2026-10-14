@@ -138,6 +138,13 @@ defmodule BorsNG.Worker.SpeculativeTrainTest do
       sha256: CandidateJournal.digest(@toolchain)
     })
 
+    CandidateJournal.event(c, "train_barrier_checked", "bors.local_git", %{
+      commit: head,
+      tree: "tree",
+      base_sha: base,
+      evidence: %{complete: true, paths: ["TauCeti/Test.lean"]}
+    })
+
     batch =
       batch
       |> Batch.changeset(%{base_sha: base, commit: head, state: :running})
@@ -392,7 +399,7 @@ defmodule BorsNG.Worker.SpeculativeTrainTest do
     r=json.load(open(sys.argv[2]))
     if r['operation']=='assemble':
         i=r['identity']
-        print(json.dumps(dict(status='ok', result=i | dict(commit=f"{i['candidate_id']:040x}",tree='tree'), toolchain=dict(content='leanprover/lean4:v4.35.0' + chr(10)))))
+        print(json.dumps(dict(status='ok', result=i | dict(commit=f"{i['candidate_id']:040x}",tree='tree'), barriers=dict(complete=True,paths=['TauCeti/Test2.lean']), toolchain=dict(content='leanprover/lean4:v4.35.0' + chr(10)))))
     else:
         print(json.dumps(dict(status='ok')))
     """)
@@ -480,6 +487,36 @@ defmodule BorsNG.Worker.SpeculativeTrainTest do
 
     refute Repo.get!(Patch, patch.id).queue_pending
     assert Repo.all(Batch.all_for_project(project.id, :incomplete)) == []
+  end
+
+  test "immutable barrier evidence rejects a mutable clean file list", %{project: project} do
+    {_, ca, _} = candidate(project, 1)
+    binding = CandidateJournal.commit_binding(ca)
+    assert Train.barrier_free?(ca, @conn)
+
+    for evidence <- [
+          %{complete: true, paths: ["scripts/new-audit.py"]},
+          %{complete: false, paths: []},
+          %{complete: true, paths: List.duplicate("TauCeti/A.lean", 300)}
+        ] do
+      CandidateJournal.event(ca, "train_barrier_checked", "bors.local_git", %{
+        commit: binding["commit"],
+        tree: binding["tree"],
+        base_sha: @base,
+        evidence: evidence
+      })
+
+      refute Train.barrier_free?(ca, @conn)
+    end
+
+    CandidateJournal.event(ca, "train_barrier_checked", "bors.local_git", %{
+      commit: "other",
+      tree: binding["tree"],
+      base_sha: @base,
+      evidence: %{complete: true, paths: []}
+    })
+
+    refute Train.barrier_free?(ca, @conn)
   end
 
   test "stale cancellation cannot revoke a reapproved same head", %{project: project} do
