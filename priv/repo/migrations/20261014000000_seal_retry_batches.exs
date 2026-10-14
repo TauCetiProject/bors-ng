@@ -3,8 +3,18 @@ defmodule BorsNG.Repo.Migrations.SealRetryBatches do
   import Ecto.Query
 
   def up do
-    alter table(:batches) do
-      add_if_not_exists(:sealed, :boolean, default: false, null: false)
+    if repo().__adapter__() == Ecto.Adapters.MyXQL do
+      # MySQL 8 lacks ADD COLUMN IF NOT EXISTS, and DDL is not transactional.
+      # Inspect the column so an interrupted migration can restart safely.
+      unless mysql_sealed_column_exists?() do
+        alter table(:batches) do
+          add(:sealed, :boolean, default: false, null: false)
+        end
+      end
+    else
+      alter table(:batches) do
+        add_if_not_exists(:sealed, :boolean, default: false, null: false)
+      end
     end
 
     flush()
@@ -25,8 +35,26 @@ defmodule BorsNG.Repo.Migrations.SealRetryBatches do
   end
 
   def down do
-    alter table(:batches) do
-      remove_if_exists(:sealed, :boolean)
+    if repo().__adapter__() == Ecto.Adapters.MyXQL do
+      if mysql_sealed_column_exists?() do
+        alter table(:batches) do
+          remove(:sealed, :boolean)
+        end
+      end
+    else
+      alter table(:batches) do
+        remove_if_exists(:sealed, :boolean)
+      end
     end
+  end
+
+  defp mysql_sealed_column_exists? do
+    %{rows: [[count]]} =
+      Ecto.Adapters.SQL.query!(repo(), """
+      SELECT COUNT(*) FROM information_schema.columns
+      WHERE table_schema = DATABASE() AND table_name = 'batches' AND column_name = 'sealed'
+      """)
+
+    count > 0
   end
 end
