@@ -196,6 +196,30 @@ defmodule BorsNG.StagingFailureTest do
     end
   end
 
+  test "green workflow with a red required scope status retains native failure isolation" do
+    # Scope is a separate merge gate. The workflow reporters can post red scope
+    # and still finish green because their exit code follows the build verdict.
+    run = %{"id" => 123, "run_attempt" => 1, "conclusion" => "success"}
+
+    jobs =
+      Enum.map(
+        ["sandboxed-build", "publish-merge-group-cache / publish", "finalize-merge-group-build"],
+        fn name ->
+          %{
+            "id" => 1,
+            "run_id" => 123,
+            "name" => name,
+            "status" => "completed",
+            "conclusion" => "success",
+            "steps" => []
+          }
+        end
+      )
+
+    assert {:conclusive, %{diagnostic: "unknown_terminal_failure_bisect"}} =
+             StagingFailure.classify_jobs(run, %{"total_count" => length(jobs), "jobs" => jobs})
+  end
+
   test "red verdict reporters cannot disguise config failures as infrastructure" do
     run = %{"id" => 123, "run_attempt" => 1, "conclusion" => "failure"}
     step = fn name -> %{"name" => name, "conclusion" => "failure", "number" => 1} end

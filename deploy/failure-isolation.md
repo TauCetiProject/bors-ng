@@ -11,10 +11,13 @@ GitHub jobs request names the exact run attempt. Canceled runs and known primary
 setup/cache failures are infrastructure. A green sandbox followed by publisher or
 finalizer failure is also infrastructure, not individual proof evidence. Verdict
 reporters deliberately fail for red build/configuration verdicts too: a
-reporter-only failure therefore retains ordinary deterministic bisection. Bump
-cache completeness/archive compatibility failures also bisect. Driver/watchdog
+reporter-only failure therefore retains ordinary deterministic bisection.
+An entirely green workflow with a red required scope status also retains native
+failure isolation: the scope status remains an independent merge gate.
+Bump cache completeness/archive compatibility failures also bisect. Driver/watchdog
 and dependency fetch failures are infrastructure only when the candidate pin
-validator did not run; on a bump they can be deterministic compatibility failures. A known failed candidate validation/build step
+validator did not run; on a bump they can be deterministic compatibility failures.
+A known failed candidate validation/build step
 permits ordinary failure isolation even if a sibling job is canceled. Terminal
 timeouts retain native failure semantics. Unknown terminal failures retain
 ordinary deterministic bisection, so a renamed step cannot silently cause

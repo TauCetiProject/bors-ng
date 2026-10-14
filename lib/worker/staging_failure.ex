@@ -176,7 +176,9 @@ defmodule BorsNG.Worker.StagingFailure do
       interrupted ->
         {:infrastructure, evidence}
 
-      sandbox_green ->
+      # Scope has its own status and can be red even when every job is green.
+      # Only a failed workflow after a green sandbox indicates later infra.
+      sandbox_green and run["conclusion"] == "failure" ->
         {:infrastructure, evidence}
 
       primary != [] and
