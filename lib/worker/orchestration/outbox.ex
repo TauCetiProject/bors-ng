@@ -16,6 +16,7 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
         {"cast", {:cancel_generation, id, _, _, _}} -> {"cancel", id}
         {"cast", {:cancel, id, _}} -> {"cancel", id}
         {"cast", {:cancel, id}} -> {"cancel", id}
+        {"cast", {:cancel_all_generation, _}} -> {"cancel_all", nil}
         {"cast", {:cancel_all}} -> {"cancel_all", nil}
         _ -> {kind, nil}
       end

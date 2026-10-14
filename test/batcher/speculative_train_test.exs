@@ -477,6 +477,11 @@ defmodule BorsNG.Worker.SpeculativeTrainTest do
     {a, _, [link]} = candidate(project, 1)
     patch = Repo.get!(Patch, link.patch_id)
     old = patch.orchestration_approval_token
+
+    patch
+    |> Patch.changeset(%{orchestration_approval_token: "withdrawal-intent"})
+    |> Repo.update!()
+
     QueueApproval.stop([patch], :requested)
     a |> Batch.changeset(%{state: :canceled}) |> Repo.update!()
 
@@ -550,11 +555,61 @@ defmodule BorsNG.Worker.SpeculativeTrainTest do
     assert Train.guard(%{a | base_sha: "changed"}, @conn) == {:invalidate, :base_mismatch}
   end
 
+  test "durable intake preserves the latest r+ across prioritized r- and cancel-all", %{
+    project: project
+  } do
+    {a, _, [link]} = candidate(project, 1)
+    a |> Batch.changeset(%{state: :canceled}) |> Repo.update!()
+
+    project =
+      project |> Project.changeset(%{name: "async-test", batch_delay_sec: 3600}) |> Repo.update!()
+
+    GitHub.ServerMock.put_state(
+      GitHub.ServerMock.get_state()
+      |> put_in([@conn, :files, "main"], %{"bors.toml" => @toml})
+      |> put_in([@conn, :files, "staging.tmp"], %{"bors.toml" => @toml})
+    )
+
+    state = %{async_project_id: project.id}
+
+    for command <- [
+          {:reviewed, link.patch_id, "old"},
+          {:cancel, link.patch_id, :requested},
+          {:cancel_all},
+          {:reviewed, link.patch_id, "new"}
+        ] do
+      assert {:reply, :ok, ^state} = Batcher.handle_call({:persist, command}, nil, state)
+    end
+
+    jobs =
+      Repo.all(
+        from(j in BorsNG.Database.OrchestrationJob,
+          where: j.project_id == ^project.id,
+          order_by: j.id
+        )
+      )
+
+    [old, cancel, all, latest] = Enum.map(jobs, &Outbox.payload/1)
+    assert {:reviewed_generation, _, _, old_token, _} = old
+    assert {:reviewed_generation, _, _, latest_token, _} = latest
+    refute old_token == latest_token
+    assert Repo.get!(Patch, link.patch_id).orchestration_approval_token == latest_token
+    # Execute the priority order, with both old withdrawals before approvals.
+    Process.put(:orchestration_job, List.last(jobs))
+    for command <- [cancel, all, old, latest], do: Batcher.do_handle_cast(command, project.id)
+    patch = Repo.get!(Patch, link.patch_id)
+    assert patch.queue_pending
+    assert patch.queue_approval["reviewer"] == "new"
+    [active] = Repo.all(Batch.all_for_patch(link.patch_id, :incomplete))
+    assert Repo.one!(LinkPatchBatch.from_batch(active.id)).reviewer == "new"
+  end
+
   test "stale cancellation cannot revoke a reapproved same head", %{project: project} do
     {_a, _ca, [link]} = candidate(project, 1)
     patch = Repo.get!(Patch, link.patch_id)
     old = patch.orchestration_approval_token
-    QueueApproval.remember(patch, "new-reviewer")
+    patch |> Patch.changeset(%{orchestration_approval_token: "new-intent"}) |> Repo.update!()
+    QueueApproval.remember(Repo.get!(Patch, patch.id), "new-reviewer")
 
     Batcher.do_handle_cast(
       {:cancel_generation, patch.id, patch.commit, old, :requested},

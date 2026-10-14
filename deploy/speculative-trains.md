@@ -52,8 +52,11 @@ Failure, withdrawal, changed membership/head, generation changes, and unexpected
 main advance invalidate descendants. Their own exact reviewer/head/manual approval
 snapshots move into sealed native retry batches once; predecessor members are
 never annexed. Immutable history survives. Stale approval/cancel commands carry
-the captured head and approval token; reapproval/withdrawal rotates the token.
-Old canceled generations cannot overwrite a successor's status rows or promote.
+the captured head and approval token, allocated atomically at durable command
+receipt. Reapproval/withdrawal supersedes older intent even when cancellation
+priority reorders execution; ordinary worker writes cannot overwrite that token.
+Commit-only observations cannot authorize promotion without the exact generation's
+successful workflow. Old canceled generations cannot promote successors.
 
 ## Hard limits and cost
 

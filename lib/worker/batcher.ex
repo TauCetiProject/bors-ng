@@ -59,17 +59,7 @@ defmodule BorsNG.Worker.Batcher do
   def eligibility(pid, pr) when is_integer(pr), do: submit(pid, {:eligibility, pr})
 
   def reviewed(pid, patch_id, reviewer) when is_integer(patch_id) do
-    case Repo.get(Patch, patch_id) do
-      nil ->
-        :ok
-
-      patch ->
-        submit(
-          pid,
-          {:reviewed_generation, patch_id, patch.commit, patch.orchestration_approval_token,
-           reviewer}
-        )
-    end
+    submit(pid, {:reviewed, patch_id, reviewer})
   end
 
   # The legacy path casts because bundle activation may hold the batcher.
@@ -93,16 +83,7 @@ defmodule BorsNG.Worker.Batcher do
   end
 
   def cancel(pid, patch_id, reason \\ :requested) when is_integer(patch_id) do
-    case Repo.get(Patch, patch_id) do
-      nil ->
-        :ok
-
-      patch ->
-        submit(
-          pid,
-          {:cancel_generation, patch_id, patch.commit, patch.orchestration_approval_token, reason}
-        )
-    end
+    submit(pid, {:cancel, patch_id, reason})
   end
 
   def cancel_all(pid) do
@@ -123,21 +104,114 @@ defmodule BorsNG.Worker.Batcher do
 
   @doc "Persist an async command before acknowledging its webhook caller."
   def submit(pid, args) do
-    args =
-      case args do
-        {:maintainer_reviewed, id, head, actor, reviewer, time} ->
-          patch = Repo.get!(Patch, id)
-
-          {:maintainer_reviewed_generation, id, head, patch.orchestration_approval_token, actor,
-           reviewer, time}
-
-        _ ->
-          args
-      end
-
     if Outbox.enabled?(),
       do: GenServer.call(pid, {:persist, args}),
       else: GenServer.cast(pid, args)
+  end
+
+  # Allocate intent generations at receipt, atomically with their durable
+  # mailbox insert. Cancellation priority must never reverse r+ / r- / r+.
+  defp persist_command(project_id, {:cancel_all}) do
+    {:ok, _} =
+      Repo.transaction(fn ->
+        patches =
+          Repo.all(
+            from(p in Patch,
+              where: p.project_id == ^project_id and p.open,
+              order_by: p.id,
+              lock: "FOR UPDATE"
+            )
+          )
+
+        token = Base.encode16(:crypto.strong_rand_bytes(16))
+
+        Repo.update_all(from(p in Patch, where: p.id in ^Enum.map(patches, & &1.id)),
+          set: [orchestration_approval_token: token]
+        )
+
+        Outbox.enqueue(
+          project_id,
+          "cast",
+          {:cancel_all_generation, Enum.map(patches, &{&1.id, &1.commit, token})}
+        )
+      end)
+  end
+
+  defp persist_command(project_id, args) do
+    {:ok, _} =
+      Repo.transaction(fn ->
+        id =
+          case args do
+            {:reviewed, id, _} -> id
+            {:cancel, id, _} -> id
+            {:cancel, id} -> id
+            {:maintainer_reviewed, id, _, _, _, _} -> id
+            _ -> nil
+          end
+
+        patch =
+          if id,
+            do:
+              Repo.one(
+                from(p in Patch,
+                  where: p.id == ^id and p.project_id == ^project_id,
+                  lock: "FOR UPDATE"
+                )
+              )
+
+        if patch do
+          token =
+            if match?({:cancel, _, :review_unsafe}, args),
+              do: patch.orchestration_approval_token,
+              else: Base.encode16(:crypto.strong_rand_bytes(16))
+
+          patch |> Patch.changeset(%{orchestration_approval_token: token}) |> Repo.update!()
+
+          fenced =
+            case args do
+              {:reviewed, _, reviewer} ->
+                {:reviewed_generation, id, patch.commit, token, reviewer}
+
+              {:cancel, _, reason} ->
+                {:cancel_generation, id, patch.commit, token, reason}
+
+              {:cancel, _} ->
+                {:cancel_generation, id, patch.commit, token, :requested}
+
+              {:maintainer_reviewed, _, head, actor, reviewer, time} ->
+                {:maintainer_reviewed_generation, id, head, token, actor, reviewer, time}
+            end
+
+          Outbox.enqueue(project_id, "cast", fenced)
+        else
+          if is_nil(id), do: Outbox.enqueue(project_id, "cast", args)
+        end
+      end)
+  end
+
+  defp with_intent(patch_id, generation, action) do
+    previous = Process.get(:intake_generation)
+    Process.put(:intake_generation, {patch_id, generation})
+
+    try do
+      action.()
+    after
+      if previous,
+        do: Process.put(:intake_generation, previous),
+        else: Process.delete(:intake_generation)
+    end
+  end
+
+  defp intent_current?(patch) do
+    case Process.get(:intake_generation) do
+      {id, generation} when id == patch.id ->
+        Repo.get!(Patch, id).orchestration_approval_token == generation
+
+      _ ->
+        not Process.get(:orchestration_executor, false) or
+          Repo.get!(Patch, patch.id).orchestration_approval_token ==
+            patch.orchestration_approval_token
+    end
   end
 
   # Server callbacks
@@ -160,7 +234,7 @@ defmodule BorsNG.Worker.Batcher do
   end
 
   def handle_cast(args, %{async_project_id: project_id} = state) do
-    Outbox.enqueue(project_id, "cast", args)
+    persist_command(project_id, args)
     {:noreply, state}
   end
 
@@ -172,7 +246,7 @@ defmodule BorsNG.Worker.Batcher do
 
   # Retain direct priority/single calls already in flight across a deploy.
   def handle_call({:persist, args}, _from, %{async_project_id: project_id} = state) do
-    Outbox.enqueue(project_id, "cast", args)
+    persist_command(project_id, args)
     {:reply, :ok, state}
   end
 
@@ -182,7 +256,7 @@ defmodule BorsNG.Worker.Batcher do
   end
 
   def handle_call(args, _from, %{async_project_id: project_id} = state) do
-    Outbox.enqueue(project_id, "cast", args)
+    persist_command(project_id, args)
     {:reply, :ok, state}
   end
 
@@ -255,7 +329,9 @@ defmodule BorsNG.Worker.Batcher do
       ) do
     case Repo.get(Patch, id) do
       %Patch{project_id: ^project_id, commit: ^head, orchestration_approval_token: ^generation} ->
-        do_handle_cast({:maintainer_reviewed, id, head, actor, reviewer, time}, project_id)
+        with_intent(id, generation, fn ->
+          do_handle_cast({:maintainer_reviewed, id, head, actor, reviewer, time}, project_id)
+        end)
 
       _ ->
         :ok
@@ -301,7 +377,9 @@ defmodule BorsNG.Worker.Batcher do
   def do_handle_cast({:reviewed_generation, patch_id, head, generation, reviewer}, project_id) do
     case Repo.get(Patch, patch_id) do
       %Patch{project_id: ^project_id, commit: ^head, orchestration_approval_token: ^generation} ->
-        do_handle_cast({:reviewed_expected, patch_id, head, reviewer}, project_id)
+        with_intent(patch_id, generation, fn ->
+          do_handle_cast({:reviewed_expected, patch_id, head, reviewer}, project_id)
+        end)
 
       _ ->
         :ok
@@ -408,6 +486,12 @@ defmodule BorsNG.Worker.Batcher do
           maybe_complete_batch(batch)
         end
       end
+    end)
+  end
+
+  def do_handle_cast({:cancel_all_generation, members}, project_id) do
+    Enum.each(members, fn {id, head, generation} ->
+      do_handle_cast({:cancel_generation, id, head, generation, :cancel_all}, project_id)
     end)
   end
 
@@ -972,6 +1056,10 @@ defmodule BorsNG.Worker.Batcher do
   # one holds its approval on the patch row until every member of the bundle
   # is approved, then all members enter the same batch together (run_bundle/3).
   defp activate(reviewer, patch, max_batch_size) do
+    if intent_current?(patch), do: activate_current(reviewer, patch, max_batch_size)
+  end
+
+  defp activate_current(reviewer, patch, max_batch_size) do
     project = Repo.get!(Project, patch.project_id)
 
     case BorsNG.MergeBackend.allow(project, patch.into_branch, :admit) do
@@ -3939,7 +4027,17 @@ defmodule BorsNG.Worker.Batcher do
   defp approval_generation(patch) do
     if Process.get(:orchestration_executor, false) do
       token = Base.encode16(:crypto.strong_rand_bytes(16))
-      patch |> Patch.changeset(%{orchestration_approval_token: token}) |> Repo.update!()
+      query = from(p in Patch, where: p.id == ^patch.id)
+
+      query =
+        if is_nil(patch.orchestration_approval_token),
+          do: from(p in query, where: is_nil(p.orchestration_approval_token)),
+          else:
+            from(p in query,
+              where: p.orchestration_approval_token == ^patch.orchestration_approval_token
+            )
+
+      query |> Repo.update_all(set: [orchestration_approval_token: token])
       token
     else
       make_ref()
