@@ -320,6 +320,27 @@ defmodule BorsNG.Worker.BatcherCancelledCITest do
     assert Repo.all(Batch.all_for_project(ctx.project.id)) |> length() == 1
   end
 
+  test "an API outage does not discard green CI held for promotion", ctx do
+    ctx.batch
+    |> Batch.changeset(%{timeout_at: DateTime.to_unix(DateTime.utc_now()) - 1})
+    |> Repo.update!()
+
+    Repo.update_all(Status.all_for_batch(ctx.batch.id), set: [state: :ok])
+
+    GitHub.ServerMock.put_state(
+      Map.put(GitHub.ServerMock.get_state(), :get_commit_status_error, 1)
+    )
+
+    Batcher.handle_info({:retry_promotion, ctx.batch.id, ctx.batch.commit}, ctx.project.id)
+    batch = Repo.get!(Batch, ctx.batch.id)
+    assert batch.state == :running and batch.commit == ctx.batch.commit
+    assert batch.recovery_failures == 0
+    assert Repo.all(Batch.all_for_project(ctx.project.id)) |> length() == 1
+    assert Repo.get!(Patch, ctx.patch.id).queue_approval == ctx.patch.queue_approval
+    timer = Process.get({:batch_recheck, ctx.batch.id})
+    assert is_reference(timer) and Process.read_timer(timer) <= 61_000
+  end
+
   test "repeated missing CI uses the cancellation backoff and respects withdrawal", ctx do
     for count <- 1..6 do
       batch = active_child(ctx.project)

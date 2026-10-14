@@ -2051,7 +2051,7 @@ defmodule BorsNG.Worker.Batcher do
         |> Batch.changeset(%{last_polled: now})
         |> Repo.update!()
 
-        if expired_staging?(batch) do
+        if expired_staging?(batch) and not green_staged?(batch) do
           maybe_complete_batch_due(batch, true)
         else
           if from_recheck, do: schedule_recheck(batch, now + 60)
@@ -2073,7 +2073,8 @@ defmodule BorsNG.Worker.Batcher do
 
     inconclusive_deadline =
       expired_staging?(batch) and
-        (status_read_failed or statuses == [] or initial_status in [:running, :waiting])
+        ((status_read_failed and initial_status != :ok) or statuses == [] or
+           initial_status in [:running, :waiting])
 
     now = DateTime.to_unix(DateTime.utc_now(), :second)
     repo_conn = get_repo_conn(batch.project)
