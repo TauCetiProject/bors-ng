@@ -82,6 +82,11 @@ defmodule BorsNG.Worker.BatcherCancelledCITest do
     batch = active_child(ctx.project)
     patch = Repo.get!(Patch, ctx.patch.id)
     assert batch.state == :waiting
+    assert batch.sealed
+    {normal, true} = Batcher.get_new_batch(nil, ctx.project.id, "master", batch.priority, false)
+    refute normal.sealed
+    assert normal.id != batch.id
+    Repo.delete!(normal)
     assert batch.commit == nil and batch.base_sha == nil and batch.timeout_at in [nil, 0]
     assert batch.recovery_failures == 1
     assert batch.recovery_after > DateTime.to_unix(DateTime.utc_now())

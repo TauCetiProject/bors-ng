@@ -137,11 +137,15 @@ defmodule BorsNG.Worker.Batcher.Divider do
 
         if remaining == [] do
           case existing do
-            [{_, _, id} | _] -> Repo.get!(Batch, id)
-            [] -> nil
+            [{_, _, id} | _] ->
+              Repo.get!(Batch, id) |> Batch.changeset(%{sealed: true}) |> Repo.update!()
+
+            [] ->
+              nil
           end
         else
-          batch = Repo.insert!(Batch.new(project_id, into_branch, priority))
+          batch =
+            Repo.insert!(%Batch{Batch.new(project_id, into_branch, priority) | sealed: true})
 
           remaining
           |> Enum.map(

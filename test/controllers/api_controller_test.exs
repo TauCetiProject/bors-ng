@@ -111,6 +111,7 @@ defmodule BorsNG.ApiControllerTest do
     response = json_response(conn, 200)
     assert response["batch_ids"] == [main.id]
     assert response["requested_batch"]["id"] == main.id
+    assert response["requested_batch"]["sealed"] == false
     assert response["requested_batch"]["members"] == [%{"pr" => 42, "head_sha" => "approved"}]
     assert response["base"] == "main"
     assert response["repo"] == project.name

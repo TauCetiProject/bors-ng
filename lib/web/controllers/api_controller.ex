@@ -135,6 +135,7 @@ defmodule BorsNG.ApiController do
       id: batch.id,
       base: batch.into_branch,
       state: batch.state,
+      sealed: batch.sealed,
       head_sha: batch.commit,
       base_sha: batch.base_sha,
       promotion_retry_at: batch.promotion_retry_at,

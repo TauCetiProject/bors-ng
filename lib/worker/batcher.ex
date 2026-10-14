@@ -1365,6 +1365,9 @@ defmodule BorsNG.Worker.Batcher do
   end
 
   defp start_waiting_batch_allowed(batch) do
+    # Persist before staging work: a restart or priority preemption may leave
+    # this batch waiting again, but its tested membership must never grow.
+    batch = batch |> Batch.changeset(%{sealed: true}) |> Repo.update!()
     project = batch.project
     repo_conn = get_repo_conn(project)
 
@@ -3079,6 +3082,7 @@ defmodule BorsNG.Worker.Batcher do
     Batch
     |> where([b], b.project_id == ^project_id)
     |> where([b], b.state == ^:waiting)
+    |> where([b], not b.sealed)
     |> where([b], b.into_branch == ^into_branch)
     |> where([b], b.priority == ^priority)
     |> apply_max_batch_size(max_batch_size, capacity)
