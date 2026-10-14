@@ -164,6 +164,38 @@ defmodule BorsNG.StagingFailureTest do
     assert {:infrastructure, _} = StagingFailure.classify_jobs(run, wrap.(setup))
   end
 
+  test "candidate pin-dependent setup failures retain bisection" do
+    run = %{"id" => 123, "run_attempt" => 1, "conclusion" => "failure"}
+
+    pin = %{
+      "name" => "Validate the Lake-pin bump before building",
+      "number" => 1,
+      "conclusion" => "success"
+    }
+
+    for name <- [
+          "Require a complete Mathlib cache for a bump",
+          "Validate Lake archive reuse against a changed toolchain",
+          "Build the trusted environment-lint driver (before any candidate code runs)",
+          "Prepare trusted read-only Lean watchdog toolchain",
+          "Fetch Mathlib with the (bump-validated) config (network, no token; no PR code)"
+        ] do
+      step = %{"name" => name, "number" => 2, "conclusion" => "failure"}
+
+      job = %{
+        "id" => 1,
+        "run_id" => 123,
+        "name" => "sandboxed-build",
+        "status" => "completed",
+        "conclusion" => "failure",
+        "steps" => [pin, step]
+      }
+
+      assert {:conclusive, %{diagnostic: "unknown_terminal_failure_bisect"}} =
+               StagingFailure.classify_jobs(run, %{"total_count" => 1, "jobs" => [job]})
+    end
+  end
+
   test "red verdict reporters cannot disguise config failures as infrastructure" do
     run = %{"id" => 123, "run_attempt" => 1, "conclusion" => "failure"}
     step = fn name -> %{"name" => name, "conclusion" => "failure", "number" => 1} end

@@ -92,11 +92,9 @@ defmodule BorsNG.Worker.StagingFailure do
     "Install ",
     "Restore ",
     "Fetch ",
-    "Require a complete Mathlib cache",
     "Decide ",
     "Configure the Lake artifact cache",
     "Save verified Lake archive",
-    "Validate Lake archive reuse",
     "Prepare trusted read-only Lean watchdog",
     "Build the trusted environment-lint driver",
     "Hand the merge-group oleans",
@@ -129,9 +127,21 @@ defmodule BorsNG.Worker.StagingFailure do
 
     failed =
       Enum.flat_map(jobs, fn j ->
+        pin_validation_ran =
+          Enum.any?(j["steps"] || [], fn s ->
+            s["name"] == "Validate the Lake-pin bump before building" and
+              s["conclusion"] not in [nil, "skipped"]
+          end)
+
         Enum.filter(j["steps"] || [], &(&1["conclusion"] == "failure"))
         |> Enum.map(
-          &%{job_id: j["id"], job_name: j["name"], name: &1["name"], number: &1["number"]}
+          &%{
+            job_id: j["id"],
+            job_name: j["name"],
+            name: &1["name"],
+            number: &1["number"],
+            pin_validation_ran: pin_validation_ran
+          }
         )
       end)
 
@@ -172,7 +182,16 @@ defmodule BorsNG.Worker.StagingFailure do
       primary != [] and
           Enum.all?(primary, fn step ->
             is_binary(step.name) and
-                Enum.any?(@infrastructure_prefixes, &String.starts_with?(step.name, &1))
+              Enum.any?(@infrastructure_prefixes, &String.starts_with?(step.name, &1)) and
+                not (step.pin_validation_ran and
+                         Enum.any?(
+                           [
+                             "Fetch ",
+                             "Prepare trusted read-only Lean watchdog",
+                             "Build the trusted environment-lint driver"
+                           ],
+                           &String.starts_with?(step.name, &1)
+                         ))
           end) ->
         {:infrastructure, evidence}
 
