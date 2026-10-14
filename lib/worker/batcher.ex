@@ -1635,6 +1635,11 @@ defmodule BorsNG.Worker.Batcher do
 
       mode = BorsNG.Worker.LocalGit.mode(project, batch.into_branch, repo_conn)
 
+      # A rollback may disable local assembly as well as speculation. Retire
+      # completed external reservations before deciding whether legacy serial
+      # construction may resume; never free slots merely from batch state.
+      if Train.reservations(project.id) != [], do: Train.reconcile(project.id, repo_conn)
+
       controlled =
         Train.enabled?(project, batch.into_branch) or Train.reservations(project.id) != []
 
