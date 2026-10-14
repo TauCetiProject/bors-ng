@@ -1242,6 +1242,7 @@ defmodule BorsNG.Worker.BatcherBundleTest do
       # heads they were approved at, so both go back on the queue.
       [retry] = Repo.all(from(b in Batch, where: b.id != ^batch.id))
       assert retry.state == :waiting
+      assert retry.sealed
 
       assert retry.id
              |> LinkPatchBatch.from_batch()
@@ -1273,6 +1274,7 @@ defmodule BorsNG.Worker.BatcherBundleTest do
       first = BorsNG.Worker.Batcher.Divider.clone_batch(links, proj.id, "master")
       replay = BorsNG.Worker.Batcher.Divider.clone_batch(links, proj.id, "master")
       assert first.id == replay.id
+      assert replay.sealed
       assert first.priority == 2
       assert Repo.aggregate(LinkPatchBatch, :count, :id) == 4
       assert Repo.aggregate(Batch, :count, :id) == 2

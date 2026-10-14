@@ -100,6 +100,7 @@ defmodule BorsNG.Worker.BatcherInterruptedStartTest do
 
     batch = Repo.get!(Batch, batch.id)
     assert batch.state == :running
+    assert batch.sealed
 
     # The stale rows were reclaimed, not duplicated, and the carried-over
     # :error state is gone -- it described a staging commit that no longer
@@ -130,5 +131,32 @@ defmodule BorsNG.Worker.BatcherInterruptedStartTest do
     poll_now(batch, proj)
 
     assert Repo.get!(Batch, batch.id).timeout_at != nil
+  end
+
+  test "priority preemption leaves a started batch sealed while waiting again",
+       %{proj: proj, batch: batch} do
+    poll_now(batch, proj)
+    started = Repo.get!(Batch, batch.id)
+    assert started.state == :running and started.sealed
+
+    GitHub.ServerMock.put_state(
+      put_in(GitHub.ServerMock.get_state(), [{{:installation, 91}, 14}, :comments, 2], [])
+    )
+
+    urgent =
+      Repo.insert!(%Patch{
+        project_id: proj.id,
+        pr_xref: 2,
+        commit: "O",
+        into_branch: "master",
+        priority: 101
+      })
+
+    Batcher.handle_cast({:reviewed, urgent.id, "rvr"}, proj.id)
+    paused = Repo.get!(Batch, batch.id)
+    assert paused.state == :waiting and paused.sealed
+    {normal, true} = Batcher.get_new_batch(nil, proj.id, "master", paused.priority, false)
+    assert normal.id != paused.id
+    refute normal.sealed
   end
 end

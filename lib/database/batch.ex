@@ -21,6 +21,8 @@ defmodule BorsNG.Database.Batch do
     field(:last_polled, :integer)
     field(:timeout_at, :integer)
     field(:priority, :integer, default: 0)
+    # Admission closes permanently when a batch starts or is created as a retry.
+    field(:sealed, :boolean, default: false)
     field(:promotion_retry_at, :integer, default: 0)
     field(:promotion_failures, :integer, default: 0)
     field(:recovery_after, :integer, default: 0)
@@ -184,6 +186,7 @@ defmodule BorsNG.Database.Batch do
       :last_polled,
       :timeout_at,
       :priority,
+      :sealed,
       :promotion_retry_at,
       :promotion_failures,
       :recovery_after,
