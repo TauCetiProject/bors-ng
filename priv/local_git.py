@@ -71,7 +71,8 @@ class Mirror:
             owner = os.getpid()
             proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=out, stderr=err,
                                     env=self.env | (extra_env or {}), start_new_session=True,
-                                    preexec_fn=lambda: child_guard(owner))
+                                    preexec_fn=lambda: child_guard(owner),
+                                    pass_fds=(self.lock_fd,) if hasattr(self, 'lock_fd') else ())
             sent = False
             until = time.monotonic() + remaining
             try:
@@ -201,6 +202,9 @@ class Mirror:
     def run(self):
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         with (self.root / '.lock').open('a') as lock:
+            # Keep the flock alive in Git's process tree even if the helper dies.
+            # A surviving index-pack/HTTP child cannot become an unlocked writer.
+            self.lock_fd = lock.fileno()
             while True:
                 try:
                     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

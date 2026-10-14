@@ -35,7 +35,9 @@ across assembler/BEAM restarts on that filesystem. They are an expendable source
 object cache: container replacement or host loss cold-fetches exact objects again.
 No durability of Cloudflare container disk is assumed. A root-wide OS flock
 serializes fetch, construction, maintenance and pushes across processes and
-releases automatically on exit. The retained root budget is 2 GiB, with LRU mirror
+releases automatically when the helper/Git process tree exits. Git inherits the
+lock descriptor, and a parent-death signal stops its direct child after an
+interrupted helper. Stale Git lock files are recovered under the root lock. The retained root budget is 2 GiB, with LRU mirror
 eviction and synchronous pruning under the same lock. During Git commands the
 helper checks the budget every 250 ms and kills the process group if exceeded;
 a single sampling interval can transiently exceed the budget. Oversized mirrors
