@@ -35,6 +35,50 @@ defmodule BorsNG.WebhookControllerTest do
     {:ok, installation: installation, project: project, user: user}
   end
 
+  test "check-run webhook journals GitHub start time without synthesizing queue status", %{
+    conn: conn,
+    project: project
+  } do
+    alias BorsNG.Database.{Batch, CandidateEvent}
+    alias BorsNG.Worker.CandidateJournal
+    batch = Repo.insert!(Batch.new(project.id, "main"))
+    candidate = CandidateJournal.begin(batch, [], "base")
+
+    CandidateJournal.bind(
+      candidate,
+      "built",
+      "tree",
+      "base",
+      %BorsNG.Worker.Batcher.BorsToml{status: ["build"]},
+      %{}
+    )
+
+    batch |> Batch.changeset(%{commit: "built", state: :running}) |> Repo.update!()
+
+    body = %{
+      "repository" => %{"id" => project.repo_xref},
+      "action" => "created",
+      "check_run" => %{
+        "id" => 123,
+        "head_sha" => "built",
+        "status" => "in_progress",
+        "name" => "build",
+        "started_at" => "2026-10-14T00:00:00Z"
+      }
+    }
+
+    conn
+    |> put_req_header("x-github-event", "check_run")
+    |> post(webhook_path(conn, :webhook, "github"), body)
+
+    event = Repo.get_by!(CandidateEvent, candidate_id: candidate.id, kind: "check_run_observed")
+    assert event.details["check_started_at"] == 1_791_936_000_000_000
+    assert event.details["check_finished_at"] == nil
+    assert event.source == "github.check_run_webhook"
+    assert Repo.get!(Batch, batch.id).state == :running
+    assert Repo.all(BorsNG.Database.Status.all_for_batch(batch.id)) == []
+  end
+
   test "edit PR", %{conn: conn, project: project} do
     patch =
       Repo.insert!(%Patch{

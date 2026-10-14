@@ -208,6 +208,35 @@ defmodule BorsNG.Worker.CandidateJournalTest do
              "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
   end
 
+  test "check lifecycle retains authoritative GitHub times and rejects stale commits", ctx do
+    member(ctx.batch, ctx.patch)
+    candidate = begin(ctx.batch)
+    bind(candidate, "built")
+    ctx.batch |> Batch.changeset(%{commit: "built", state: :running}) |> Repo.update!()
+
+    check = %{
+      "id" => 123,
+      "head_sha" => "built",
+      "name" => "build",
+      "status" => "completed",
+      "started_at" => "2026-10-14T00:00:00Z",
+      "completed_at" => "2026-10-14T00:02:00Z",
+      "app" => %{"id" => 15368},
+      "check_suite" => %{"id" => 456}
+    }
+
+    Journal.observe_check(ctx.project.id, check)
+    Journal.observe_check(ctx.project.id, %{check | "head_sha" => "stale"})
+    event = Repo.one!(from(e in CandidateEvent, where: e.kind == "check_run_observed"))
+    assert event.details["check_run_id"] == 123
+    assert event.details["check_finished_at"] - event.details["check_started_at"] == 120_000_000
+    assert event.details["timestamp_source"] == "github.check_run"
+    assert event.details["runner_lifecycle_authority"] == false
+    assert event.details["generation_binding"] == "commit_only"
+    assert event.observed_at > event.details["check_finished_at"]
+    assert Repo.get!(Batch, ctx.batch.id).state == :running
+  end
+
   test "assembler result validates identity and rejects abandoned generations", ctx do
     member(ctx.batch, ctx.patch)
     first = begin(ctx.batch)

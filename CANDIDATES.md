@@ -45,6 +45,13 @@ Speculation remains disabled; recording a predecessor does not enable it.
 
 ## Timestamps and status binding
 
+`check_run_observed` retains check ID, suite/app IDs and GitHub’s authoritative
+`started_at`/`completed_at` as `check_started_at`/`check_finished_at` in Unix
+microseconds. Missing or invalid GitHub timestamps remain null. These describe
+the named check execution, with commit-only generation binding; they do not
+establish runner assignment or aggregate candidate completion. Raw status
+processing and queue state are unchanged.
+
 All `observed_at` and `original_admitted_at` values are Unix microseconds from
 bors's clock. They are receipt/write times with named sources, not inferred
 GitHub or runner event times. Construction starts after base discovery and stops

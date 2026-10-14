@@ -357,6 +357,8 @@ defmodule BorsNG.WebhookController do
     project = Repo.get_by!(Project, repo_xref: conn.body_params["repository"]["id"])
     pr = BorsNG.Worker.MergeEligibility.notification_pr(check)
 
+    BorsNG.Worker.CandidateJournal.observe_check(project.id, check)
+
     if project.name == "TauCetiProject/TauCeti" and pr do
       Batcher.eligibility(Batcher.Registry.get(project.id), pr)
     end

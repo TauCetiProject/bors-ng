@@ -150,6 +150,8 @@ defmodule BorsNG.Worker.CandidateJournal do
     # a new generation instead, even when GitHub returns the same commit SHA.
     {:ok, :ok} =
       Repo.transaction(fn ->
+        # Serialize visibility with generation allocation and cancellation.
+        Repo.one!(from(b in Batch, where: b.id == ^candidate.batch_id, lock: "FOR UPDATE"))
         Repo.one!(from(c in Candidate, where: c.id == ^candidate.id, lock: "FOR UPDATE"))
         if commit_binding(candidate) != %{}, do: raise(ArgumentError, "candidate already bound")
 
@@ -217,6 +219,32 @@ defmodule BorsNG.Worker.CandidateJournal do
     })
   end
 
+  @doc "Preserve GitHub check lifecycle timestamps without changing queue status."
+  def observe_check(project_id, %{"head_sha" => commit} = check) when is_binary(commit) do
+    Repo.all(Batch.get_assoc_by_commit(project_id, commit, :incomplete))
+    |> Enum.each(fn batch ->
+      event(current(batch), "check_run_observed", "github.check_run_webhook", %{
+        commit: commit,
+        check_run_id: check["id"],
+        check_suite_id: get_in(check, ["check_suite", "id"]),
+        app_id: get_in(check, ["app", "id"]),
+        identifier: check["name"],
+        status: check["status"],
+        conclusion: check["conclusion"],
+        url: check["html_url"],
+        check_started_at: github_time(check["started_at"]),
+        check_finished_at: github_time(check["completed_at"]),
+        timestamp_source: "github.check_run",
+        generation_binding: "commit_only",
+        runner_lifecycle_authority: false
+      })
+    end)
+
+    :ok
+  end
+
+  def observe_check(_, _), do: :ok
+
   def diagnostics(project_id, base, batch_id \\ nil) do
     query = from(c in Candidate, where: c.project_id == ^project_id, order_by: [desc: c.id])
     query = if base, do: from(c in query, where: c.into_branch == ^base), else: query
@@ -276,5 +304,14 @@ defmodule BorsNG.Worker.CandidateJournal do
   defp canonical_json(value), do: Jason.encode!(value)
 
   defp json_map(value), do: value |> Jason.encode!() |> Jason.decode!()
+
+  defp github_time(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, time, _} -> DateTime.to_unix(time, :microsecond)
+      _ -> nil
+    end
+  end
+
+  defp github_time(_), do: nil
   defp now, do: System.system_time(:microsecond)
 end
