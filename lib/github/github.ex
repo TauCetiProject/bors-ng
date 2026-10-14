@@ -233,6 +233,23 @@ defmodule BorsNG.GitHub do
     )
   end
 
+  @doc "One dispatch attempt; the durable outbox owns retry/reconciliation."
+  def dispatch_staging_once(conn, repo, head, base, batch, members, branch) do
+    GenServer.call(
+      BorsNG.GitHub,
+      {:dispatch_staging, conn, {repo, head, base, batch, members, branch}},
+      Confex.fetch_env!(:bors, :api_github_timeout)
+    )
+  end
+
+  def staging_dispatch_seen(conn, repo, head, base, batch, branch, since) do
+    GenServer.call(
+      BorsNG.GitHub,
+      {:staging_dispatch_seen, conn, {repo, head, base, batch, branch, since}},
+      Confex.fetch_env!(:bors, :api_github_timeout)
+    )
+  end
+
   @doc "Request existing trusted PR CI after a maintainer approves its scope."
   def dispatch_pr_build(repo_conn, pr) do
     call_with_retry(:dispatch_pr_build, repo_conn, {pr})
@@ -447,6 +464,22 @@ defmodule BorsNG.GitHub do
   @spec post_comment(tconn, number, binary) :: :ok | {:error, term}
   def post_comment(repo_conn, number, body) do
     call_with_retry(:post_comment, repo_conn, {number, body}, 500, 4_000)
+  end
+
+  def post_comment_once(conn, number, body) do
+    GenServer.call(
+      BorsNG.GitHub,
+      {:post_comment, conn, {number, body}},
+      Confex.fetch_env!(:bors, :api_github_timeout)
+    )
+  end
+
+  def notice_comments_since(conn, number, since) do
+    GenServer.call(
+      BorsNG.GitHub,
+      {:notice_comments_since, conn, {number, since}},
+      Confex.fetch_env!(:bors, :api_github_timeout)
+    )
   end
 
   @spec post_comment!(tconn, number, binary) :: :ok

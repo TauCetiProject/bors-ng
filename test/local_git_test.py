@@ -6,6 +6,7 @@ import multiprocessing
 import os
 from pathlib import Path
 import subprocess
+import shutil
 import tempfile
 import unittest
 
@@ -89,6 +90,17 @@ class LocalGitTest(unittest.TestCase):
         self.assertEqual(self.run_mirror()['result'], result['result'])
         self.assertEqual(git(mirror, 'for-each-ref', '--format=%(refname)').splitlines(),
                          ['refs/bors/input/0', 'refs/bors/input/1', 'refs/bors/input/2', 'refs/bors/result'])
+
+    def test_toolchain_bytes_and_reconstruction_after_mirror_loss(self):
+        content = 'leanprover/lean4:v4.25.0\n'
+        head = self.commit(self.base, {'lean-toolchain': content})
+        self.request['members'] = [self.member(1, head)]
+        first = self.run_mirror()
+        self.assertEqual(first['toolchain']['content'], content)
+        shutil.rmtree(self.request['root'])
+        rebuilt = self.run_mirror()
+        self.assertEqual(rebuilt['result'], first['result'])
+        self.assertEqual(rebuilt['toolchain'], first['toolchain'])
 
     def test_stacked_changes_and_rename_delete_parity(self):
         one = self.commit(self.base, {'file': None, 'renamed': 'one\ntwo\nthree\n'})

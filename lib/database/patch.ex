@@ -27,6 +27,7 @@ defmodule BorsNG.Database.Patch do
     belongs_to(:author, User)
     belongs_to(:bundle, PatchBundle)
     field(:bundle_reviewer, :string)
+    field(:orchestration_approval_token, :string)
     belongs_to(:stacked_on, Patch)
     field(:head_ref, :string)
     field(:retargeted_from, :string)
@@ -60,6 +61,7 @@ defmodule BorsNG.Database.Patch do
       :is_draft,
       :bundle_id,
       :bundle_reviewer,
+      :orchestration_approval_token,
       :stacked_on_id,
       :head_ref,
       :retargeted_from,

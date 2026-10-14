@@ -725,6 +725,50 @@ defmodule BorsNG.GitHub.ServerMock do
     {{:error, :get_commit_status, 502}, %{state | :get_commit_status_error => n - 1}}
   end
 
+  def do_handle_call(
+        :staging_dispatch_seen,
+        repo_conn,
+        {_repo, head, _base, batch, _branch, _since},
+        state
+      ) do
+    if state[:dispatch_lookup_error],
+      do: {{:error, :dispatch_lookup}, state},
+      else: {{:ok, {head, batch} in (get_in(state, [repo_conn, :dispatches]) || [])}, state}
+  end
+
+  def do_handle_call(
+        :dispatch_staging,
+        _repo_conn,
+        _params,
+        %{dispatch_error_before_accept: true} = state
+      ) do
+    {{:error, :dispatch_staging, 429, "rate limited"}, state}
+  end
+
+  def do_handle_call(
+        :dispatch_staging,
+        repo_conn,
+        {_repo, head, _base, batch, _members, _branch},
+        state
+      ) do
+    state =
+      update_in(state, [repo_conn, :dispatches], fn current -> [{head, batch} | current || []] end)
+
+    if hook = state[:dispatch_after_accept_hook] do
+      send(hook, {:dispatch_accepted, self()})
+
+      receive do
+        :release_dispatch -> :ok
+      after
+        5000 -> :ok
+      end
+    end
+
+    if state[:dispatch_error_after_accept],
+      do: {{:error, :dispatch_staging, 502, "lost response"}, state},
+      else: {:ok, state}
+  end
+
   def do_handle_call(:staging_failure, repo_conn, {head, _, _, _, _}, state) do
     outcome = get_in(state, [repo_conn, :staging_failures, head]) || :conclusive
     {{:ok, outcome}, state}
@@ -904,6 +948,9 @@ defmodule BorsNG.GitHub.ServerMock do
       _ -> {{:error, :get_repo_tree}, state}
     end
   end
+
+  def do_handle_call(:notice_comments_since, conn, {number, _since}, state),
+    do: do_handle_call(:get_pr_comments, conn, {number}, state)
 
   def do_handle_call(:get_pr_comments, repo_conn, {number}, state) do
     with {:ok, repo} <- Map.fetch(state, repo_conn),

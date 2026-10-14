@@ -145,6 +145,43 @@ defmodule BorsNG.Worker.LocalGitIntegrationTest do
     assert Repo.get!(LinkPatchBatch, ctx.link.id).head_sha == @head
   end
 
+  test "async local publication retains its immutable recipe across executor restart", ctx do
+    alias BorsNG.Database.OrchestrationJob
+    alias BorsNG.Worker.Orchestration.{Outbox, Worker}
+    :sys.suspend(BorsNG.Worker.Orchestration.Dispatcher)
+    System.put_env("BORS_ASYNC_ORCHESTRATION", "true")
+
+    on_exit(fn ->
+      System.delete_env("BORS_ASYNC_ORCHESTRATION")
+      :sys.resume(BorsNG.Worker.Orchestration.Dispatcher)
+    end)
+
+    worker = start_supervised!({Worker, ctx.project.id})
+    job = Outbox.enqueue(ctx.project.id, "info", {:poll, :once})
+    {:ok, claimed} = Outbox.claim(job.id)
+    send(worker, {:execute, self(), claimed})
+    assert_receive {:finished, ^worker, ^claimed, :ok}, 5000
+    Outbox.finish(claimed)
+    dispatch = Repo.get_by!(OrchestrationJob, project_id: ctx.project.id, kind: "dispatch")
+    {id, publisher} = Outbox.payload(dispatch)
+    assert id == ctx.batch.id
+    assert publisher.kind == :local_git
+    assert is_binary(publisher.context.date)
+    assert publisher.result.commit == @commit
+    assert CandidateJournal.latest(id).generation == 1
+    refute Enum.any?(events(ctx.batch), &(&1.kind == "staging_pushed"))
+    assert GitHub.ServerMock.get_state()[@conn].branches["staging"] == @base
+    stop_supervised!(Worker)
+    restarted = start_supervised!({Worker, ctx.project.id})
+    {:ok, delivery} = Outbox.claim(dispatch.id)
+    send(restarted, {:execute, self(), delivery})
+    assert_receive {:finished, ^restarted, ^delivery, :ok}, 5000
+    Outbox.finish(delivery)
+    assert CandidateJournal.latest(id).generation == 1
+    assert Enum.any?(events(ctx.batch), &(&1.kind == "staging_pushed"))
+    assert Enum.any?(events(ctx.batch), &(&1.kind == "dispatched"))
+  end
+
   test "running shadow checks GitHub tree once without replacing CI identity", ctx do
     Batcher.handle_info({:poll, :once}, ctx.project.id)
     batch = Repo.get!(Batch, ctx.batch.id)

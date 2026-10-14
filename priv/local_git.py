@@ -56,7 +56,7 @@ class Mirror:
                             ('x-access-token:' + os.environ.get('BORS_GIT_TOKEN', '')).encode()).decode())
         self.url = 'https://github.com/' + request['repository'] + '.git'
 
-    def git(self, *args, input=None, extra_env=None, check=True):
+    def git(self, *args, input=None, extra_env=None, check=True, binary=False):
         # No inherited configuration, hooks, credentials, replacement objects,
         # alternates, checkout, submodules, filters or external merge drivers.
         argv = ['git', '--git-dir=' + str(self.repo), '-c', 'core.hooksPath=/dev/null',
@@ -100,7 +100,7 @@ class Mirror:
             if check and proc.returncode:
                 # Never emit stderr: Git/HTTP diagnostics may contain credentials.
                 raise Failure('git_failed', operation=args[0], exit_status=proc.returncode)
-            return result.decode('utf-8', errors='replace'), proc.returncode
+            return (result if binary else result.decode('utf-8', errors='replace')), proc.returncode
 
     def enforce_budget(self):
         mirrors = sorted(self.root.glob('*.git'), key=lambda p: p.stat().st_mtime)
@@ -185,7 +185,14 @@ class Mirror:
         self.git('update-ref', 'refs/bors/result', prev)
         self.enforce_budget()
         os.utime(self.repo, None)
+        toolchain_bytes, missing = self.git('show', prev + ':lean-toolchain', check=False, binary=True)
+        try:
+            content = toolchain_bytes.decode('utf-8') if not missing and len(toolchain_bytes) <= 4096 else None
+        except UnicodeDecodeError:
+            content = None
+        toolchain = dict(content=content, unknown_reason=None if content is not None else 'absent or non-text/oversize')
         return dict(status='ok', result=self.request['identity'] | dict(commit=prev, tree=tree),
+                    toolchain=toolchain,
                     commits=commits, git_version=self.git('--version')[0].strip(),
                     mirror_bytes=size(self.repo))
 

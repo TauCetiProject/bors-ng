@@ -1127,7 +1127,7 @@ defmodule BorsNG.Command do
          BorsNG.Worker.ManualApproval.authorized?(c.project, c.commenter) do
       batcher = Batcher.Registry.get(c.project.id)
 
-      GenServer.cast(
+      Batcher.submit(
         batcher,
         {:maintainer_reviewed, c.patch.id, c.approval_head || c.patch.commit,
          c.commenter.user_xref, c.commenter.login, c.approval_created_at}

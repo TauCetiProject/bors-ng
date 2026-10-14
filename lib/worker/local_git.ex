@@ -29,7 +29,7 @@ defmodule BorsNG.Worker.LocalGit do
         operation: "assemble",
         identity: CandidateAssembler.identity(candidate),
         members: Enum.map(members, &Map.put(&1, :head_sha, &1.source_sha)),
-        date: DateTime.to_iso8601(DateTime.utc_now())
+        date: Map.get(context, :date, DateTime.to_iso8601(DateTime.utc_now()))
       }
 
       case run(context, request) do
