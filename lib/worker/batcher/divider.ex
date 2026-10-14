@@ -19,11 +19,11 @@ defmodule BorsNG.Worker.Batcher.Divider do
       {single_units, divisible_units} =
         Enum.split_with(units, &unit_is_single?/1)
 
-      Enum.each(single_units, &clone_batch(&1, project.id, into))
+      Enum.each(single_units, &clone_batch(&1, project.id, into, "bisection"))
 
       case divisible_units do
         [] -> :ok
-        [unit] -> clone_batch(unit, project.id, into)
+        [unit] -> clone_batch(unit, project.id, into, "bisection")
         units -> bisect(units, project.id, into)
       end
 
@@ -59,17 +59,17 @@ defmodule BorsNG.Worker.Batcher.Divider do
 
         {[], multiple_unmergeable} ->
           Enum.each(multiple_unmergeable, fn unit ->
-            clone_batch(unit, project.id, into)
+            clone_batch(unit, project.id, into, "conflict_isolation")
           end)
 
           :retrying
 
         {[single_mergeable], multiple_unmergeable} ->
           Enum.each(multiple_unmergeable, fn unit ->
-            clone_batch(unit, project.id, into)
+            clone_batch(unit, project.id, into, "conflict_isolation")
           end)
 
-          clone_batch(single_mergeable, project.id, into)
+          clone_batch(single_mergeable, project.id, into, "conflict_isolation")
           :retrying
 
         {multiple_mergeable, []} ->
@@ -78,10 +78,10 @@ defmodule BorsNG.Worker.Batcher.Divider do
 
         {multiple_mergeable, multiple_unmergeable} ->
           Enum.each(multiple_unmergeable, fn unit ->
-            clone_batch(unit, project.id, into)
+            clone_batch(unit, project.id, into, "conflict_isolation")
           end)
 
-          clone_batch(Enum.concat(multiple_mergeable), project.id, into)
+          clone_batch(Enum.concat(multiple_mergeable), project.id, into, "conflict_isolation")
           :retrying
       end
     end
@@ -92,7 +92,7 @@ defmodule BorsNG.Worker.Batcher.Divider do
   defp single_bundle_unit?([unit]), do: link_patch(hd(unit)).bundle_id != nil
   defp single_bundle_unit?(_), do: false
 
-  def clone_batch(patch_links, project_id, into_branch) do
+  def clone_batch(patch_links, project_id, into_branch, reason \\ "retry") do
     # Running batches have a sentinel priority of 100. Preserve the members'
     # requested priority, rather than copying that sentinel or resetting to zero.
     priority = patch_links |> Enum.map(&link_patch(&1).priority) |> Enum.max(fn -> 0 end)
@@ -148,17 +148,19 @@ defmodule BorsNG.Worker.Batcher.Divider do
             Repo.insert!(%Batch{Batch.new(project_id, into_branch, priority) | sealed: true})
 
           remaining
-          |> Enum.map(
-            &%{
+          |> Enum.each(fn source ->
+            params = %{
               batch_id: batch.id,
-              patch_id: &1.patch_id,
-              reviewer: &1.reviewer,
-              head_sha: &1.head_sha,
-              manual_approval: &1.manual_approval
+              patch_id: source.patch_id,
+              reviewer: source.reviewer,
+              head_sha: source.head_sha,
+              manual_approval: source.manual_approval
             }
-          )
-          |> Enum.map(&LinkPatchBatch.changeset(%LinkPatchBatch{}, &1))
-          |> Enum.each(&Repo.insert!/1)
+
+            %LinkPatchBatch{}
+            |> LinkPatchBatch.changeset(params)
+            |> BorsNG.Worker.CandidateJournal.insert_member(source, reason)
+          end)
 
           batch
         end
@@ -211,8 +213,8 @@ defmodule BorsNG.Worker.Batcher.Divider do
     count = Enum.count(units)
 
     {lo, hi} = Enum.split(units, div(count, 2))
-    clone_batch(Enum.concat(lo), project_id, into)
-    clone_batch(Enum.concat(hi), project_id, into)
+    clone_batch(Enum.concat(lo), project_id, into, "bisection")
+    clone_batch(Enum.concat(hi), project_id, into, "bisection")
   end
 
   defp isolate_unmergeable_units(units, repo_conn) do

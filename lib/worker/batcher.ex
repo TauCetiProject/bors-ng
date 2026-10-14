@@ -38,6 +38,7 @@ defmodule BorsNG.Worker.Batcher do
   alias BorsNG.Database.Project
   alias BorsNG.Database.Status
   alias BorsNG.Database.LinkPatchBatch
+  alias BorsNG.Worker.CandidateJournal
   alias BorsNG.GitHub
   alias BorsNG.Endpoint
   import BorsNG.Router.Helpers
@@ -303,6 +304,8 @@ defmodule BorsNG.Worker.Batcher do
         |> Repo.update_all(set: [state: state, url: url, identifier: identifier])
 
       if updated > 0 and batch.state == :running do
+        CandidateJournal.status(batch, identifier, state, "github.status_webhook", url)
+
         if expired_staging?(batch) and
              (batch.recovery_after || 0) <= DateTime.to_unix(DateTime.utc_now()) and
              (batch.promotion_retry_at || 0) <= DateTime.to_unix(DateTime.utc_now()) do
@@ -810,7 +813,7 @@ defmodule BorsNG.Worker.Batcher do
       head_sha: patch.commit,
       manual_approval: patch.manual_approval
     })
-    |> Repo.insert!()
+    |> CandidateJournal.insert_member()
 
     if patch.bundle_id == nil, do: Bundles.drop_held_approval(patch.id)
 
@@ -1109,7 +1112,7 @@ defmodule BorsNG.Worker.Batcher do
             head_sha: p.commit,
             manual_approval: p.manual_approval
           })
-          |> Repo.insert!()
+          |> CandidateJournal.insert_member()
         end)
       end)
 
@@ -1443,6 +1446,8 @@ defmodule BorsNG.Worker.Batcher do
       stmp = "#{project.staging_branch}.tmp"
 
       base = get_base(repo_conn, batch.into_branch)
+      candidate = CandidateJournal.begin(batch, patch_links, base.commit)
+      batch = %{batch | candidate_id: candidate.id}
 
       tbase = %{
         tree: base.tree,
@@ -1509,6 +1514,12 @@ defmodule BorsNG.Worker.Batcher do
           base,
           merge
         )
+
+      if status != :running do
+        CandidateJournal.event(candidate, "construction_stopped", "bors.assembly", %{
+          state: status
+        })
+      end
 
       now = DateTime.to_unix(DateTime.utc_now(), :second)
 
@@ -1744,7 +1755,7 @@ defmodule BorsNG.Worker.Batcher do
                 # A restart must not transfer this batch as unstarted work.
                 setup_statuses(batch, toml)
                 GitHub.force_push!(repo_conn, head, batch.project.staging_branch)
-                dispatch_staging(batch, repo_conn, head, base.commit)
+                dispatch_staging(batch, repo_conn, head, base.commit, tree, policy_ref, toml)
                 {:running, head}
               end
           end
@@ -1771,7 +1782,7 @@ defmodule BorsNG.Worker.Batcher do
               }
             )
 
-          dispatch_staging(batch, repo_conn, head, base.commit)
+          dispatch_staging(batch, repo_conn, head, base.commit, tree, policy_ref, toml)
           {:running, head}
         end
 
@@ -1791,12 +1802,50 @@ defmodule BorsNG.Worker.Batcher do
     end
   end
 
-  defp dispatch_staging(batch, repo_conn, head, base) do
+  defp dispatch_staging(batch, repo_conn, head, base, tree, policy_ref, toml) do
+    candidate = Repo.get!(BorsNG.Database.Candidate, batch.candidate_id)
+
+    toolchain =
+      case GitHub.get_file(repo_conn, head, "lean-toolchain") do
+        {:ok, content} when is_binary(content) ->
+          %{
+            ref: head,
+            path: "lean-toolchain",
+            content: content,
+            sha256: CandidateJournal.digest(content),
+            source: "github.contents"
+          }
+
+        {:ok, nil} ->
+          %{
+            ref: head,
+            path: "lean-toolchain",
+            content: nil,
+            source: "github.contents",
+            unknown_reason: "file absent"
+          }
+
+        _ ->
+          %{
+            ref: head,
+            path: "lean-toolchain",
+            content: nil,
+            source: nil,
+            unknown_reason: "read failed"
+          }
+      end
+
+    CandidateJournal.bind(candidate, head, tree, policy_ref, toml, toolchain)
     # The public observation must bind an override to the actual staging base,
     # rather than trusting caller-supplied dispatch metadata.
     batch |> Batch.changeset(%{base_sha: base, commit: head, state: :running}) |> Repo.update!()
 
     if System.get_env("BORS_STAGE_DISPATCH_PROJECT") == batch.project.name do
+      CandidateJournal.event(candidate, "dispatch_requested", "bors.workflow_dispatch", %{
+        commit: head,
+        base_sha: base
+      })
+
       members =
         Repo.all(LinkPatchBatch.from_batch(batch.id))
         |> Enum.map(&%{pr: &1.patch.pr_xref, head_sha: &1.head_sha})
@@ -1811,6 +1860,16 @@ defmodule BorsNG.Worker.Batcher do
           members,
           batch.into_branch
         )
+
+      CandidateJournal.event(candidate, "dispatched", "github.workflow_dispatch_response", %{
+        commit: head,
+        base_sha: base
+      })
+    else
+      CandidateJournal.event(candidate, "dispatched", "github.staging_push_response", %{
+        commit: head,
+        base_sha: base
+      })
     end
 
     :ok
@@ -1884,7 +1943,7 @@ defmodule BorsNG.Worker.Batcher do
       send_message(repo_conn, raced_patches, :race)
 
       if kept_links != [] do
-        Divider.clone_batch(kept_links, project.id, batch.into_branch)
+        Divider.clone_batch(kept_links, project.id, batch.into_branch, "member_removed")
 
         send_message(
           repo_conn,
@@ -2047,6 +2106,8 @@ defmodule BorsNG.Worker.Batcher do
           batch.id
           |> Status.get_for_batch(identifier)
           |> Repo.update_all(set: [state: state, identifier: identifier])
+
+          CandidateJournal.status(batch, identifier, state, "github.status_poll")
         end)
 
         maybe_complete_batch(batch)
@@ -2124,6 +2185,13 @@ defmodule BorsNG.Worker.Batcher do
     |> Repo.update!()
 
     if next_status != :running do
+      CandidateJournal.event(
+        CandidateJournal.current(batch),
+        "terminal_observed",
+        "bors.status_summary",
+        %{commit: batch.commit, state: next_status}
+      )
+
       cancel_recheck(batch.id)
       if report_terminal, do: send_zulip(batch, next_status)
     end
@@ -2236,7 +2304,10 @@ defmodule BorsNG.Worker.Batcher do
         result =
           Repo.transaction(fn ->
             links = Repo.all(LinkPatchBatch.from_batch(batch.id))
-            child = Divider.clone_batch(links, batch.project_id, batch.into_branch)
+
+            child =
+              Divider.clone_batch(links, batch.project_id, batch.into_branch, "inconclusive_ci")
+
             if is_nil(child), do: Repo.rollback(:retry_membership_unavailable)
 
             if child.state == :waiting do
@@ -2399,7 +2470,7 @@ defmodule BorsNG.Worker.Batcher do
     Process.put(:last_commit, nil)
 
     if kept_links != [] do
-      Divider.clone_batch(kept_links, project.id, batch.into_branch)
+      Divider.clone_batch(kept_links, project.id, batch.into_branch, "member_removed")
       poll_after_delay(project)
       send_message(repo_conn, kept, {:canceled, :retrying})
     end
@@ -2462,6 +2533,13 @@ defmodule BorsNG.Worker.Batcher do
 
     case push_status do
       {:success} ->
+        CandidateJournal.event(
+          CandidateJournal.current(batch),
+          "promoted",
+          "github.base_push_response",
+          %{commit: batch.commit, base_sha: batch.base_sha, base: batch.into_branch}
+        )
+
         Process.delete({:push_failure_reported, batch.id})
         Process.delete({:promotion_retry, batch.id})
         QueueApproval.stop(patches, :merged)
@@ -2491,7 +2569,7 @@ defmodule BorsNG.Worker.Batcher do
           |> LinkPatchBatch.from_batch()
           |> Repo.all()
 
-        Divider.clone_batch(patch_links, project.id, batch.into_branch)
+        Divider.clone_batch(patch_links, project.id, batch.into_branch, "non_fast_forward")
         poll_after_delay(project)
 
         # send appropriate message to failed patches
@@ -2687,7 +2765,7 @@ defmodule BorsNG.Worker.Batcher do
     repo_conn = get_repo_conn(project)
 
     if state == :retrying do
-      Divider.clone_batch(uncanceled_patch_links, project.id, batch.into_branch)
+      Divider.clone_batch(uncanceled_patch_links, project.id, batch.into_branch, "cancellation")
 
       uncanceled_patches =
         Enum.reject(
