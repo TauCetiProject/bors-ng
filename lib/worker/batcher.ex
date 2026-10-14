@@ -303,7 +303,15 @@ defmodule BorsNG.Worker.Batcher do
         |> Repo.update_all(set: [state: state, url: url, identifier: identifier])
 
       if updated > 0 and batch.state == :running do
-        maybe_complete_batch(batch)
+        if expired_staging?(batch) and
+             (batch.recovery_after || 0) <= DateTime.to_unix(DateTime.utc_now()) and
+             (batch.promotion_retry_at || 0) <= DateTime.to_unix(DateTime.utc_now()) do
+          # A delayed event may omit a newer successful verdict. Read the
+          # current head before releasing its staging attempt at the deadline.
+          poll_running_batch(batch)
+        else
+          maybe_complete_batch(batch)
+        end
       end
     end)
   end
@@ -1217,9 +1225,9 @@ defmodule BorsNG.Worker.Batcher do
         # promotion of the same staged commit, not classify it as a CI timeout.
         poll_running_batch(batch)
 
-      Batch.timeout_is_past(batch) and staging_failure_pending?(batch) ->
-        # Establish the CI outcome before converting an elapsed deadline
-        # into an individual proof verdict.
+      expired_staging?(batch) ->
+        # Refresh even when no terminal status arrived. A missing verdict
+        # cannot establish an individual proof failure.
         poll_running_batch(batch)
 
       Batch.timeout_is_past(batch) ->
@@ -1249,12 +1257,15 @@ defmodule BorsNG.Worker.Batcher do
     Process.put({:batch_recheck, batch.id}, timer)
   end
 
-  defp staging_failure_pending?(batch) do
-    staged_failure?(batch, Repo.all(Status.all_for_batch(batch.id)))
+  defp staging_dispatch?(batch) do
+    is_binary(batch.commit) and
+      System.get_env("BORS_STAGE_DISPATCH_PROJECT") == batch.project.name
   end
 
+  defp expired_staging?(batch), do: staging_dispatch?(batch) and Batch.timeout_is_past(batch)
+
   defp staged_failure?(batch, statuses) do
-    System.get_env("BORS_STAGE_DISPATCH_PROJECT") == batch.project.name and
+    staging_dispatch?(batch) and
       Enum.any?(
         statuses,
         &(&1.identifier in ["build", "bump-guard", "scope"] and &1.state == :error)
@@ -2048,7 +2059,11 @@ defmodule BorsNG.Worker.Batcher do
         |> Batch.changeset(%{last_polled: now})
         |> Repo.update!()
 
-        if from_recheck, do: schedule_recheck(batch, now + 60)
+        if expired_staging?(batch) and not green_staged?(batch) do
+          maybe_complete_batch_due(batch, true)
+        else
+          if from_recheck, do: schedule_recheck(batch, now + 60)
+        end
     end
   end
 
@@ -2060,18 +2075,29 @@ defmodule BorsNG.Worker.Batcher do
     end
   end
 
-  defp maybe_complete_batch_due(batch) do
+  defp maybe_complete_batch_due(batch, status_read_failed \\ false) do
     statuses = Repo.all(Status.all_for_batch(batch.id))
     initial_status = Batcher.State.summary_database_statuses(statuses)
+
+    inconclusive_deadline =
+      expired_staging?(batch) and
+        ((status_read_failed and initial_status != :ok) or statuses == [] or
+           initial_status in [:running, :waiting])
+
     now = DateTime.to_unix(DateTime.utc_now(), :second)
     repo_conn = get_repo_conn(batch.project)
 
     {next_status, report_terminal} =
-      if initial_status != :running do
+      if initial_status != :running or inconclusive_deadline do
         # some repositories require an OK status to push
-        if initial_status == :ok, do: send_status(repo_conn, batch, :ok)
+        if initial_status == :ok and not inconclusive_deadline,
+          do: send_status(repo_conn, batch, :ok)
+
         # need to change status (could go from :ok to :error if non-ff push)
-        outcome = complete_batch(initial_status, batch, statuses)
+        outcome =
+          if inconclusive_deadline,
+            do: defer_inconclusive_build(batch, :deadline),
+            else: complete_batch(initial_status, batch, statuses)
 
         result =
           if outcome == :ci_retry do
