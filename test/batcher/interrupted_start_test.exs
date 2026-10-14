@@ -133,6 +133,45 @@ defmodule BorsNG.Worker.BatcherInterruptedStartTest do
     assert Repo.get!(Batch, batch.id).timeout_at != nil
   end
 
+  test "serial construction records exact binding, toolchain and sourced promotion",
+       %{proj: proj, batch: batch} do
+    state = GitHub.ServerMock.get_state()
+
+    state =
+      put_in(state, [{{:installation, 91}, 14}, :files, "iniN"], %{
+        "lean-toolchain" => "leanprover/lean4:v4.25.0\n"
+      })
+
+    GitHub.ServerMock.put_state(state)
+    poll_now(batch, proj)
+    started = Repo.get!(Batch, batch.id)
+    journal = BorsNG.Worker.CandidateJournal
+    candidate = journal.latest(batch.id)
+    binding = journal.commit_binding(candidate)
+    assert binding["commit"] == started.commit
+    assert binding["base_sha"] == "ini"
+    assert binding["policy"]["effective"]["status"] == ["ci", "cd"]
+    assert binding["toolchain"]["content"] == "leanprover/lean4:v4.25.0\n"
+    assert binding["toolchain"]["ref"] == started.commit
+    Batcher.handle_cast({:status, {started.commit, "ci", :ok, "url"}}, proj.id)
+    Batcher.handle_cast({:status, {started.commit, "cd", :ok, "url"}}, proj.id)
+    assert Repo.get!(Batch, batch.id).state == :ok
+    [detail] = journal.diagnostics(proj.id, "master", batch.id)
+
+    assert Enum.any?(
+             detail.events,
+             &(&1.kind == "promoted" and &1.source == "github.base_push_response")
+           )
+
+    assert Enum.any?(
+             detail.events,
+             &(&1.kind == "dispatched" and &1.source == "github.staging_push_response")
+           )
+
+    assert Enum.all?(detail.events, &(&1.observed_at >= candidate.observed_at))
+    assert detail.runner_started_at == nil
+  end
+
   test "priority preemption leaves a started batch sealed while waiting again",
        %{proj: proj, batch: batch} do
     poll_now(batch, proj)

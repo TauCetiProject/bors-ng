@@ -11,6 +11,56 @@ defmodule BorsNG.ApiController do
   alias BorsNG.Database.Batch
   alias BorsNG.Database.Project
 
+  def project_candidates(conn, %{"id" => id} = params) do
+    case Repo.get(Project, id) do
+      nil ->
+        send_resp(conn, 404, "")
+
+      project ->
+        batch_id =
+          case Integer.parse(params["batch_id"] || "") do
+            {n, ""} when n > 0 -> n
+            _ -> nil
+          end
+
+        admissions_query =
+          from(a in BorsNG.Database.CandidateAdmission,
+            where: a.project_id == ^project.id,
+            order_by: [desc: a.id],
+            limit: 500
+          )
+
+        admissions_query =
+          if batch_id,
+            do: from(a in admissions_query, where: a.batch_id == ^batch_id),
+            else: admissions_query
+
+        admissions_query =
+          if params["base"],
+            do: from(a in admissions_query, where: a.into_branch == ^params["base"]),
+            else: admissions_query
+
+        admissions =
+          Repo.all(admissions_query)
+          |> Enum.map(&Map.take(&1, [:id, :batch_id, :link_id, :observed_at, :snapshot]))
+
+        conn
+        |> put_resp_header("cache-control", "no-store")
+        |> json(%{
+          schema: "tauceti-bors.candidates/v1",
+          repo: project.name,
+          base: params["base"],
+          batch_id: batch_id,
+          candidates:
+            BorsNG.Worker.CandidateJournal.diagnostics(project.id, params["base"], batch_id),
+          admissions: admissions,
+          historical_unknown_reason: "no journal backfill; absent facts are unknown",
+          timestamp_unit: "unix_microseconds",
+          queue_authority: false
+        })
+    end
+  end
+
   @doc """
   GET /api/active-batches
 

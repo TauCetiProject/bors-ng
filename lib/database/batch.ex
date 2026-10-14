@@ -23,6 +23,7 @@ defmodule BorsNG.Database.Batch do
     field(:priority, :integer, default: 0)
     # Admission closes permanently when a batch starts or is created as a retry.
     field(:sealed, :boolean, default: false)
+    field(:candidate_id, :integer, virtual: true)
     field(:promotion_retry_at, :integer, default: 0)
     field(:promotion_failures, :integer, default: 0)
     field(:recovery_after, :integer, default: 0)

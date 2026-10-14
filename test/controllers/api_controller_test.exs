@@ -75,6 +75,58 @@ defmodule BorsNG.ApiControllerTest do
     assert conn.status == 404
   end
 
+  test "candidate API keeps legacy observation unchanged and unknown history explicit", %{
+    conn: conn,
+    project1: project,
+    project2: other
+  } do
+    batch = Repo.insert!(%Batch{project_id: project.id, into_branch: "main", state: :waiting})
+    observation_path = "/repositories/#{project.id}/active-batches?base=main"
+    before = conn |> get(observation_path) |> json_response(200)
+
+    response_conn =
+      conn
+      |> recycle()
+      |> get("/repositories/#{project.id}/candidates?base=main&batch_id=#{batch.id}")
+
+    unknown = json_response(response_conn, 200)
+    assert unknown["candidates"] == []
+    assert unknown["admissions"] == []
+    assert unknown["historical_unknown_reason"] != nil
+    assert unknown["queue_authority"] == false
+    assert get_resp_header(response_conn, "cache-control") == ["no-store"]
+    BorsNG.Worker.CandidateJournal.begin(batch, [], "base")
+    after_observation = conn |> recycle() |> get(observation_path) |> json_response(200)
+    assert before == after_observation
+    assert after_observation["schema"] == "tauceti-bors.observation/v1"
+
+    read =
+      conn
+      |> recycle()
+      |> get("/repositories/#{project.id}/candidates?base=main&batch_id=#{batch.id}")
+      |> json_response(200)
+
+    assert read["schema"] == "tauceti-bors.candidates/v1"
+    assert length(read["candidates"]) == 1
+    assert hd(read["candidates"])["runner_finished_at"] == nil
+
+    foreign =
+      conn
+      |> recycle()
+      |> get("/repositories/#{other.id}/candidates?batch_id=#{batch.id}")
+      |> json_response(200)
+
+    assert foreign["candidates"] == []
+
+    pilot =
+      conn
+      |> recycle()
+      |> get("/repositories/#{project.id}/candidates?base=pilot")
+      |> json_response(200)
+
+    assert pilot["candidates"] == []
+  end
+
   test "main observation excludes pilots and preserves an approved head after a push", %{
     conn: conn,
     project1: project

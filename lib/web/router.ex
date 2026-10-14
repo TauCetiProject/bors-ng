@@ -138,6 +138,7 @@ defmodule BorsNG.Router do
     pipe_through(:browser_ajax)
 
     get("/:id/active-batches", ApiController, :project_active_batches)
+    get("/:id/candidates", ApiController, :project_candidates)
   end
 
   # Fetch the current user from the session and add it to `conn.assigns`. This
