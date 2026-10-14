@@ -141,6 +141,21 @@ defmodule BorsNG.GitHub.Server do
     end
   end
 
+  def do_handle_call(:failure_base_changes, repo_conn, {base, head}) do
+    with %{status: 200, body: raw} <- get!(repo_conn, "compare/#{base}...#{head}"),
+         {:ok, data} <- Jason.decode(raw),
+         "ahead" <- data["status"],
+         ^base <- get_in(data, ["merge_base_commit", "sha"]),
+         files when is_list(files) and length(files) < 300 <- data["files"] do
+      {:ok,
+       Enum.flat_map(files, fn file ->
+         Enum.reject([file["filename"], file["previous_filename"]], &is_nil/1)
+       end)}
+    else
+      _ -> {:error, :incomplete_failure_base_changes}
+    end
+  end
+
   def do_handle_call(:compare_status, repo_conn, {base, head}) do
     case get!(repo_conn, "compare/#{base}...#{head}") do
       %{body: raw, status: 200} ->
@@ -687,7 +702,25 @@ defmodule BorsNG.GitHub.Server do
         {:lookup, id} ->
           with %{status: 200, body: raw} <- get!(repo_conn, "actions/runs/#{id}"),
                {:ok, run} <- Jason.decode(raw) do
-            {:ok, StagingFailure.classify_run(run, batch, head, branch, base)}
+            case StagingFailure.classify_run(run, batch, head, branch, base) do
+              :conclusive ->
+                attempt = run["run_attempt"]
+
+                with true <- is_integer(attempt) and attempt > 0,
+                     %{status: 200, body: jobs_raw} <-
+                       get!(repo_conn, "actions/runs/#{id}/attempts/#{attempt}/jobs?per_page=100"),
+                     {:ok, jobs} <- Jason.decode(jobs_raw) do
+                  {:ok, StagingFailure.classify_jobs(run, jobs)}
+                else
+                  _ -> {:ok, :unavailable}
+                end
+
+              :cancelled ->
+                {:ok, {:infrastructure, StagingFailure.run_evidence(run)}}
+
+              result ->
+                {:ok, result}
+            end
           else
             _ -> {:ok, :unavailable}
           end

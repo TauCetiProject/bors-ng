@@ -113,6 +113,13 @@ defmodule BorsNG.Worker.MergeEligibility do
         _ -> :defer
       end
 
+    recovery =
+      if recovery == :defer and not BumpRecovery.automatic?(patch) do
+        BorsNG.Worker.FailureIsolation.reconsider(conn, patch, d)
+      else
+        recovery
+      end
+
     retry =
       case recovery do
         {:retry, metadata} ->

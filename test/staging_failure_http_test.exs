@@ -72,7 +72,9 @@ defmodule BorsNG.StagingFailureHttpTest do
   end
 
   test "classification needs at most one status page and one run lookup" do
-    assert {:ok, :cancelled} = responses([{200, build()}, {200, run()}], &classify/0)
+    assert {:ok, {:infrastructure, %{conclusion: "cancelled"}}} =
+             responses([{200, build()}, {200, run()}], &classify/0)
+
     assert_receive {:staging_request, first}
     assert_receive {:staging_request, second}
     assert first =~ "/repositories/14/commits/#{@head}/statuses?per_page=100"
@@ -101,5 +103,63 @@ defmodule BorsNG.StagingFailureHttpTest do
 
     assert_receive {:staging_request, _}
     assert_receive {:staging_request, _}
+  end
+
+  test "a trusted failed attempt uses one bounded jobs lookup and persists step identity" do
+    run = Map.merge(run(), %{"id" => 123, "run_attempt" => 2, "conclusion" => "failure"})
+
+    jobs = %{
+      "total_count" => 1,
+      "jobs" => [
+        %{
+          "id" => 456,
+          "run_id" => 123,
+          "status" => "completed",
+          "conclusion" => "failure",
+          "steps" => [
+            %{
+              "number" => 12,
+              "name" => "Preflight exact-candidate import headers",
+              "conclusion" => "failure"
+            }
+          ]
+        }
+      ]
+    }
+
+    assert {:ok, {:conclusive, evidence}} =
+             responses([{200, build()}, {200, run}, {200, jobs}], &classify/0)
+
+    assert evidence.run_attempt == 2
+    assert hd(evidence.failed_steps).job_id == 456
+    assert_receive {:staging_request, _}
+    assert_receive {:staging_request, _}
+    assert_receive {:staging_request, third}
+    assert third =~ "/actions/runs/123/attempts/2/jobs?per_page=100"
+    refute_receive {:staging_request, _}, 10
+  end
+
+  test "exact-base reconsideration rejects truncated and diverged comparisons" do
+    call = fn ->
+      Server.do_handle_call(:failure_base_changes, {{:raw, "test-token"}, 14}, {@base, @head})
+    end
+
+    good = %{
+      "status" => "ahead",
+      "merge_base_commit" => %{"sha" => @base},
+      "files" => [%{"filename" => "new.lean", "previous_filename" => "old.lean"}]
+    }
+
+    assert {:ok, ["new.lean", "old.lean"]} = responses([{200, good}], call)
+    assert_receive {:staging_request, _}
+
+    for bad <- [
+          Map.put(good, "status", "diverged"),
+          Map.put(good, "files", List.duplicate(%{"filename" => "f"}, 300)),
+          Map.put(good, "merge_base_commit", %{"sha" => @head})
+        ] do
+      assert {:error, :incomplete_failure_base_changes} = responses([{200, bad}], call)
+      assert_receive {:staging_request, _}
+    end
   end
 end

@@ -1626,6 +1626,13 @@ defmodule BorsNG.Worker.Batcher do
 
       {:conflict, details} ->
         CandidateJournal.event(candidate, "local_conflict", "bors.local_git", details)
+
+        CandidateJournal.event(candidate, "failure_classified", "bors.local_git", %{
+          classification: "merge_conflict",
+          evidence: Map.drop(details, ["hints"]),
+          proof_authority: false
+        })
+
         start_waiting_merged_batch(batch, links, base, :conflict)
 
       :race ->
@@ -1896,6 +1903,27 @@ defmodule BorsNG.Worker.Batcher do
     end
   end
 
+  defp local_conflict(batch) do
+    candidate = CandidateJournal.latest(batch.id)
+
+    if candidate do
+      event =
+        Repo.one(
+          from(e in BorsNG.Database.CandidateEvent,
+            where:
+              e.candidate_id == ^candidate.id and e.kind == "local_conflict" and
+                e.source == "bors.local_git",
+            order_by: [desc: e.id],
+            limit: 1
+          )
+        )
+
+      if event, do: event.details, else: %{}
+    else
+      %{}
+    end
+  end
+
   defp start_waiting_merged_batch(_batch, [], _, _) do
     {:canceled, nil}
   end
@@ -2109,7 +2137,7 @@ defmodule BorsNG.Worker.Batcher do
     project = batch.project
     repo_conn = get_repo_conn(project)
     patches = Enum.map(patch_links, & &1.patch)
-    state = Divider.split_batch_with_conflicts(patch_links, batch)
+    state = BorsNG.Worker.FailureIsolation.split(patch_links, batch, local_conflict(batch))
     poll_after_delay(project)
 
     if state == :failed do
@@ -2831,10 +2859,26 @@ defmodule BorsNG.Worker.Batcher do
              batch.into_branch,
              batch.base_sha
            ) do
-        {:ok, :conclusive} -> complete_failed_batch(batch, statuses)
-        {:ok, :pending} -> defer_pending_result(batch)
-        {:ok, :cancelled} -> defer_inconclusive_build(batch, :cancelled)
-        _ -> defer_inconclusive_build(batch, :unavailable)
+        {:ok, {:conclusive, evidence}} ->
+          BorsNG.Worker.FailureIsolation.classified(batch, "candidate_failure", evidence)
+          complete_failed_batch(batch, statuses)
+
+        {:ok, {:infrastructure, evidence}} ->
+          BorsNG.Worker.FailureIsolation.classified(batch, "infrastructure", evidence)
+          defer_inconclusive_build(batch, :infrastructure)
+
+        {:ok, :conclusive} ->
+          BorsNG.Worker.FailureIsolation.classified(batch, "candidate_failure")
+          complete_failed_batch(batch, statuses)
+
+        {:ok, :pending} ->
+          defer_pending_result(batch)
+
+        {:ok, :cancelled} ->
+          defer_inconclusive_build(batch, :cancelled)
+
+        _ ->
+          defer_inconclusive_build(batch, :unavailable)
       end
     else
       complete_failed_batch(batch, statuses)
@@ -2931,12 +2975,16 @@ defmodule BorsNG.Worker.Batcher do
   end
 
   defp defer_inconclusive_build(batch, cause) do
+    BorsNG.Worker.FailureIsolation.classified(batch, "inconclusive", %{cause: cause})
     count = (batch.recovery_failures || 0) + 1
     delay = min(300 * Integer.pow(2, min(count - 1, 4)), 3_600)
     # Never monopolize staging indefinitely on unverifiable CI evidence.
     # After three infrastructure observations, retry the ordinary preflight
     # while retaining intent, rather than fabricating a failed singleton.
-    reset_attempt = cause in [:cancelled, :deadline] or count >= 3 or Batch.timeout_is_past(batch)
+    reset_attempt =
+      cause in [:cancelled, :infrastructure, :deadline] or count >= 3 or
+        Batch.timeout_is_past(batch)
+
     deadline = DateTime.to_unix(DateTime.utc_now()) + delay
     changes = %{recovery_failures: count, recovery_after: deadline}
 
@@ -3012,7 +3060,7 @@ defmodule BorsNG.Worker.Batcher do
       |> Repo.all()
 
     patches = Enum.map(patch_links, & &1.patch)
-    state = Divider.split_batch(patch_links, batch)
+    state = BorsNG.Worker.FailureIsolation.split(patch_links, batch)
 
     # The batch failed, so it's OK to push the next batch on top of the same commit we saw
     # see do_get_base/4

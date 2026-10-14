@@ -103,3 +103,10 @@ accepted external writes after restart. Candidate identity checks remain A's
 contract and speculative trains remain disabled. See [ORCHESTRATION.md](ORCHESTRATION.md)
 for bounded rollout, retry/recovery semantics and GitHub's nontransactional API
 limits. The serial path and observation schema remain compatible.
+
+## Failure isolation
+
+Trusted run/attempt classifications, conservative retry partitions and terminal
+exact-head quarantine append to the existing event journal. See
+[Failure isolation and quarantine](deploy/failure-isolation.md) for trust,
+resource bounds, deterministic fallback, reconsideration and rollback.

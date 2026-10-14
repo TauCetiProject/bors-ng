@@ -102,6 +102,56 @@ defmodule BorsNG.Worker.BatcherCancelledCITest do
     assert Repo.get!(Batch, batch.id).recovery_failures == 1
   end
 
+  test "trusted infrastructure evidence survives native retry without blaming a singleton", ctx do
+    alias BorsNG.Worker.CandidateJournal
+
+    candidate =
+      CandidateJournal.begin(ctx.batch, Repo.all(LinkPatchBatch.from_batch(ctx.batch.id)), "base")
+
+    CandidateJournal.bind(
+      candidate,
+      "staged",
+      "tree",
+      "base",
+      %BorsNG.Worker.Batcher.BorsToml{status: ["build"]},
+      %{content: nil}
+    )
+
+    state = GitHub.ServerMock.get_state()
+
+    evidence = %{
+      run_id: 123,
+      run_attempt: 2,
+      conclusion: "failure",
+      failed_steps: [%{name: "isolated publisher"}]
+    }
+
+    GitHub.ServerMock.put_state(
+      put_in(
+        state,
+        [{{:installation, 91}, 14}, :staging_failures, "staged"],
+        {:infrastructure, evidence}
+      )
+    )
+
+    Batcher.handle_info({:poll, :once}, ctx.project.id)
+    assert Repo.get!(Batch, ctx.batch.id).state == :canceled
+    assert active_child(ctx.project).sealed
+    assert Repo.get!(Patch, ctx.patch.id).queue_approval == ctx.patch.queue_approval
+
+    events =
+      Repo.all(from(e in BorsNG.Database.CandidateEvent, where: e.candidate_id == ^candidate.id))
+
+    assert Enum.any?(
+             events,
+             &(&1.kind == "failure_classified" and
+                 &1.details["classification"] == "infrastructure" and
+                 &1.details["evidence"]["run_id"] == 123)
+           )
+
+    refute Enum.any?(events, &(&1.kind == "head_quarantined"))
+  end
+
   test "unavailable classification holds CI instead of failing approval", ctx do
     state = GitHub.ServerMock.get_state()
     state = put_in(state, [{{:installation, 91}, 14}, :staging_failures, "staged"], :unavailable)

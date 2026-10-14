@@ -68,4 +68,60 @@ defmodule BorsNG.Worker.StagingFailure do
   end
 
   def classify_run(_, _, _, _, _), do: :unavailable
+
+  # GitHub's job/step conclusions are workflow-owned evidence. No candidate
+  # log text, uploaded telemetry, metrics or artifact is consulted.
+  @candidate_steps [
+    "Preflight exact-candidate import headers",
+    "Build exact candidate under bwrap with workflow-pinned audits, offline",
+    "Scope guard — allow TauCeti sources and validated pins",
+    "Attest exact-head Lake configuration before executing Lake",
+    "Validate the Lake-pin bump before building",
+    "Candidate source shape guard (reject symlinks)",
+    "Import-boundary guard (TauCeti/ and TauCeti.lean ⊬ roadmap/review)",
+    "Reject option overrides and heartbeat instrumentation",
+    "Temporary Mathlib shims have machine-checkable expiry targets",
+    "Dot-notation namespace lint (Mathlib type namespaces stay at root)"
+  ]
+
+  def run_evidence(run) do
+    %{
+      run_id: run["id"],
+      run_attempt: run["run_attempt"],
+      run_url: run["html_url"],
+      conclusion: run["conclusion"],
+      workflow: run["path"],
+      identity: run["display_title"]
+    }
+  end
+
+  def classify_jobs(run, %{"total_count" => total, "jobs" => jobs})
+      when is_integer(total) and is_list(jobs) and total == length(jobs) and total > 0 and
+             total <= 100 do
+    valid = Enum.all?(jobs, &(&1["run_id"] == run["id"] and &1["status"] == "completed"))
+
+    interrupted =
+      run["conclusion"] in ["cancelled", "timed_out"] or
+        Enum.any?(
+          jobs,
+          &(&1["conclusion"] in ["cancelled", "timed_out", "stale", "action_required"])
+        )
+
+    failed =
+      Enum.flat_map(jobs, fn j ->
+        Enum.filter(j["steps"] || [], &(&1["conclusion"] == "failure"))
+        |> Enum.map(&%{job_id: j["id"], name: &1["name"], number: &1["number"]})
+      end)
+
+    evidence = Map.put(run_evidence(run), :failed_steps, failed)
+
+    cond do
+      not valid -> :unavailable
+      interrupted -> {:infrastructure, evidence}
+      Enum.any?(failed, &(&1.name in @candidate_steps)) -> {:conclusive, evidence}
+      true -> {:infrastructure, evidence}
+    end
+  end
+
+  def classify_jobs(_, _), do: :unavailable
 end

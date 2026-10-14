@@ -108,6 +108,11 @@ defmodule BorsNG.GitHub do
   contains `base`'s current tip (i.e. it is rebased on it).
   Like `get_pr_compare/3`, takes commit SHAs, not branch names.
   """
+  # One bounded exact-base comparison; truncation never grants a retry.
+  def failure_base_changes(repo_conn, base, head) do
+    call_with_retry(:failure_base_changes, repo_conn, {base, head}, 500, 1_000)
+  end
+
   @spec compare_status(tconn, binary, binary) ::
           {:ok, :ahead | :behind | :identical | :diverged} | {:error, term}
   def compare_status(repo_conn, base, head) do

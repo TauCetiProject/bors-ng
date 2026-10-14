@@ -397,6 +397,13 @@ defmodule BorsNG.GitHub.ServerMock do
     end
   end
 
+  def do_handle_call(:failure_base_changes, repo_conn, {base, head}, state) do
+    result =
+      get_in(state, [repo_conn, :failure_base_changes, {base, head}]) || {:error, :unavailable}
+
+    {result, state}
+  end
+
   def do_handle_call(:compare_status, repo_conn, {base, head}, state) do
     # Tests put a :compare_status map on the repo keyed by `{base, head}`
     # whose value is :ahead | :behind | :identical | :diverged. A missing

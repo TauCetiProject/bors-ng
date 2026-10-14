@@ -62,6 +62,7 @@ class LocalGitTest(unittest.TestCase):
             if contents is None:
                 path.unlink()
             else:
+                path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(contents)
         git(self.upstream, 'add', '-A')
         git(self.upstream, 'commit', '-qm', message)
@@ -127,6 +128,29 @@ class LocalGitTest(unittest.TestCase):
         self.assertEqual(result['details']['paths'], ['file'])
         mirror = Path(self.request['root']) / 'example--repository.git'
         self.assertNotIn('refs/bors/result', git(mirror, 'for-each-ref', '--format=%(refname)'))
+
+    def test_import_hints_use_exact_heads_and_include_providers(self):
+        importer = self.commit(self.base, {'Importer.lean': 'module\npublic import TauCeti.Provider\n'})
+        # A provider in another PR is an interaction hint, not proof of failure.
+        provider = self.commit(self.base, {'TauCeti/Provider.lean': 'def x := 1\n'})
+        self.request['members'] = [self.member(1, importer), self.member(2, provider)]
+        result = self.run_mirror()
+        hints = result['diagnostic_hints']
+        self.assertTrue(hints['complete'])
+        self.assertIn([1, 2], hints['import_edges'])
+        self.assertEqual(hints['missing_imports'][0]['provider_path'], 'TauCeti/Provider.lean')
+        self.assertIn('TauCeti/Provider.lean', hints['dependency_paths'])
+        self.assertEqual(hints['changed_files'][0]['head_sha'], importer)
+        self.assertEqual(local.local_imports('/- import TauCeti.Fake /- nested -/ -/\nmodule\nimport TauCeti.Real -- comment\ndef x := 1'), ['TauCeti.Real'])
+
+    def test_import_limits_and_ambiguous_headers_do_not_fail_assembly(self):
+        head = self.commit(self.base, {'Broken.lean': 'module\nimport «TauCeti.Quoted»\n'})
+        self.request['members'] = [self.member(1, head)]
+        result = self.run_mirror()
+        self.assertEqual(result['status'], 'ok')
+        self.assertFalse(result['diagnostic_hints']['complete'])
+        self.request['diagnostics'] = False
+        self.assertFalse(self.run_mirror()['diagnostic_hints']['complete'])
 
     def test_missing_object_never_substitutes_force_pushed_head(self):
         new = self.commit(self.base, {'a': 'a'})

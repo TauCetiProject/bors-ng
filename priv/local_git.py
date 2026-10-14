@@ -153,6 +153,7 @@ class Mirror:
         # Squash parents alone lose ancestry of earlier (possibly stacked) PRs.
         merge_head = base
         commits = []
+        hints = self.diagnostic_hints(base, members) if self.request.get('diagnostics', True) else dict(complete=False, reason='disabled')
         for member in members:
             if self.git('merge-base', '--is-ancestor', member['head_sha'], merge_head, check=False)[1] == 0:
                 return dict(status='conflict', details=dict(kind='already_merged',
@@ -164,7 +165,7 @@ class Mirror:
                 paths = fields[1:fields.index('', 1)] if '' in fields[1:] else fields[1:]
                 return dict(status='conflict', details=dict(kind='merge_conflict',
                             pr=member['pr'], head_sha=member['head_sha'], paths=paths,
-                            merge_head=merge_head, base_sha=base))
+                            merge_head=merge_head, base_sha=base, hints=hints))
             if status:
                 raise Failure('git_failed', operation='merge-tree', exit_status=status, pr=member['pr'])
             tree = fields[0].strip()
@@ -192,9 +193,70 @@ class Mirror:
             content = None
         toolchain = dict(content=content, unknown_reason=None if content is not None else 'absent or non-text/oversize')
         return dict(status='ok', result=self.request['identity'] | dict(commit=prev, tree=tree),
-                    toolchain=toolchain,
+                    diagnostic_hints=hints, toolchain=toolchain,
                     commits=commits, git_version=self.git('--version')[0].strip(),
                     mirror_bytes=size(self.repo))
+
+    def diagnostic_hints(self, base, members):
+        # These are scheduling hints, never proof verdicts. Read immutable Git
+        # blobs as data; no candidate parser, executable, metrics or cache.
+        previous_deadline = self.deadline
+        self.deadline = min(self.deadline, time.monotonic() + 15)
+        try:
+            changed = []
+            owners = {}
+            for member in members:
+                ancestor = self.git('merge-base', base, member['head_sha'])[0].strip()
+                paths = self.git('diff', '--name-only', '-z', '--no-renames',
+                                 ancestor, member['head_sha'])[0].split('\0')
+                paths = [p for p in paths if p]
+                if len(paths) > 256 or sum(len(c['paths']) for c in changed) + len(paths) > 1024:
+                    raise Failure('diagnostic_limit')
+                changed.append(dict(pr=member['pr'], head_sha=member['head_sha'], paths=paths))
+                for path in paths:
+                    owners.setdefault(path, []).append(member['pr'])
+            edges, missing, dependencies = [], [], set()
+            reads = 0
+            for member, change in zip(members, changed):
+                pending = [p for p in change['paths'] if p.endswith('.lean')]
+                seen = set()
+                while pending:
+                    path = pending.pop()
+                    if path in seen:
+                        continue
+                    seen.add(path)
+                    reads += 1
+                    if reads > 256:
+                        raise Failure('diagnostic_limit')
+                    content, absent = self.git('show', member['head_sha'] + ':' + path, check=False)
+                    if absent:
+                        continue
+                    if len(content) > 256 * 1024:
+                        raise Failure('diagnostic_limit')
+                    imports = local_imports(content)
+                    for module in imports:
+                        provider = module.replace('.', '/') + '.lean'
+                        dependencies.add(provider)
+                        for owner in owners.get(provider, []):
+                            if owner != member['pr']:
+                                edges.append([member['pr'], owner])
+                        exists = self.git('cat-file', '-e', member['head_sha'] + ':' + provider,
+                                          check=False)[1] == 0
+                        if not exists:
+                            missing.append(dict(pr=member['pr'], path=path, module=module,
+                                                provider_path=provider))
+                        else:
+                            pending.append(provider)
+            hints = dict(complete=True, changed_files=changed, import_edges=edges,
+                         missing_imports=missing, dependency_paths=sorted(dependencies))
+            if len(json.dumps(hints)) > 256 * 1024:
+                raise Failure('diagnostic_limit')
+            return hints
+        except (Failure, UnicodeError):
+            # Missing/large/ambiguous diagnostics cannot fail construction.
+            return dict(complete=False, reason='bounded_diagnostics_unavailable')
+        finally:
+            self.deadline = previous_deadline
 
     def publish(self):
         commit = self.request['commit']
@@ -232,6 +294,47 @@ class Mirror:
                         break
                     total -= size(mirror)
                     shutil.rmtree(mirror)
+
+
+def local_imports(content):
+    # A deliberately small subset; the pinned Lean preflight remains authority.
+    clean, index, depth = [], 0, 0
+    while index < len(content):
+        pair = content[index:index + 2]
+        if pair == '/-':
+            depth += 1
+            index += 2
+        elif pair == '-/' and depth:
+            depth -= 1
+            index += 2
+            clean.append(' ')
+        elif depth:
+            if content[index] == '\n':
+                clean.append('\n')
+            index += 1
+        elif pair == '--':
+            end = content.find('\n', index)
+            index = len(content) if end < 0 else end
+        else:
+            clean.append(content[index])
+            index += 1
+    if depth:
+        raise Failure('ambiguous_header')
+    imports = []
+    for line in ''.join(clean).splitlines():
+        line = line.strip()
+        if not line or line in ['prelude', 'module']:
+            continue
+        match = re.fullmatch(r'(?:(?:public|private|meta)\s+)*import\s+([A-Za-z0-9_. ]+)', line)
+        if match:
+            for module in match[1].split():
+                if module == 'TauCeti' or module.startswith('TauCeti.'):
+                    imports.append(module)
+        elif re.match(r'(?:(?:public|private|meta)\s+)*import\b', line):
+            raise Failure('ambiguous_header')
+        else:
+            break
+    return imports
 
 
 def validate(request):

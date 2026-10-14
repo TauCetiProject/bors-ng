@@ -26,11 +26,21 @@ defmodule BorsNG.Worker.QueueApproval do
 
   def fail(patches, batch, reason) do
     Enum.each(patches, fn patch ->
+      quarantine = BorsNG.Worker.FailureIsolation.quarantine(patch, batch, reason)
+
+      BorsNG.Worker.CandidateJournal.event(
+        BorsNG.Worker.CandidateJournal.latest(batch.id),
+        "head_quarantined",
+        "bors.indivisible_failure",
+        %{pr: patch.pr_xref, quarantine: quarantine}
+      )
+
       approval = %{
         "head_sha" => patch.commit,
         "state" => "failed",
         "batch_id" => batch.id,
-        "reason" => to_string(reason)
+        "reason" => to_string(reason),
+        "quarantine" => quarantine
       }
 
       patch

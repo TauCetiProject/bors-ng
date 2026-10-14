@@ -108,4 +108,48 @@ defmodule BorsNG.StagingFailureTest do
   test "a cancelled older native attempt is propagation, not a new cancellation" do
     assert StagingFailure.classify_run(run(), 8, @head, "main", @base) == :pending
   end
+
+  test "job conclusions classify infrastructure without trusting log or metric text" do
+    run = %{"id" => 123, "run_attempt" => 1, "conclusion" => "failure"}
+
+    job = %{
+      "id" => 456,
+      "run_id" => 123,
+      "status" => "completed",
+      "conclusion" => "failure",
+      "steps" => []
+    }
+
+    wrap = fn job -> %{"total_count" => 1, "jobs" => [job]} end
+    assert {:infrastructure, _} = StagingFailure.classify_jobs(run, wrap.(job))
+
+    candidate_step = %{
+      "name" => "Build exact candidate under bwrap with workflow-pinned audits, offline",
+      "number" => 15,
+      "conclusion" => "failure"
+    }
+
+    failed = Map.put(job, "steps", [candidate_step])
+    assert {:conclusive, _} = StagingFailure.classify_jobs(run, wrap.(failed))
+
+    for state <- ["cancelled", "timed_out", "stale", "action_required"] do
+      assert {:infrastructure, _} =
+               StagingFailure.classify_jobs(run, wrap.(Map.put(failed, "conclusion", state)))
+    end
+
+    assert {:infrastructure, _} =
+             StagingFailure.classify_jobs(Map.put(run, "conclusion", "timed_out"), wrap.(failed))
+
+    assert :unavailable =
+             StagingFailure.classify_jobs(run, %{"total_count" => 2, "jobs" => [failed]})
+
+    assert :unavailable = StagingFailure.classify_jobs(run, wrap.(Map.put(failed, "run_id", 999)))
+
+    setup =
+      Map.put(job, "steps", [
+        %{candidate_step | "name" => "Install elan (trusted, pinned + checksum)"}
+      ])
+
+    assert {:infrastructure, _} = StagingFailure.classify_jobs(run, wrap.(setup))
+  end
 end
