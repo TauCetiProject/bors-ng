@@ -183,6 +183,11 @@ class Mirror:
                                       extra_env=env)[0].strip()
             commits.append(dict(pr=member['pr'], head_sha=member['head_sha'], commit=prev, tree=tree))
         hints = self.diagnostic_hints(base, members, prev) if self.request.get('diagnostics', True) else dict(complete=False, reason='disabled')
+        # Scheduling barriers use exact immutable trees, independently of
+        # optional failure hints and mutable PR file-list endpoints.
+        paths = self.git('diff', '--name-only', '-z', '--no-renames', base, prev)[0].split('\0')
+        paths = [p for p in paths if p]
+        barriers = dict(complete=len(paths) < 300, paths=paths if len(paths) < 300 else [])
         tree = self.git('rev-parse', prev + '^{tree}')[0].strip()
         self.git('update-ref', 'refs/bors/result', prev)
         self.enforce_budget()
@@ -194,7 +199,7 @@ class Mirror:
             content = None
         toolchain = dict(content=content, unknown_reason=None if content is not None else 'absent or non-text/oversize')
         return dict(status='ok', result=self.request['identity'] | dict(commit=prev, tree=tree),
-                    diagnostic_hints=hints, toolchain=toolchain,
+                            diagnostic_hints=hints, barriers=barriers, toolchain=toolchain,
                     commits=commits, git_version=self.git('--version')[0].strip(),
                     mirror_bytes=size(self.repo))
 
@@ -261,6 +266,14 @@ class Mirror:
             return dict(complete=False, reason='non_text_source')
         finally:
             self.deadline = previous_deadline
+
+    def promote(self):
+        self.initialize()
+        self.fetch([self.request['expected'], self.request['commit']])
+        if self.git('merge-base', '--is-ancestor', self.request['expected'],
+                    self.request['commit'], check=False)[1]:
+            raise Failure('non_descendant_promotion')
+        return self.publish()
 
     def publish(self):
         commit = self.request['commit']
@@ -344,7 +357,7 @@ def local_imports(content):
 def validate(request):
     if not REPO.fullmatch(request['repository']) or '..' in request['repository']:
         raise Failure('invalid_repository')
-    if request['operation'] not in ['assemble', 'publish']:
+    if request['operation'] not in ['assemble', 'publish', 'promote']:
         raise Failure('invalid_operation')
     if request['operation'] == 'assemble':
         if not request['members']:
@@ -352,7 +365,10 @@ def validate(request):
         shas = [request['identity']['base_sha']] + [m['head_sha'] for m in request['members']]
     else:
         shas = [request['commit'], request['expected']]
-        if request['ref'] != 'refs/heads/staging':
+        if request['operation'] == 'promote':
+            if request['ref'] != 'refs/heads/main':
+                raise Failure('invalid_ref')
+        elif not re.fullmatch(r'refs/heads/staging(?:-candidate-[1-9][0-9]*-[1-9][0-9]*)?', request['ref']):
             raise Failure('invalid_ref')
     if any(not SHA.fullmatch(sha) for sha in shas):
         raise Failure('invalid_sha')

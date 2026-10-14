@@ -109,6 +109,14 @@ class LocalGitTest(unittest.TestCase):
         self.request['members'] = [self.member(1, one), self.member(2, two)]
         result = self.run_mirror()
         self.assertEqual(result['result']['tree'], git(self.upstream, 'rev-parse', two + '^{tree}'))
+        self.assertEqual(result['barriers'], dict(complete=True, paths=['file', 'new', 'renamed']))
+
+    def test_barriers_are_exact_even_when_optional_diagnostics_are_disabled(self):
+        one = self.commit(self.base, {'scripts/new-audit.py': 'trusted tooling'})
+        self.request.update(members=[self.member(1, one)], diagnostics=False)
+        result = self.run_mirror()
+        self.assertEqual(result['barriers'], dict(complete=True, paths=['scripts/new-audit.py']))
+        self.assertFalse(result['diagnostic_hints']['complete'])
 
     def test_interacting_independent_edits(self):
         one = self.commit(self.base, {'file': 'ONE\ntwo\nthree\n'})
@@ -210,6 +218,55 @@ class LocalGitTest(unittest.TestCase):
             TestMirror(push | dict(commit=one), self.upstream).run()
         self.assertEqual(git(self.upstream, 'rev-parse', 'staging'), push['commit'])
         self.assertEqual(git(self.upstream, 'for-each-ref', '--format=%(refname)', 'refs/heads/bors-candidate'), '')
+
+    def test_depth_two_exact_bases_and_ordered_leased_promotion(self):
+        one = self.commit(self.base, {'a': 'a'})
+        two = self.commit(self.base, {'b': 'b'})
+        self.request['members'] = [self.member(1, one)]
+        first = self.run_mirror()['result']['commit']
+        push = self.request | dict(operation='publish', ref='refs/heads/staging-candidate-1-1',
+                                   commit=first, expected='0' * 40)
+        local.validate(push)
+        TestMirror(push, self.upstream).run()
+        second_request = self.request | dict(identity=self.request['identity'] | dict(
+            candidate_id=2, base_sha=first), members=[self.member(2, two)])
+        second = TestMirror(second_request, self.upstream).run()['result']['commit']
+        TestMirror(push | dict(ref='refs/heads/staging-candidate-2-1', commit=second), self.upstream).run()
+        mirror = Path(self.request['root']) / 'example--repository.git'
+        self.assertEqual(git(mirror, 'rev-parse', second + '^'), first)
+        git(self.upstream, 'update-ref', 'refs/heads/main', self.base)
+        promote = self.request | dict(operation='promote', ref='refs/heads/main',
+                                      commit=second, expected=first)
+        local.validate(promote)
+        # Green B cannot land before A: exact-base lease refuses it.
+        with self.assertRaises(local.Failure):
+            TestMirror(promote, self.upstream).run()
+        TestMirror(promote | dict(commit=first, expected=self.base), self.upstream).run()
+        self.assertEqual(git(self.upstream, 'rev-parse', 'main'), first)
+        shutil.rmtree(self.request['root'])
+        # Exact commits survive disposable mirror loss; refetch only trusted objects.
+        git(self.upstream, 'update-ref', 'refs/heads/staging-candidate-2-1', second)
+        TestMirror(promote, self.upstream).run()
+        self.assertEqual(git(self.upstream, 'rev-parse', 'main'), second)
+        self.assertEqual(git(self.upstream, 'show', 'main:a'), 'a')
+        self.assertEqual(git(self.upstream, 'show', 'main:b'), 'b')
+
+    def test_main_change_between_read_and_push_cannot_promote(self):
+        one = self.commit(self.base, {'a': 'a'})
+        two = self.commit(self.base, {'b': 'b'})
+        self.request['members'] = [self.member(1, one), self.member(2, two)]
+        result = self.run_mirror()['result']['commit']
+        mirror = Path(self.request['root']) / 'example--repository.git'
+        intermediate = git(mirror, 'rev-parse', result + '^')
+        TestMirror(self.request | dict(operation='publish', ref='refs/heads/staging',
+                   commit=result, expected='0' * 40), self.upstream).run()
+        # Even an intermediate ancestor of the candidate is an unexpected base.
+        git(self.upstream, 'update-ref', 'refs/heads/main', intermediate)
+        push = self.request | dict(operation='promote', ref='refs/heads/main',
+                                   commit=result, expected=self.base)
+        with self.assertRaises(local.Failure):
+            TestMirror(push, self.upstream).run()
+        self.assertEqual(git(self.upstream, 'rev-parse', 'main'), intermediate)
 
     def test_publication_ref_and_input_validation(self):
         for ref in ['refs/heads/main', 'refs/heads/master', 'refs/heads/staging.tmp']:

@@ -67,9 +67,23 @@ defmodule BorsNG.Worker.LocalGit do
     run(context, %{
       operation: "publish",
       commit: result.commit,
-      ref: "refs/heads/staging",
+      ref: "refs/heads/" <> Map.get(context, :staging_ref, "staging"),
       expected: expected
     })
+  end
+
+  def promote(batch, conn) do
+    context = %{repository: batch.project.name, conn: conn}
+
+    case run(context, %{
+           operation: "promote",
+           commit: batch.commit,
+           expected: batch.base_sha,
+           ref: "refs/heads/main"
+         }) do
+      %{"status" => "ok"} -> {:ok, batch.commit}
+      _ -> {:error, :push, 503, "Exact-base Git promotion unavailable"}
+    end
   end
 
   defp run(context, request) do

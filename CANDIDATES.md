@@ -110,3 +110,13 @@ Trusted run/attempt classifications, conservative retry partitions and terminal
 exact-head quarantine append to the existing event journal. See
 [Failure isolation and quarantine](deploy/failure-isolation.md) for trust,
 resource bounds, deterministic fallback, reconsideration and rollback.
+
+## Depth-two scheduling
+
+The disabled N canary uses `speculative_predecessor_id` to bind B's exact assembly
+base to A's immutable commit. Live observation/v1 batch objects add nullable
+`train` metadata (candidate ID, generation, derived staging ref and predecessor).
+The live batch still supplies queue state; the candidate journal remains evidence
+with `queue_authority=false`. Generation refs cannot confer cache publication or
+approval. See [the canary contract](deploy/speculative-trains.md) for ordered
+promotion, workflow-run identity, admission barriers and hard staging/cost bounds.

@@ -6,7 +6,7 @@ defmodule BorsNG.GitHub.File do
   @type t :: %BorsNG.GitHub.File{
           filename: String.t()
         }
-  defstruct(filename: "")
+  defstruct(filename: "", previous_filename: nil)
 
   @doc """
   Convert from JSON string to a File struct.
@@ -21,8 +21,8 @@ defmodule BorsNG.GitHub.File do
   Convert from JSON string to a File struct.
   """
   @spec from_json(map) :: {:ok, t} | {:error, map}
-  def from_json(%{"filename" => filename}) do
-    {:ok, %BorsNG.GitHub.File{filename: filename}}
+  def from_json(%{"filename" => filename} = json) do
+    {:ok, %BorsNG.GitHub.File{filename: filename, previous_filename: json["previous_filename"]}}
   end
 
   def from_json(x) do
