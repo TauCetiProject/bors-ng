@@ -94,3 +94,12 @@ structured errors/conflicts. The caller validates the envelope and live heads
 before authorizing a leased staging push. Local construction is sourced as
 `bors.local_git`; shadow comparisons never allocate generations or change
 CI/promotion identity. See [rollout and mirror limits](deploy/local-git.md).
+
+## Asynchronous orchestration
+
+With K enabled, construction creates the Git object before staging publication.
+Binding and dispatch intent commit together; the durable outbox reconciles
+accepted external writes after restart. Candidate identity checks remain A's
+contract and speculative trains remain disabled. See [ORCHESTRATION.md](ORCHESTRATION.md)
+for bounded rollout, retry/recovery semantics and GitHub's nontransactional API
+limits. The serial path and observation schema remain compatible.

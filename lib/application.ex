@@ -86,6 +86,7 @@ defmodule BorsNG.Application do
         },
         id: BorsNG.Endpoint
       },
+      {BorsNG.Worker.Orchestration.Supervisor, []},
       %{
         type: :supervisor,
         id: BorsNG.Worker.Batcher.Supervisor,

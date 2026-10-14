@@ -38,6 +38,7 @@ defmodule BorsNG.Worker.Batcher do
   alias BorsNG.Database.Project
   alias BorsNG.Database.Status
   alias BorsNG.Database.LinkPatchBatch
+  alias BorsNG.Worker.Orchestration.Outbox
   alias BorsNG.Worker.CandidateJournal
   alias BorsNG.GitHub
   alias BorsNG.Endpoint
@@ -54,49 +55,57 @@ defmodule BorsNG.Worker.Batcher do
     GenServer.start_link(__MODULE__, project_id)
   end
 
-  def eligibility(pid, pr) when is_integer(pr), do: GenServer.cast(pid, {:eligibility, pr})
+  def eligibility(pid, pr) when is_integer(pr), do: submit(pid, {:eligibility, pr})
 
   def reviewed(pid, patch_id, reviewer) when is_integer(patch_id) do
-    GenServer.cast(pid, {:reviewed, patch_id, reviewer})
+    submit(pid, {:reviewed, patch_id, reviewer})
   end
 
-  # Casts, not calls: no caller uses a reply, and a call would block the
-  # webhook process for as long as the batcher is busy — bundle activation
-  # can hold it past the 5-second call timeout, crashing the caller.
+  # The legacy path casts because bundle activation may hold the batcher.
+  # Async callers wait only for the durable mailbox insert, never GitHub work.
   def set_is_single(pid, patch_id, is_single) when is_integer(patch_id) do
-    GenServer.cast(pid, {:set_is_single, patch_id, is_single})
+    submit(pid, {:set_is_single, patch_id, is_single})
   end
 
   def set_priority(pid, patch_id, priority) when is_integer(patch_id) do
-    GenServer.cast(pid, {:set_priority, patch_id, priority})
+    submit(pid, {:set_priority, patch_id, priority})
   end
 
   def status(pid, stat) do
-    GenServer.cast(pid, {:status, stat})
+    submit(pid, {:status, stat})
   end
 
   def poll(pid) do
-    send(pid, {:poll, :once})
+    if Outbox.enabled?(),
+      do: GenServer.call(pid, {:persist_info, {:poll, :once}}),
+      else: send(pid, {:poll, :once})
   end
 
   def cancel(pid, patch_id, reason \\ :requested) when is_integer(patch_id) do
-    GenServer.cast(pid, {:cancel, patch_id, reason})
+    submit(pid, {:cancel, patch_id, reason})
   end
 
   def cancel_all(pid) do
-    GenServer.cast(pid, {:cancel_all})
+    submit(pid, {:cancel_all})
   end
 
   def link(pid, patch_id, pr_xrefs) when is_integer(patch_id) do
-    GenServer.cast(pid, {:link, patch_id, pr_xrefs})
+    submit(pid, {:link, patch_id, pr_xrefs})
   end
 
   def stack(pid, patch_id, pr_xrefs) when is_integer(patch_id) do
-    GenServer.cast(pid, {:stack, patch_id, pr_xrefs})
+    submit(pid, {:stack, patch_id, pr_xrefs})
   end
 
   def unlink(pid, patch_id) when is_integer(patch_id) do
-    GenServer.cast(pid, {:unlink, patch_id})
+    submit(pid, {:unlink, patch_id})
+  end
+
+  @doc "Persist an async command before acknowledging its webhook caller."
+  def submit(pid, args) do
+    if Outbox.enabled?(),
+      do: GenServer.call(pid, {:persist, args}),
+      else: GenServer.cast(pid, args)
   end
 
   # Server callbacks
@@ -104,7 +113,7 @@ defmodule BorsNG.Worker.Batcher do
   def init(project_id) do
     BorsNG.Worker.Batcher.Registry.monitor(self(), project_id)
 
-    Process.send_after(
+    schedule_message(
       self(),
       {:poll, :repeat},
       trunc(Confex.fetch_env!(:bors, :poll_period) * :rand.uniform(2) * 0.5)
@@ -114,7 +123,13 @@ defmodule BorsNG.Worker.Batcher do
     # existing running holds rather than waiting for the coarse normal poll.
     send(self(), :restore_rechecks)
 
-    {:ok, project_id}
+    state = if Outbox.enabled?(), do: %{async_project_id: project_id}, else: project_id
+    {:ok, state}
+  end
+
+  def handle_cast(args, %{async_project_id: project_id} = state) do
+    Outbox.enqueue(project_id, "cast", args)
+    {:noreply, state}
   end
 
   def handle_cast(args, project_id) do
@@ -123,8 +138,22 @@ defmodule BorsNG.Worker.Batcher do
     {:noreply, project_id}
   end
 
-  # Deployed callers cast these; the handle_call clauses only serve calls
-  # already in flight across a deploy.
+  # Retain direct priority/single calls already in flight across a deploy.
+  def handle_call({:persist, args}, _from, %{async_project_id: project_id} = state) do
+    Outbox.enqueue(project_id, "cast", args)
+    {:reply, :ok, state}
+  end
+
+  def handle_call({:persist_info, args}, _from, %{async_project_id: project_id} = state) do
+    Outbox.enqueue(project_id, "info", args, "poll:#{project_id}")
+    {:reply, :ok, state}
+  end
+
+  def handle_call(args, _from, %{async_project_id: project_id} = state) do
+    Outbox.enqueue(project_id, "cast", args)
+    {:reply, :ok, state}
+  end
+
   def handle_call({:set_is_single, _, _} = args, _from, project_id) do
     do_handle_cast(args, project_id)
     {:reply, :ok, project_id}
@@ -298,17 +327,25 @@ defmodule BorsNG.Worker.Batcher do
     |> Batch.get_assoc_by_commit(commit, :incomplete)
     |> Repo.all()
     |> Enum.each(fn batch ->
+      previous = Repo.one(Status.get_for_batch(batch.id, identifier))
+
       {updated, _} =
-        batch.id
-        |> Status.get_for_batch(identifier)
-        |> Repo.update_all(set: [state: state, url: url, identifier: identifier])
+        if Process.get(:orchestration_executor, false) and previous && previous.state == state &&
+             previous.url == url do
+          {0, nil}
+        else
+          batch.id
+          |> Status.get_for_batch(identifier)
+          |> Repo.update_all(set: [state: state, url: url, identifier: identifier])
+        end
 
       if updated > 0 and batch.state == :running do
         CandidateJournal.status(batch, identifier, state, "github.status_webhook", url)
 
-        if expired_staging?(batch) and
-             (batch.recovery_after || 0) <= DateTime.to_unix(DateTime.utc_now()) and
-             (batch.promotion_retry_at || 0) <= DateTime.to_unix(DateTime.utc_now()) do
+        if (Process.get(:orchestration_executor, false) and state in [:ok, :error]) or
+             (expired_staging?(batch) and
+                (batch.recovery_after || 0) <= DateTime.to_unix(DateTime.utc_now()) and
+                (batch.promotion_retry_at || 0) <= DateTime.to_unix(DateTime.utc_now())) do
           # A delayed event may omit a newer successful verdict. Read the
           # current head before releasing its staging attempt at the deadline.
           poll_running_batch(batch)
@@ -492,6 +529,28 @@ defmodule BorsNG.Worker.Batcher do
     end
   end
 
+  def handle_info(args, %{async_project_id: project_id} = state) do
+    {args, key} =
+      case args do
+        {:poll, repetition} ->
+          if repetition != :once,
+            do:
+              schedule_message(
+                self(),
+                {:poll, repetition},
+                Confex.fetch_env!(:bors, :poll_period)
+              )
+
+          {{:poll, :once}, "poll:#{project_id}"}
+
+        _ ->
+          {args, nil}
+      end
+
+    Outbox.enqueue(project_id, "info", args, key)
+    {:noreply, state}
+  end
+
   def handle_info(:recover_backend_holds, project_id) do
     if Process.get(:backend_holds_recovered) do
       {:noreply, project_id}
@@ -507,7 +566,7 @@ defmodule BorsNG.Worker.Batcher do
     check_self(project_id)
 
     if repetition != :once do
-      Process.send_after(self(), {:poll, repetition}, Confex.fetch_env!(:bors, :poll_period))
+      schedule_message(self(), {:poll, repetition}, Confex.fetch_env!(:bors, :poll_period))
     end
 
     case poll_(project_id) do
@@ -633,7 +692,7 @@ defmodule BorsNG.Worker.Batcher do
     rescue
       error ->
         Logger.warning("batch retry timer restoration deferred: #{inspect(error.__struct__)}")
-        Process.send_after(self(), :restore_rechecks, 60_000)
+        schedule_message(self(), :restore_rechecks, 60_000)
     end
 
     {:noreply, project_id}
@@ -661,7 +720,16 @@ defmodule BorsNG.Worker.Batcher do
   end
 
   def handle_info({:backend_retry, patch_id, head, reviewer, generation}, project_id) do
-    if Process.get({:approval_pending, patch_id}) == {head, generation} do
+    current = Repo.get(Patch, patch_id)
+
+    valid =
+      if Process.get(:orchestration_executor, false),
+        do:
+          current && current.commit == head && current.orchestration_approval_token == generation &&
+            current.bundle_reviewer == reviewer,
+        else: Process.get({:approval_pending, patch_id}) == {head, generation}
+
+    if valid do
       handle_info({:backend_retry, patch_id, head, reviewer}, project_id)
     else
       {:noreply, project_id}
@@ -1214,8 +1282,14 @@ defmodule BorsNG.Worker.Batcher do
   end
 
   defp poll_batches({:running, batches}) do
-    batch = hd(batches)
+    if Process.get(:orchestration_executor, false) do
+      Enum.each(Enum.filter(batches, &(&1.state == :running)), &poll_one_running/1)
+    else
+      poll_one_running(hd(batches))
+    end
+  end
 
+  defp poll_one_running(batch) do
     cond do
       (batch.recovery_after || 0) > DateTime.to_unix(DateTime.utc_now()) ->
         :ok
@@ -1256,7 +1330,7 @@ defmodule BorsNG.Worker.Batcher do
   defp schedule_recheck(batch, deadline) do
     cancel_recheck(batch.id)
     delay = max(deadline - DateTime.to_unix(DateTime.utc_now()) + 1, 1)
-    timer = Process.send_after(self(), {:retry_promotion, batch.id, batch.commit}, delay * 1_000)
+    timer = schedule_message(self(), {:retry_promotion, batch.id, batch.commit}, delay * 1_000)
     Process.put({:batch_recheck, batch.id}, timer)
   end
 
@@ -1288,7 +1362,7 @@ defmodule BorsNG.Worker.Batcher do
 
       {:defer, reason} ->
         Logger.info("merge_backend deferred batch=#{batch.id} reason=#{reason}")
-        Process.send_after(self(), {:poll, :once}, 60_000)
+        schedule_message(self(), {:poll, :once}, 60_000)
     end
   end
 
@@ -1503,30 +1577,48 @@ defmodule BorsNG.Worker.Batcher do
          :ok <- local_live_heads(conn, links) do
       setup_statuses(batch, toml)
 
-      case BorsNG.Worker.LocalGit.push(result, context, expected) do
-        %{"status" => "ok"} ->
-          CandidateJournal.event(candidate, "staging_pushed", "bors.local_git", %{
-            commit: result.commit,
-            expected: expected,
-            ref: "refs/heads/staging"
-          })
+      if Process.get(:orchestration_executor, false) do
+        publisher = %{kind: :local_git, result: result, context: context, expected: expected}
 
-          dispatch_staging(
-            batch,
-            conn,
-            result.commit,
-            base.commit,
-            result.tree,
-            base.commit,
-            toml,
-            "bors.local_git"
-          )
+        dispatch_staging(
+          batch,
+          conn,
+          result.commit,
+          base.commit,
+          result.tree,
+          base.commit,
+          toml,
+          "bors.local_git",
+          publisher
+        )
 
-          {:running, result.commit}
+        {:running, result.commit}
+      else
+        case BorsNG.Worker.LocalGit.push(result, context, expected) do
+          %{"status" => "ok"} ->
+            CandidateJournal.event(candidate, "staging_pushed", "bors.local_git", %{
+              commit: result.commit,
+              expected: expected,
+              ref: "refs/heads/staging"
+            })
 
-        %{"details" => details} ->
-          CandidateJournal.event(candidate, "local_push_error", "bors.local_git", details)
-          {:waiting, nil}
+            dispatch_staging(
+              batch,
+              conn,
+              result.commit,
+              base.commit,
+              result.tree,
+              base.commit,
+              toml,
+              "bors.local_git"
+            )
+
+            {:running, result.commit}
+
+          %{"details" => details} ->
+            CandidateJournal.event(candidate, "local_push_error", "bors.local_git", details)
+            {:waiting, nil}
+        end
       end
     else
       false ->
@@ -1652,7 +1744,8 @@ defmodule BorsNG.Worker.Batcher do
       context = %{
         repository: batch.project.name,
         conn: conn,
-        members: members
+        members: members,
+        date: DateTime.to_iso8601(DateTime.utc_now())
       }
 
       case BorsNG.Worker.LocalGit.assemble(candidate, context) do
@@ -1961,7 +2054,10 @@ defmodule BorsNG.Worker.Batcher do
                 tree = Process.get({:squash_tree, batch.id}, tree)
                 compare_local_shadow(batch, tree)
                 setup_statuses(batch, toml)
-                GitHub.force_push!(repo_conn, head, batch.project.staging_branch)
+
+                unless Process.get(:orchestration_executor, false),
+                  do: GitHub.force_push!(repo_conn, head, batch.project.staging_branch)
+
                 dispatch_staging(batch, repo_conn, head, base.commit, tree, policy_ref, toml)
                 {:running, head}
               end
@@ -1978,7 +2074,7 @@ defmodule BorsNG.Worker.Batcher do
           setup_statuses(batch, toml)
 
           head =
-            GitHub.synthesize_commit!(
+            create_staging_commit!(
               repo_conn,
               %{
                 branch: batch.project.staging_branch,
@@ -2007,88 +2103,6 @@ defmodule BorsNG.Worker.Batcher do
 
         {:waiting, nil}
     end
-  end
-
-  defp dispatch_staging(
-         batch,
-         repo_conn,
-         head,
-         base,
-         tree,
-         policy_ref,
-         toml,
-         source \\ "github.commit_response"
-       ) do
-    candidate = Repo.get!(BorsNG.Database.Candidate, batch.candidate_id)
-
-    toolchain =
-      case GitHub.get_file(repo_conn, head, "lean-toolchain") do
-        {:ok, content} when is_binary(content) ->
-          %{
-            ref: head,
-            path: "lean-toolchain",
-            content: content,
-            sha256: CandidateJournal.digest(content),
-            source: "github.contents"
-          }
-
-        {:ok, nil} ->
-          %{
-            ref: head,
-            path: "lean-toolchain",
-            content: nil,
-            source: "github.contents",
-            unknown_reason: "file absent"
-          }
-
-        _ ->
-          %{
-            ref: head,
-            path: "lean-toolchain",
-            content: nil,
-            source: nil,
-            unknown_reason: "read failed"
-          }
-      end
-
-    CandidateJournal.bind(candidate, head, tree, policy_ref, toml, toolchain, source)
-    # The public observation must bind an override to the actual staging base,
-    # rather than trusting caller-supplied dispatch metadata.
-    batch |> Batch.changeset(%{base_sha: base, commit: head, state: :running}) |> Repo.update!()
-
-    if System.get_env("BORS_STAGE_DISPATCH_PROJECT") == batch.project.name do
-      CandidateJournal.event(candidate, "dispatch_requested", "bors.workflow_dispatch", %{
-        commit: head,
-        base_sha: base
-      })
-
-      members =
-        Repo.all(LinkPatchBatch.from_batch(batch.id))
-        |> Enum.map(&%{pr: &1.patch.pr_xref, head_sha: &1.head_sha})
-
-      :ok =
-        GitHub.dispatch_staging(
-          repo_conn,
-          batch.project.name,
-          head,
-          base,
-          batch.id,
-          members,
-          batch.into_branch
-        )
-
-      CandidateJournal.event(candidate, "dispatched", "github.workflow_dispatch_response", %{
-        commit: head,
-        base_sha: base
-      })
-    else
-      CandidateJournal.event(candidate, "dispatched", "github.staging_push_response", %{
-        commit: head,
-        base_sha: base
-      })
-    end
-
-    :ok
   end
 
   defp start_waiting_merged_batch(batch, patch_links, _base, :conflict) do
@@ -2175,6 +2189,336 @@ defmodule BorsNG.Worker.Batcher do
 
       {:error, nil}
     end
+  end
+
+  defp create_staging_commit!(conn, info) do
+    if Process.get(:orchestration_executor, false),
+      do: GitHub.create_commit!(conn, Map.delete(info, :branch)),
+      else: GitHub.synthesize_commit!(conn, info)
+  end
+
+  defp dispatch_staging(
+         batch,
+         repo_conn,
+         head,
+         base,
+         tree,
+         policy_ref,
+         toml,
+         source \\ "github.commit_response",
+         publisher \\ :github
+       ) do
+    candidate = Repo.get!(BorsNG.Database.Candidate, batch.candidate_id)
+
+    toolchain = commit_toolchain(repo_conn, head, publisher)
+
+    if Process.get(:orchestration_executor, false) do
+      ensure_no_withdrawal!(batch, patch_ids(candidate))
+
+      {:ok, _} =
+        Repo.transaction(fn ->
+          CandidateJournal.bind(candidate, head, tree, policy_ref, toml, toolchain, source)
+
+          batch
+          |> Batch.changeset(%{base_sha: base, commit: head, state: :running})
+          |> Repo.update!()
+
+          Outbox.enqueue(
+            batch.project_id,
+            "dispatch",
+            {batch.id, publisher},
+            "dispatch:#{batch.id}"
+          )
+        end)
+    else
+      dispatch_staging_serial(
+        batch,
+        repo_conn,
+        head,
+        base,
+        tree,
+        policy_ref,
+        toml,
+        toolchain,
+        candidate,
+        source
+      )
+    end
+  end
+
+  defp commit_toolchain(_conn, head, %{kind: :local_git, result: result}) do
+    evidence =
+      result.evidence["toolchain"] ||
+        %{"content" => nil, "unknown_reason" => "local object read unavailable"}
+
+    content = evidence["content"]
+
+    %{
+      ref: head,
+      path: "lean-toolchain",
+      content: content,
+      sha256: if(is_binary(content), do: CandidateJournal.digest(content)),
+      source: "bors.local_git_object",
+      unknown_reason: evidence["unknown_reason"]
+    }
+  end
+
+  defp commit_toolchain(repo_conn, head, _) do
+    case GitHub.get_file(repo_conn, head, "lean-toolchain") do
+      {:ok, content} when is_binary(content) ->
+        %{
+          ref: head,
+          path: "lean-toolchain",
+          content: content,
+          sha256: CandidateJournal.digest(content),
+          source: "github.contents"
+        }
+
+      {:ok, nil} ->
+        %{
+          ref: head,
+          path: "lean-toolchain",
+          content: nil,
+          source: "github.contents",
+          unknown_reason: "file absent"
+        }
+
+      _ ->
+        %{
+          ref: head,
+          path: "lean-toolchain",
+          content: nil,
+          source: nil,
+          unknown_reason: "read failed"
+        }
+    end
+  end
+
+  @doc "Replay only the current bound candidate; never reconstruct an accepted dispatch."
+  def resume_dispatch(batch_id, publisher \\ :github) do
+    case Repo.get(Batch, batch_id) do
+      %Batch{state: :running} = batch ->
+        batch = Repo.preload(batch, :project)
+        candidate = CandidateJournal.current(batch)
+
+        if candidate do
+          binding = CandidateJournal.commit_binding(candidate)
+
+          result =
+            BorsNG.Worker.CandidateAssembler.identity(candidate)
+            |> Map.merge(%{commit: batch.commit, tree: binding["tree"]})
+
+          case BorsNG.Worker.CandidateAssembler.validate_result(candidate, result) do
+            :ok ->
+              resume_current_dispatch(batch, candidate, publisher)
+
+            {:error, reason} ->
+              CandidateJournal.event(candidate, "dispatch_rejected", "bors.outbox", %{
+                reason: reason
+              })
+
+              # Reuse normal cancellation/retry semantics; stale members cannot
+              # leave an active candidate owning the staging slot forever.
+              links = Repo.all(LinkPatchBatch.from_batch(batch.id))
+
+              Enum.each(links, fn link ->
+                if link.patch.commit != link.head_sha,
+                  do: do_handle_cast({:cancel, link.patch_id, :changed_head}, batch.project_id)
+              end)
+
+              case Repo.get(Batch, batch.id) do
+                %Batch{state: :running} = current ->
+                  Divider.clone_batch(
+                    Repo.all(LinkPatchBatch.from_batch(batch.id)),
+                    batch.project_id,
+                    batch.into_branch,
+                    "stale_dispatch"
+                  )
+
+                  current |> Batch.changeset(%{state: :canceled}) |> Repo.update!()
+
+                _ ->
+                  :ok
+              end
+          end
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp resume_current_dispatch(batch, candidate, publisher) do
+    import Ecto.Query
+
+    events =
+      Repo.all(from(e in BorsNG.Database.CandidateEvent, where: e.candidate_id == ^candidate.id))
+
+    unless Enum.any?(events, &(&1.kind == "dispatched")) do
+      ensure_no_withdrawal!(batch, patch_ids(candidate))
+      conn = get_repo_conn(batch.project)
+      requested = Enum.find(events, &(&1.kind == "dispatch_requested"))
+      # A single bounded Actions page reconciles an ambiguous repository_dispatch.
+      # No retry is allowed on an unavailable or truncated lookup.
+      seen =
+        if requested && System.get_env("BORS_STAGE_DISPATCH_PROJECT") == batch.project.name do
+          {:ok, seen} =
+            GitHub.staging_dispatch_seen(
+              conn,
+              batch.project.name,
+              batch.commit,
+              batch.base_sha,
+              batch.id,
+              batch.into_branch,
+              requested.observed_at
+            )
+
+          seen
+        else
+          false
+        end
+
+      if seen do
+        CandidateJournal.event(candidate, "dispatched", "github.actions_recovery_read", %{
+          commit: batch.commit,
+          base_sha: batch.base_sha
+        })
+      else
+        # A push to the same SHA is idempotent and never fires another push build.
+        publish_bound_candidate!(batch, candidate, conn, publisher)
+
+        if System.get_env("BORS_STAGE_DISPATCH_PROJECT") == batch.project.name do
+          unless requested,
+            do:
+              CandidateJournal.event(candidate, "dispatch_requested", "bors.outbox", %{
+                commit: batch.commit,
+                base_sha: batch.base_sha
+              })
+
+          members =
+            Enum.map(candidate.snapshot["members"], &%{pr: &1["pr"], head_sha: &1["head_sha"]})
+
+          :ok =
+            GitHub.dispatch_staging_once(
+              conn,
+              batch.project.name,
+              batch.commit,
+              batch.base_sha,
+              batch.id,
+              members,
+              batch.into_branch
+            )
+
+          CandidateJournal.event(candidate, "dispatched", "github.workflow_dispatch_response", %{
+            commit: batch.commit,
+            base_sha: batch.base_sha
+          })
+        else
+          CandidateJournal.event(candidate, "dispatched", "github.staging_push_response", %{
+            commit: batch.commit,
+            base_sha: batch.base_sha
+          })
+        end
+      end
+
+      # A successful staging mutation is the start of the CI timeout budget.
+      binding = CandidateJournal.commit_binding(candidate)
+      timeout = binding["policy"]["effective"]["timeout_sec"] || batch.project.batch_timeout_sec
+
+      batch
+      |> Batch.changeset(%{timeout_at: DateTime.to_unix(DateTime.utc_now()) + timeout})
+      |> Repo.update!()
+    end
+
+    :ok
+  end
+
+  defp publish_bound_candidate!(batch, _candidate, conn, :github),
+    do: GitHub.force_push!(conn, batch.commit, batch.project.staging_branch)
+
+  defp publish_bound_candidate!(batch, candidate, conn, %{kind: :local_git} = publisher) do
+    current = GitHub.get_branch!(conn, batch.project.staging_branch).commit
+
+    cond do
+      current == batch.commit ->
+        :ok
+
+      current != publisher.expected ->
+        throw(:staging_ref_changed)
+
+      true ->
+        # Mirrors are expendable. Recreate with the original metadata and date;
+        # reject any result that differs from the durably bound commit/tree.
+        result = BorsNG.Worker.LocalGit.push(publisher.result, publisher.context, current)
+
+        unless result["status"] == "ok" do
+          {:ok, rebuilt} = BorsNG.Worker.LocalGit.assemble(candidate, publisher.context)
+          :ok = BorsNG.Worker.CandidateAssembler.validate_result(candidate, rebuilt)
+
+          if rebuilt.commit != publisher.result.commit or rebuilt.tree != publisher.result.tree,
+            do: throw(:reconstruction_mismatch)
+
+          %{"status" => "ok"} = BorsNG.Worker.LocalGit.push(rebuilt, publisher.context, current)
+        end
+
+        CandidateJournal.event(candidate, "staging_pushed", "bors.local_git", %{
+          commit: batch.commit,
+          expected: current,
+          ref: "refs/heads/staging"
+        })
+    end
+  end
+
+  defp dispatch_staging_serial(
+         batch,
+         repo_conn,
+         head,
+         base,
+         tree,
+         policy_ref,
+         toml,
+         toolchain,
+         candidate,
+         source
+       ) do
+    CandidateJournal.bind(candidate, head, tree, policy_ref, toml, toolchain, source)
+    # The public observation must bind an override to the actual staging base,
+    # rather than trusting caller-supplied dispatch metadata.
+    batch |> Batch.changeset(%{base_sha: base, commit: head, state: :running}) |> Repo.update!()
+
+    if System.get_env("BORS_STAGE_DISPATCH_PROJECT") == batch.project.name do
+      CandidateJournal.event(candidate, "dispatch_requested", "bors.workflow_dispatch", %{
+        commit: head,
+        base_sha: base
+      })
+
+      members =
+        Repo.all(LinkPatchBatch.from_batch(batch.id))
+        |> Enum.map(&%{pr: &1.patch.pr_xref, head_sha: &1.head_sha})
+
+      :ok =
+        GitHub.dispatch_staging(
+          repo_conn,
+          batch.project.name,
+          head,
+          base,
+          batch.id,
+          members,
+          batch.into_branch
+        )
+
+      CandidateJournal.event(candidate, "dispatched", "github.workflow_dispatch_response", %{
+        commit: head,
+        base_sha: base
+      })
+    else
+      CandidateJournal.event(candidate, "dispatched", "github.staging_push_response", %{
+        commit: head,
+        base_sha: base
+      })
+    end
+
+    :ok
   end
 
   defp raced_link?(repo_conn, project, %{patch: patch, head_sha: approved_head}) do
@@ -2319,6 +2663,14 @@ defmodule BorsNG.Worker.Batcher do
   end
 
   defp poll_running_batch(batch, from_recheck \\ false) do
+    if Outbox.enabled?() and Outbox.pending?(batch.project_id, "dispatch:#{batch.id}") do
+      :ok
+    else
+      poll_dispatched_batch(batch, from_recheck)
+    end
+  end
+
+  defp poll_dispatched_batch(batch, from_recheck) do
     maybe_shadow_running(batch)
     repo_conn = get_repo_conn(batch.project)
 
@@ -2355,6 +2707,15 @@ defmodule BorsNG.Worker.Batcher do
   end
 
   defp maybe_complete_batch(batch) do
+    if Process.get(:orchestration_executor, false) and
+         Outbox.pending?(batch.project_id, "dispatch:#{batch.id}") do
+      :ok
+    else
+      maybe_complete_dispatched_batch(batch)
+    end
+  end
+
+  defp maybe_complete_dispatched_batch(batch) do
     now = DateTime.to_unix(DateTime.utc_now())
 
     if (batch.promotion_retry_at || 0) <= now and (batch.recovery_after || 0) <= now do
@@ -2437,7 +2798,86 @@ defmodule BorsNG.Worker.Batcher do
   @spec complete_batch(Status.state(), Batch.t(), [Status.t()]) :: Batch.state() | :ci_retry
   defp complete_batch(:ok, batch, statuses) do
     conn = get_repo_conn(batch.project)
+
+    if Process.get(:orchestration_executor, false) and promotion_already_visible?(batch, conn) do
+      {:ok, _} =
+        Repo.transaction(fn ->
+          CandidateJournal.event(
+            CandidateJournal.current(batch),
+            "promoted",
+            "github.base_recovery_read",
+            %{commit: batch.commit, base_sha: batch.base_sha, base: batch.into_branch}
+          )
+
+          batch |> Batch.changeset(%{state: :ok}) |> Repo.update!()
+          QueueApproval.stop(Repo.all(Patch.all_for_batch(batch.id)), :merged)
+        end)
+
+      :ok
+    else
+      complete_green_batch(batch, statuses, conn)
+    end
+  end
+
+  defp complete_batch(:error, batch, statuses) do
+    project = batch.project
+
+    if staged_failure?(batch, statuses) do
+      case GitHub.staging_failure(
+             get_repo_conn(project),
+             batch.commit,
+             project.name,
+             batch.id,
+             batch.into_branch,
+             batch.base_sha
+           ) do
+        {:ok, :conclusive} -> complete_failed_batch(batch, statuses)
+        {:ok, :pending} -> defer_pending_result(batch)
+        {:ok, :cancelled} -> defer_inconclusive_build(batch, :cancelled)
+        _ -> defer_inconclusive_build(batch, :unavailable)
+      end
+    else
+      complete_failed_batch(batch, statuses)
+    end
+  end
+
+  defp promotion_already_visible?(batch, conn) do
+    main = GitHub.get_branch!(conn, batch.into_branch).commit
+
+    cond do
+      main == batch.commit ->
+        true
+
+      promotion_requested?(batch) ->
+        case GitHub.compare_status(conn, batch.commit, main) do
+          {:ok, status} -> status in [:ahead, :identical]
+          _ -> throw(:promotion_recovery_unavailable)
+        end
+
+      true ->
+        false
+    end
+  end
+
+  defp promotion_requested?(batch) do
+    case CandidateJournal.current(batch) do
+      nil ->
+        false
+
+      candidate ->
+        Repo.exists?(
+          from(e in BorsNG.Database.CandidateEvent,
+            where: e.candidate_id == ^candidate.id and e.kind == "promotion_requested"
+          )
+        )
+    end
+  end
+
+  defp complete_green_batch(batch, statuses, conn) do
     links = Repo.all(LinkPatchBatch.from_batch(batch.id))
+
+    if Process.get(:orchestration_executor, false),
+      do: ensure_no_withdrawal!(batch, Enum.map(links, & &1.patch_id))
 
     # Approval must still exist for the exact diff when CI finishes, even if a
     # retarget, force push or r- arrived after the scope status was posted.
@@ -2473,28 +2913,6 @@ defmodule BorsNG.Worker.Batcher do
           [] -> push_completed_batch(batch, statuses)
           drafts -> abort_draft_merge(batch, drafts)
         end
-    end
-  end
-
-  defp complete_batch(:error, batch, statuses) do
-    project = batch.project
-
-    if staged_failure?(batch, statuses) do
-      case GitHub.staging_failure(
-             get_repo_conn(project),
-             batch.commit,
-             project.name,
-             batch.id,
-             batch.into_branch,
-             batch.base_sha
-           ) do
-        {:ok, :conclusive} -> complete_failed_batch(batch, statuses)
-        {:ok, :pending} -> defer_pending_result(batch)
-        {:ok, :cancelled} -> defer_inconclusive_build(batch, :cancelled)
-        _ -> defer_inconclusive_build(batch, :unavailable)
-      end
-    else
-      complete_failed_batch(batch, statuses)
     end
   end
 
@@ -2711,6 +3129,14 @@ defmodule BorsNG.Worker.Batcher do
     :canceled
   end
 
+  defp patch_ids(candidate), do: Enum.map(candidate.snapshot["members"], & &1["patch_id"])
+
+  defp ensure_no_withdrawal!(batch, ids) do
+    job = Process.get(:orchestration_job)
+    if job && not Outbox.owned?(job), do: throw(:stale_outbox_claim)
+    if Outbox.withdrawal_pending?(batch.project_id, ids), do: throw(:withdrawal_pending)
+  end
+
   defp push_completed_batch(batch, statuses) do
     project = batch.project
     repo_conn = get_repo_conn(project)
@@ -2723,6 +3149,40 @@ defmodule BorsNG.Worker.Batcher do
         {:ok, x} ->
           {:ok, x}
       end
+
+    if Process.get(:orchestration_executor, false) do
+      if candidate = CandidateJournal.current(batch) do
+        binding = CandidateJournal.commit_binding(candidate)
+
+        result =
+          BorsNG.Worker.CandidateAssembler.identity(candidate)
+          |> Map.merge(%{commit: batch.commit, tree: binding["tree"]})
+
+        if BorsNG.Worker.CandidateAssembler.validate_result(candidate, result) != :ok,
+          do: throw(:stale_promotion)
+      end
+
+      links = Repo.all(LinkPatchBatch.from_batch(batch.id))
+      ensure_no_withdrawal!(batch, Enum.map(links, & &1.patch_id))
+
+      Enum.each(links, fn link ->
+        pr = GitHub.get_pr!(repo_conn, link.patch.pr_xref)
+
+        if link.patch.commit != link.head_sha or pr.head_sha != link.head_sha do
+          do_handle_cast({:cancel, link.patch_id, :changed_head}, batch.project_id)
+          throw(:stale_promotion)
+        end
+      end)
+    end
+
+    if Process.get(:orchestration_executor, false) and not promotion_requested?(batch) do
+      CandidateJournal.event(
+        CandidateJournal.current(batch),
+        "promotion_requested",
+        "bors.outbox",
+        %{commit: batch.commit, base: batch.into_branch}
+      )
+    end
 
     push_result =
       push_with_retry(
@@ -2756,16 +3216,27 @@ defmodule BorsNG.Worker.Batcher do
 
     case push_status do
       {:success} ->
-        CandidateJournal.event(
-          CandidateJournal.current(batch),
-          "promoted",
-          "github.base_push_response",
-          %{commit: batch.commit, base_sha: batch.base_sha, base: batch.into_branch}
-        )
+        {:ok, _} =
+          Repo.transaction(fn ->
+            CandidateJournal.event(
+              CandidateJournal.current(batch),
+              "promoted",
+              "github.base_push_response",
+              %{commit: batch.commit, base_sha: batch.base_sha, base: batch.into_branch}
+            )
+
+            if Process.get(:orchestration_executor, false) do
+              batch |> Batch.changeset(%{state: :ok}) |> Repo.update!()
+              QueueApproval.stop(patches, :merged)
+            end
+          end)
 
         Process.delete({:push_failure_reported, batch.id})
         Process.delete({:promotion_retry, batch.id})
-        QueueApproval.stop(patches, :merged)
+
+        unless Process.get(:orchestration_executor, false),
+          do: QueueApproval.stop(patches, :merged)
+
         # The bundle (if any) has merged. Drop held approvals so a future
         # run needs fresh r+. Forget the retargeting record so a later unlink
         # does not try to restore a base whose changes are now merged.
@@ -3163,12 +3634,22 @@ defmodule BorsNG.Worker.Batcher do
 
   # A poll armed for a member with a held approval reads the approval back
   # from the row when it fires. An r- during the wait ends the loop.
+  defp approval_generation(patch) do
+    if Process.get(:orchestration_executor, false) do
+      token = Base.encode16(:crypto.strong_rand_bytes(16))
+      patch |> Patch.changeset(%{orchestration_approval_token: token}) |> Repo.update!()
+      token
+    else
+      make_ref()
+    end
+  end
+
   defp defer_approval(patch, reviewer) do
     Bundles.hold_approval(patch, reviewer)
-    generation = make_ref()
+    generation = approval_generation(patch)
     Process.put({:approval_pending, patch.id}, {patch.commit, generation})
 
-    Process.send_after(
+    schedule_message(
       self(),
       {:backend_retry, patch.id, patch.commit, reviewer, generation},
       60_000
@@ -3176,9 +3657,10 @@ defmodule BorsNG.Worker.Batcher do
   end
 
   defp hold_prerun_approval(project, patch, reviewer) do
-    if BorsNG.MergeBackend.scoped?(project, patch.into_branch) do
+    if Process.get(:orchestration_executor, false) or
+         BorsNG.MergeBackend.scoped?(project, patch.into_branch) do
       Bundles.hold_approval(patch, reviewer)
-      generation = make_ref()
+      generation = approval_generation(patch)
       Process.put({:approval_pending, patch.id}, {patch.commit, generation})
       {:held_approval, generation}
     else
@@ -3187,7 +3669,12 @@ defmodule BorsNG.Worker.Batcher do
   end
 
   defp resolve_prerun_reviewer({:held_approval, generation}, patch) do
-    if Process.get({:approval_pending, patch.id}) == {patch.commit, generation},
+    valid =
+      if Process.get(:orchestration_executor, false),
+        do: patch.orchestration_approval_token == generation,
+        else: Process.get({:approval_pending, patch.id}) == {patch.commit, generation}
+
+    if valid,
       do: patch.bundle_reviewer,
       else: nil
   end
@@ -3231,7 +3718,7 @@ defmodule BorsNG.Worker.Batcher do
 
         Logger.info("Start Poll Patch #{patch.id} prerun")
 
-        Process.send_after(
+        schedule_message(
           self(),
           {:prerun_poll, try_num + 1, {reviewer, patch}},
           @prerun_poll_period
@@ -3441,7 +3928,7 @@ defmodule BorsNG.Worker.Batcher do
 
       _ ->
         Enum.each(patches, fn patch ->
-          case GitHub.post_comment(repo_conn, patch.pr_xref, body) do
+          case post_message(repo_conn, patch, body) do
             :ok ->
               :ok
 
@@ -3451,6 +3938,25 @@ defmodule BorsNG.Worker.Batcher do
               )
           end
         end)
+    end
+  end
+
+  defp post_message(conn, patch, body) do
+    if Process.get(:orchestration_executor, false) do
+      job = Process.get(:orchestration_job)
+      key = "notice:#{job.id}:#{patch.id}:" <> CandidateJournal.digest(body)
+      marker = "<!-- bors-outbox #{key} -->"
+
+      Outbox.enqueue(
+        patch.project_id,
+        "notice",
+        {conn, patch.pr_xref, body <> "\n\n" <> marker, marker},
+        key
+      )
+
+      :ok
+    else
+      GitHub.post_comment(conn, patch.pr_xref, body)
     end
   end
 
@@ -3610,7 +4116,10 @@ defmodule BorsNG.Worker.Batcher do
     batches =
       batch.project_id
       |> Batch.all_for_project(:running)
-      |> where([b], b.id != ^batch.id and b.priority < ^batch.priority)
+      |> where(
+        [b],
+        b.id != ^batch.id and b.priority < ^batch.priority and ^(not Outbox.enabled?())
+      )
       |> Repo.all()
 
     ids = Enum.map(batches, & &1.id)
@@ -3626,14 +4135,32 @@ defmodule BorsNG.Worker.Batcher do
     |> Repo.update_all(set: [state: :waiting])
   end
 
+  defp schedule_message(pid, message, delay) do
+    if Process.get(:orchestration_executor, false) and pid == self() do
+      job = Process.get(:orchestration_job)
+
+      key =
+        "timer:" <>
+          Integer.to_string(job.project_id) <>
+          ":" <>
+          CandidateJournal.digest(:erlang.term_to_binary(message)) <>
+          ":" <> Integer.to_string(Outbox.now() + div(delay + 999, 1000))
+
+      Outbox.enqueue(job.project_id, "info", message, key, Outbox.now() + div(delay + 999, 1000))
+      nil
+    else
+      Process.send_after(pid, message, delay)
+    end
+  end
+
   defp poll_after_delay(project) do
     poll_at = (project.batch_delay_sec + 1) * 1000
-    Process.send_after(self(), {:poll, :once}, poll_at)
+    schedule_message(self(), {:poll, :once}, poll_at)
   end
 
   # Validate that there are no duplicate running batchers for the same project
   defp check_self(project_id) do
-    if Application.get_env(:bors, :is_test) do
+    if Application.get_env(:bors, :is_test, false) or Process.get(:orchestration_executor, false) do
       :ok
     else
       self = self()

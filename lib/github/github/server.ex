@@ -282,6 +282,47 @@ defmodule BorsNG.GitHub.Server do
     end
   end
 
+  def do_handle_call(:staging_dispatch_seen, conn, {_repo, head, base, batch, branch, since}) do
+    expected = "bors branch=#{branch} batch=#{batch} head=#{head} base=#{base}"
+
+    created =
+      since
+      |> DateTime.from_unix!(:microsecond)
+      |> DateTime.add(-60, :second)
+      |> DateTime.truncate(:second)
+      |> DateTime.to_iso8601()
+
+    path =
+      "actions/workflows/pr-build.yml/runs?event=repository_dispatch&per_page=100&created=" <>
+        ">=" <> created
+
+    case get!(conn, path) do
+      %{status: 200, body: raw} ->
+        body = Jason.decode!(raw)
+        runs = body["workflow_runs"]
+
+        cond do
+          not is_list(runs) or not is_integer(body["total_count"]) or body["total_count"] < 0 ->
+            {:error, :dispatch_lookup_invalid}
+
+          Enum.any?(
+            runs,
+            &(&1["display_title"] == expected and &1["event"] == "repository_dispatch")
+          ) ->
+            {:ok, true}
+
+          length(runs) < 100 and body["total_count"] == length(runs) ->
+            {:ok, false}
+
+          true ->
+            {:error, :dispatch_lookup_truncated}
+        end
+
+      %{status: status} ->
+        {:error, :dispatch_lookup, status}
+    end
+  end
+
   def do_handle_call(:merge_backend_snapshot, {{:raw, token}, _} = conn, {}) do
     {:ok, setting} = backend_selection(conn)
     backend = setting.backend
@@ -813,6 +854,22 @@ defmodule BorsNG.GitHub.Server do
 
       e ->
         {:error, :get_pr_comments, e.status, number}
+    end
+  end
+
+  def do_handle_call(:notice_comments_since, conn, {number, since}) do
+    path = "issues/#{number}/comments?per_page=100&since=" <> since
+
+    case get!(conn, path) do
+      %{status: 200, body: raw} ->
+        comments = Jason.decode!(raw)
+
+        if is_list(comments),
+          do: {:ok, Enum.map(comments, & &1["body"])},
+          else: {:error, :comment_lookup_invalid}
+
+      %{status: status} ->
+        {:error, :comment_lookup, status}
     end
   end
 

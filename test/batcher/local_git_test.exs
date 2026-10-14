@@ -7,7 +7,7 @@ defmodule BorsNG.Worker.LocalGitTest do
   test "real Git assembly, conflicts, immutable inputs, restart, concurrency and leased push" do
     {output, status} = System.cmd("python3", ["test/local_git_test.py"], stderr_to_stdout: true)
     assert status == 0, output
-    assert output =~ "Ran 11 tests"
+    assert output =~ "Ran 12 tests"
   end
 
   test "only the scoped main project can select local assembly" do
