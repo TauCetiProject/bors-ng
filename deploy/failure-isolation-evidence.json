@@ -1,0 +1,81 @@
+{
+  "method": "Read-only trusted Git blob diagnostics at exact historical assembled trees; never execute candidate code. Timings are local observations, not promises.",
+  "samples": [
+    {
+      "batch": 639,
+      "members": 15,
+      "base_sha": "0a4ee4102c6ab9af0285c16cf172b60f0dbac162",
+      "tested_commit": "74a93ca106dbacd84f94e7868d103e2715db7cd7",
+      "run_url": "https://github.com/TauCetiProject/TauCeti/actions/runs/38481431732",
+      "elapsed_seconds": 0.82,
+      "complete": true,
+      "changed_paths": 68,
+      "direct_dependency_paths": 153,
+      "import_edges": [],
+      "missing_imports": []
+    },
+    {
+      "batch": 634,
+      "members": 9,
+      "base_sha": "205510517279d669a3f483f4ec3fa05860f7dd02",
+      "tested_commit": "0ecd744f7401badaa2187560cff6bca0af6f440e",
+      "run_url": "https://github.com/TauCetiProject/TauCeti/actions/runs/38470193367",
+      "elapsed_seconds": 0.956,
+      "complete": true,
+      "changed_paths": 72,
+      "direct_dependency_paths": 193,
+      "import_edges": [],
+      "missing_imports": []
+    },
+    {
+      "batch": 631,
+      "members": 52,
+      "base_sha": "926074e20d242d79d860c429ec488b42094bfbec",
+      "tested_commit": "d47d151d948453dad5e41ec3d4d9bade150baa54",
+      "run_url": "https://github.com/TauCetiProject/TauCeti/actions/runs/38462342074",
+      "elapsed_seconds": 1.98,
+      "complete": true,
+      "changed_paths": 164,
+      "direct_dependency_paths": 341,
+      "import_edges": [
+        [
+          15865,
+          15870
+        ],
+        [
+          15914,
+          15980
+        ],
+        [
+          15924,
+          15977
+        ],
+        [
+          15977,
+          15924
+        ]
+      ],
+      "missing_imports": [
+        {
+          "pr": 15876,
+          "path": "TauCeti/AlgebraicTopology/DGLocalSystem/PathBimodule.lean",
+          "module": "TauCeti.Topology.PathSpace.Moore.Between",
+          "provider_path": "TauCeti/Topology/PathSpace/Moore/Between.lean"
+        }
+      ]
+    },
+    {
+      "batch": 622,
+      "members": 2,
+      "base_sha": "eae7f76da7948d09c56f491e3315d690f7227b29",
+      "tested_commit": "2b8d1cd27d76dab6267f12f04ebf0e43f042e880",
+      "run_url": "https://github.com/TauCetiProject/TauCeti/actions/runs/38444646353",
+      "elapsed_seconds": 0.596,
+      "complete": true,
+      "changed_paths": 36,
+      "direct_dependency_paths": 129,
+      "import_edges": [],
+      "missing_imports": []
+    }
+  ]
+}

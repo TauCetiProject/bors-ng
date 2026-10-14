@@ -103,6 +103,11 @@ defmodule BorsNG.GitHub do
     call_with_retry(:get_pr_compare, repo_conn, {base, head}, 500, 4_000)
   end
 
+  # One bounded exact-base comparison; truncation never grants a retry.
+  def failure_base_changes(repo_conn, base, head) do
+    call_with_retry(:failure_base_changes, repo_conn, {base, head}, 500, 1_000)
+  end
+
   @doc """
   How `head` relates to `base`: `:ahead` / `:identical` mean `head`
   contains `base`'s current tip (i.e. it is rebased on it).

@@ -27,6 +27,7 @@ defmodule BorsNG.Worker.LocalGit do
          Enum.all?(expected, &(&1["head_sha"] == &1["assembly_head_sha"])) do
       request = %{
         operation: "assemble",
+        diagnostics: BorsNG.Worker.FailureIsolation.enabled?(),
         identity: CandidateAssembler.identity(candidate),
         members: Enum.map(members, &Map.put(&1, :head_sha, &1.source_sha)),
         date: Map.get(context, :date, DateTime.to_iso8601(DateTime.utc_now()))

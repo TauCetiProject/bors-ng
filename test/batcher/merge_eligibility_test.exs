@@ -128,6 +128,47 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
     {Repo.get!(Patch, patch.id), batch, current}
   end
 
+  test "relevant dependency advance reconsiders a source singleton through ordinary gates", %{
+    project: p
+  } do
+    alias BorsNG.Worker.CandidateJournal
+    MergeEligibility.reconcile(p, 1)
+    patch = Repo.get_by!(Patch, project_id: p.id, pr_xref: 1)
+    batch = Repo.one!(Batch.all_for_project(p.id, :incomplete))
+
+    candidate =
+      CandidateJournal.begin(batch, Repo.all(LinkPatchBatch.from_batch(batch.id)), @base)
+
+    CandidateJournal.event(candidate, "local_assembled", "bors.local_git", %{
+      evidence: %{
+        diagnostic_hints: %{
+          complete: true,
+          changed_files: [%{pr: 1, head_sha: @head, paths: ["TauCeti/Importer.lean"]}],
+          dependency_paths: ["TauCeti/Provider.lean"]
+        }
+      }
+    })
+
+    batch |> Batch.changeset(%{state: :error, base_sha: @base}) |> Repo.update!()
+    patch = patch |> Patch.changeset(%{bundle_reviewer: nil}) |> Repo.update!()
+    QueueApproval.fail([patch], batch, :build)
+    current = String.duplicate("c", 40)
+    update_repo(:branches, %{"main" => current})
+    update_repo(:failure_base_changes, %{{@base, current} => {:ok, ["unrelated.lean"]}})
+    MergeEligibility.reconcile(p, 1)
+    assert Repo.all(Batch.all_for_project(p.id, :incomplete)) == []
+    update_repo(:failure_base_changes, %{{@base, current} => {:ok, ["TauCeti/Provider.lean"]}})
+    MergeEligibility.reconcile(p, 1)
+    recovered = Repo.get!(Patch, patch.id)
+    assert recovered.queue_pending
+    assert recovered.queue_approval["head_sha"] == @head
+    assert recovered.merge_eligibility["failure_retry_base"] == current
+    child = Repo.one!(Batch.all_for_project(p.id, :incomplete))
+    assert Repo.one!(LinkPatchBatch.from_batch(child.id)).head_sha == @head
+    MergeEligibility.reconcile(p, 1)
+    assert Repo.one!(Batch.all_for_project(p.id, :incomplete)).id == child.id
+  end
+
   test "automatic bump priority promotes an existing singleton without interrupting running CI",
        %{project: p} do
     {patch, _, _} = failed_bump(p)
