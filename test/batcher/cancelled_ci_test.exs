@@ -320,6 +320,26 @@ defmodule BorsNG.Worker.BatcherCancelledCITest do
     assert Repo.all(Batch.all_for_project(ctx.project.id)) |> length() == 1
   end
 
+  test "an obsolete failure webhook at the deadline cannot override newer success", ctx do
+    ctx.batch
+    |> Batch.changeset(%{timeout_at: DateTime.to_unix(DateTime.utc_now()) - 1})
+    |> Repo.update!()
+
+    state = GitHub.ServerMock.get_state()
+
+    repo =
+      state[{{:installation, 91}, 14}]
+      |> Map.put(:branches, %{"master" => "base"})
+      |> put_in([:statuses, "staged"], %{"build" => :ok})
+      |> put_in([:files, "staging"], %{"bors.toml" => ~s/status = [ "build" ]/})
+
+    GitHub.ServerMock.put_state(Map.put(state, {{:installation, 91}, 14}, repo))
+    Batcher.handle_cast({:status, {"staged", "build", :error, "old-run"}}, ctx.project.id)
+    assert Repo.get!(Batch, ctx.batch.id).state == :ok
+    assert Repo.get!(Batch, ctx.batch.id).recovery_failures == 0
+    assert Repo.all(Batch.all_for_project(ctx.project.id)) |> length() == 1
+  end
+
   test "an API outage does not discard green CI held for promotion", ctx do
     ctx.batch
     |> Batch.changeset(%{timeout_at: DateTime.to_unix(DateTime.utc_now()) - 1})

@@ -303,7 +303,15 @@ defmodule BorsNG.Worker.Batcher do
         |> Repo.update_all(set: [state: state, url: url, identifier: identifier])
 
       if updated > 0 and batch.state == :running do
-        maybe_complete_batch(batch)
+        if expired_staging?(batch) and
+             (batch.recovery_after || 0) <= DateTime.to_unix(DateTime.utc_now()) and
+             (batch.promotion_retry_at || 0) <= DateTime.to_unix(DateTime.utc_now()) do
+          # A delayed event may omit a newer successful verdict. Read the
+          # current head before releasing its staging attempt at the deadline.
+          poll_running_batch(batch)
+        else
+          maybe_complete_batch(batch)
+        end
       end
     end)
   end
