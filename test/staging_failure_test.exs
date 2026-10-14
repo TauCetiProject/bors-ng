@@ -196,6 +196,44 @@ defmodule BorsNG.StagingFailureTest do
     end
   end
 
+  test "green workflow with a red required scope status retains native failure isolation" do
+    # Scope is a separate merge gate. The workflow reporters can post red scope
+    # and still finish green because their exit code follows the build verdict.
+    run = %{"id" => 123, "run_attempt" => 1, "conclusion" => "success"}
+
+    jobs =
+      ["sandboxed-build", "publish-merge-group-cache / publish", "finalize-merge-group-build"]
+      |> Enum.with_index(1)
+      |> Enum.map(fn {name, id} ->
+        %{
+          "id" => id,
+          "run_id" => 123,
+          "name" => name,
+          "status" => "completed",
+          "conclusion" => "success",
+          "steps" => []
+        }
+      end)
+
+    assert {:conclusive, %{diagnostic: "unknown_terminal_failure_bisect"}} =
+             StagingFailure.classify_jobs(run, %{"total_count" => length(jobs), "jobs" => jobs})
+
+    # GitHub may retain failure for a continue-on-error statistics step while
+    # every job stays green. Candidate telemetry must not decide this verdict.
+    [sandbox | rest] = jobs
+
+    sandbox = %{
+      sandbox
+      | "steps" => [%{"name" => "Upload CI telemetry", "number" => 40, "conclusion" => "failure"}]
+    }
+
+    assert {:conclusive, %{diagnostic: "unknown_terminal_failure_bisect"}} =
+             StagingFailure.classify_jobs(run, %{
+               "total_count" => length(jobs),
+               "jobs" => [sandbox | rest]
+             })
+  end
+
   test "red verdict reporters cannot disguise config failures as infrastructure" do
     run = %{"id" => 123, "run_attempt" => 1, "conclusion" => "failure"}
     step = fn name -> %{"name" => name, "conclusion" => "failure", "number" => 1} end

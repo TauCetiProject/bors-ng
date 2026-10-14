@@ -49,7 +49,7 @@ defmodule BorsNG.Worker.FailureIsolationTest do
       )
     end)
 
-    links = Repo.all(LinkPatchBatch.from_batch(batch.id))
+    links = stored_links(batch.id)
 
     hints = %{
       "complete" => true,
@@ -81,6 +81,12 @@ defmodule BorsNG.Worker.FailureIsolationTest do
      candidate: candidate}
   end
 
+  defp stored_links(batch_id) do
+    Repo.all(
+      from(l in LinkPatchBatch, where: l.batch_id == ^batch_id, order_by: l.id, preload: [:patch])
+    )
+  end
+
   defp prs(groups), do: Enum.map(groups, fn g -> Enum.map(g, & &1.patch.pr_xref) end)
 
   test "a missing provider narrows the importer and leaves all innocent approvals", c do
@@ -98,7 +104,7 @@ defmodule BorsNG.Worker.FailureIsolationTest do
     children = Repo.all(from(b in Batch, where: b.id != ^c.batch.id, order_by: b.id))
     assert Enum.all?(children, & &1.sealed)
 
-    assert prs(Enum.map(children, &Repo.all(LinkPatchBatch.from_batch(&1.id)))) == [
+    assert prs(Enum.map(children, &stored_links(&1.id))) == [
              [3],
              [1, 2, 4]
            ]
@@ -167,7 +173,7 @@ defmodule BorsNG.Worker.FailureIsolationTest do
     assert :retrying = FailureIsolation.split(c.links, c.batch)
     children = Repo.all(from(b in Batch, where: b.id != ^c.batch.id, order_by: b.id))
 
-    assert prs(Enum.map(children, &Repo.all(LinkPatchBatch.from_batch(&1.id)))) == [
+    assert prs(Enum.map(children, &stored_links(&1.id))) == [
              [1, 2],
              [3, 4]
            ]
@@ -198,7 +204,7 @@ defmodule BorsNG.Worker.FailureIsolationTest do
       )
 
     singleton =
-      CandidateJournal.begin(batch, Repo.all(LinkPatchBatch.from_batch(batch.id)), "base")
+      CandidateJournal.begin(batch, stored_links(batch.id), "base")
 
     hints = %{c.hints | "changed_files" => [hd(c.hints["changed_files"])]}
 
@@ -295,10 +301,32 @@ defmodule BorsNG.Worker.FailureIsolationTest do
     assert :retrying = FailureIsolation.split(c.links, c.batch)
     children = Repo.all(from(b in Batch, where: b.id != ^c.batch.id, order_by: b.id))
 
-    assert prs(Enum.map(children, &Repo.all(LinkPatchBatch.from_batch(&1.id)))) == [
+    assert prs(Enum.map(children, &stored_links(&1.id))) == [
              [1, 2],
              [3, 4]
            ]
+  end
+
+  test "restart and unordered database reads retain frozen candidate split order", c do
+    CandidateJournal.begin(c.batch, Enum.reverse(c.links), "base")
+    # Simulate a crash after committing only the first half. Replaying a
+    # different SQL row order must create exactly the original second half.
+    BorsNG.Worker.Batcher.Divider.clone_batch(
+      Enum.take(Enum.reverse(c.links), 2),
+      c.project.id,
+      "main",
+      "bisection"
+    )
+
+    shuffled = Enum.drop(c.links, 1) ++ Enum.take(c.links, 1)
+    assert :retrying = FailureIsolation.split(shuffled, c.batch)
+    children = Repo.all(from(b in Batch, where: b.id != ^c.batch.id, order_by: b.id))
+    assert prs(Enum.map(children, &stored_links(&1.id))) == [[4, 3], [2, 1]]
+
+    assert :retrying =
+             FailureIsolation.split(Enum.drop(c.links, 1) ++ Enum.take(c.links, 1), c.batch)
+
+    assert Repo.aggregate(Batch, :count, :id) == 3
   end
 
   test "quarantine cannot bind diagnostic completeness to a changed head", c do
@@ -337,7 +365,7 @@ defmodule BorsNG.Worker.FailureIsolationTest do
     assert :retrying = FailureIsolation.split(c.links, c.batch, %{})
     children = Repo.all(from(b in Batch, where: b.id != ^c.batch.id, order_by: b.id))
 
-    assert prs(Enum.map(children, &Repo.all(LinkPatchBatch.from_batch(&1.id)))) == [
+    assert prs(Enum.map(children, &stored_links(&1.id))) == [
              [3],
              [1, 2, 4]
            ]
