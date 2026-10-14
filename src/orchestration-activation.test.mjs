@@ -20,6 +20,43 @@ test('activation stops a running old environment once before acknowledging the m
   assert.deepEqual(calls, [15]);
 });
 
+test('train canary epoch refreshes an already activated warm container without clearing durable work', async () => {
+  const storage = state();
+  const key = 'bors-async-orchestration-activation';
+  await storage.put(key, 'outbox-v1');
+  await storage.put('pending-work', {reservation: 42, approval: 'retained'});
+  let stopped;
+  const signals = [];
+  const container = {running: true, monitor: () => new Promise(resolve => {stopped = resolve;}),
+    signal: signal => signals.push(signal),
+    destroy: async () => assert.fail('graceful shutdown should complete')};
+  const activation = activateOrchestration(storage, container, () => new Promise(() => {}));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(signals, [15]);
+  assert.equal(await storage.get(key), 'outbox-v1');
+  container.running = false;
+  stopped();
+  await activation;
+  assert.equal(await storage.get(key), 'outbox-v2-train-canary-1');
+  assert.deepEqual(await storage.get('pending-work'), {reservation: 42, approval: 'retained'});
+  container.running = true;
+  await activateOrchestration(storage, container);
+  assert.deepEqual(signals, [15]);
+});
+
+test('failed warm canary refresh retains the old epoch until a successful retry', async () => {
+  const storage = state();
+  const key = 'bors-async-orchestration-activation';
+  await storage.put(key, 'outbox-v1');
+  const container = {running: true, monitor: () => new Promise(() => {}), signal: () => {},
+    destroy: async () => {throw new Error('unavailable');}};
+  await assert.rejects(activateOrchestration(storage, container, async () => {}), /unavailable/);
+  assert.equal(await storage.get(key), 'outbox-v1');
+  container.destroy = async () => {container.running = false;};
+  await activateOrchestration(storage, container, async () => {});
+  assert.equal(await storage.get(key), 'outbox-v2-train-canary-1');
+});
+
 test('a fresh stopped container needs no restart', async () => {
   const storage = state();
   const container = {running: false};

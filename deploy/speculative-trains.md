@@ -94,6 +94,13 @@ Activation is a separate reviewed deployment configuring:
 - `BORS_SPECULATION_CANARY_SUCCESSORS=1` initially; never raise it to compensate
   for an identity or approval failure.
 
+The initial canary advances the Durable Object's one-shot startup epoch from
+`outbox-v1` to `outbox-v2-train-canary-1`. A warm container receives a bounded
+graceful stop before the new epoch is acknowledged; a failed stop retries without
+clearing durable work or reservations. Later requests at the same epoch do not
+restart the container. Confirm `/health/` returns `x-bors-speculative-trains: true`:
+that header reads the backend process environment, not the Worker's configuration.
+
 Capture before/after health, observation/v1 and candidate journal snapshots;
 verify TauCetiReview's current observation validator and account for every
 approval change. Observe an A/B pair with distinct exact refs and matching trusted
