@@ -262,8 +262,85 @@ defmodule BorsNG.Worker.FailureIsolationTest do
                d
              )
 
+    capped = %{
+      failed
+      | merge_eligibility: %{"head_sha" => failed.commit, "failure_retry_count" => 3}
+    }
+
+    assert :defer = FailureIsolation.reconsider(conn, capped, d)
+
+    events =
+      Repo.all(
+        from(e in CandidateEvent,
+          where: e.candidate_id == ^singleton.id and e.kind == "quarantine_reconsidered"
+        )
+      )
+
+    assert length(events) == 1
     # Planning never restores an approval or grants admission itself.
     refute Repo.get!(Patch, failed.id).queue_pending
+  end
+
+  test "unknown terminal diagnostics force deterministic bisection even with graph hints", c do
+    hints = Map.put(c.hints, "import_edges", [[1, 3]])
+
+    CandidateJournal.event(c.candidate, "local_assembled", "bors.local_git", %{
+      evidence: %{diagnostic_hints: hints}
+    })
+
+    CandidateJournal.event(c.candidate, "failure_classified", "bors.trusted_failure", %{
+      evidence: %{diagnostic: "unknown_terminal_failure_bisect"}
+    })
+
+    assert :retrying = FailureIsolation.split(c.links, c.batch)
+    children = Repo.all(from(b in Batch, where: b.id != ^c.batch.id, order_by: b.id))
+
+    assert prs(Enum.map(children, &Repo.all(LinkPatchBatch.from_batch(&1.id)))) == [
+             [1, 2],
+             [3, 4]
+           ]
+  end
+
+  test "quarantine cannot bind diagnostic completeness to a changed head", c do
+    [link | _] = c.links
+    q = FailureIsolation.quarantine(%{link.patch | commit: "newhead"}, c.batch, :build)
+    assert q["head_sha"] == link.head_sha
+    refute q["diagnostics_complete"]
+
+    changed =
+      link.patch
+      |> Patch.changeset(%{
+        commit: "newhead",
+        queue_approval: %{"state" => "approved", "head_sha" => "newhead"}
+      })
+      |> Repo.update!()
+
+    QueueApproval.fail([changed], c.batch, :build)
+    assert Repo.get!(Patch, changed.id).queue_approval["state"] == "approved"
+  end
+
+  test "feature off restores legacy conflict isolation and skips diagnostic hints", c do
+    System.put_env("BORS_FAILURE_DIAGNOSTICS", "off")
+    on_exit(fn -> System.delete_env("BORS_FAILURE_DIAGNOSTICS") end)
+    conn = {{:installation, 91}, 14}
+
+    GitHub.ServerMock.put_state(%{
+      conn => %{
+        pulls:
+          Map.new(c.links, fn l ->
+            {l.patch.pr_xref,
+             %GitHub.Pr{number: l.patch.pr_xref, mergeable: l.patch.pr_xref != 3}}
+          end)
+      }
+    })
+
+    assert :retrying = FailureIsolation.split(c.links, c.batch, %{})
+    children = Repo.all(from(b in Batch, where: b.id != ^c.batch.id, order_by: b.id))
+
+    assert prs(Enum.map(children, &Repo.all(LinkPatchBatch.from_batch(&1.id)))) == [
+             [3],
+             [1, 2, 4]
+           ]
   end
 
   test "classification is bound to the exact generation and ignores stale commits", c do

@@ -26,26 +26,30 @@ defmodule BorsNG.Worker.QueueApproval do
 
   def fail(patches, batch, reason) do
     Enum.each(patches, fn patch ->
-      quarantine = BorsNG.Worker.FailureIsolation.quarantine(patch, batch, reason)
+      link = Repo.get_by(LinkPatchBatch, batch_id: batch.id, patch_id: patch.id)
+      # A delayed result for an old approved head cannot quarantine its successor.
+      if is_nil(link) or is_nil(link.head_sha) or link.head_sha == patch.commit do
+        quarantine = BorsNG.Worker.FailureIsolation.quarantine(patch, batch, reason)
 
-      BorsNG.Worker.CandidateJournal.event(
-        BorsNG.Worker.CandidateJournal.latest(batch.id),
-        "head_quarantined",
-        "bors.indivisible_failure",
-        %{pr: patch.pr_xref, quarantine: quarantine}
-      )
+        BorsNG.Worker.CandidateJournal.event(
+          BorsNG.Worker.CandidateJournal.latest(batch.id),
+          "head_quarantined",
+          "bors.indivisible_failure",
+          %{pr: patch.pr_xref, quarantine: quarantine}
+        )
 
-      approval = %{
-        "head_sha" => patch.commit,
-        "state" => "failed",
-        "batch_id" => batch.id,
-        "reason" => to_string(reason),
-        "quarantine" => quarantine
-      }
+        approval = %{
+          "head_sha" => patch.commit,
+          "state" => "failed",
+          "batch_id" => batch.id,
+          "reason" => to_string(reason),
+          "quarantine" => quarantine
+        }
 
-      patch
-      |> Patch.changeset(%{queue_approval: approval, queue_pending: false})
-      |> Repo.update!()
+        patch
+        |> Patch.changeset(%{queue_approval: approval, queue_pending: false})
+        |> Repo.update!()
+      end
     end)
   end
 

@@ -153,7 +153,6 @@ class Mirror:
         # Squash parents alone lose ancestry of earlier (possibly stacked) PRs.
         merge_head = base
         commits = []
-        hints = self.diagnostic_hints(base, members) if self.request.get('diagnostics', True) else dict(complete=False, reason='disabled')
         for member in members:
             if self.git('merge-base', '--is-ancestor', member['head_sha'], merge_head, check=False)[1] == 0:
                 return dict(status='conflict', details=dict(kind='already_merged',
@@ -162,6 +161,7 @@ class Mirror:
                                       merge_head, member['head_sha'], check=False)
             fields = output.split('\0')
             if status == 1:
+                hints = self.diagnostic_hints(base, members) if self.request.get('diagnostics', True) else dict(complete=False, reason='disabled')
                 paths = fields[1:fields.index('', 1)] if '' in fields[1:] else fields[1:]
                 return dict(status='conflict', details=dict(kind='merge_conflict',
                             pr=member['pr'], head_sha=member['head_sha'], paths=paths,
@@ -182,6 +182,7 @@ class Mirror:
                                       input='[ci skip][skip ci] bors local merge ancestry\n',
                                       extra_env=env)[0].strip()
             commits.append(dict(pr=member['pr'], head_sha=member['head_sha'], commit=prev, tree=tree))
+        hints = self.diagnostic_hints(base, members, prev) if self.request.get('diagnostics', True) else dict(complete=False, reason='disabled')
         tree = self.git('rev-parse', prev + '^{tree}')[0].strip()
         self.git('update-ref', 'refs/bors/result', prev)
         self.enforce_budget()
@@ -197,7 +198,7 @@ class Mirror:
                     commits=commits, git_version=self.git('--version')[0].strip(),
                     mirror_bytes=size(self.repo))
 
-    def diagnostic_hints(self, base, members):
+    def diagnostic_hints(self, base, members, candidate=None):
         # These are scheduling hints, never proof verdicts. Read immutable Git
         # blobs as data; no candidate parser, executable, metrics or cache.
         previous_deadline = self.deadline
@@ -228,7 +229,7 @@ class Mirror:
                     reads += 1
                     if reads > 256:
                         raise Failure('diagnostic_limit')
-                    content, absent = self.git('show', member['head_sha'] + ':' + path, check=False)
+                    content, absent = self.git('show', (candidate or member['head_sha']) + ':' + path, check=False)
                     if absent:
                         continue
                     if len(content) > 256 * 1024:
@@ -240,21 +241,24 @@ class Mirror:
                         for owner in owners.get(provider, []):
                             if owner != member['pr']:
                                 edges.append([member['pr'], owner])
-                        exists = self.git('cat-file', '-e', member['head_sha'] + ':' + provider,
+                        exists = self.git('cat-file', '-e', (candidate or member['head_sha']) + ':' + provider,
                                           check=False)[1] == 0
                         if not exists:
                             missing.append(dict(pr=member['pr'], path=path, module=module,
                                                 provider_path=provider))
-                        else:
-                            pending.append(provider)
+                        # Direct imports only. Whole-project/transitive walks
+                        # can exhaust the budget on ordinary large batches;
+                        # unobserved dependencies remain unknown, not absent.
             hints = dict(complete=True, changed_files=changed, import_edges=edges,
                          missing_imports=missing, dependency_paths=sorted(dependencies))
             if len(json.dumps(hints)) > 256 * 1024:
                 raise Failure('diagnostic_limit')
             return hints
-        except (Failure, UnicodeError):
+        except Failure as error:
             # Missing/large/ambiguous diagnostics cannot fail construction.
-            return dict(complete=False, reason='bounded_diagnostics_unavailable')
+            return dict(complete=False, reason=error.details['kind'])
+        except UnicodeError:
+            return dict(complete=False, reason='non_text_source')
         finally:
             self.deadline = previous_deadline
 

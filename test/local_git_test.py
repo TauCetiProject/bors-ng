@@ -138,10 +138,23 @@ class LocalGitTest(unittest.TestCase):
         hints = result['diagnostic_hints']
         self.assertTrue(hints['complete'])
         self.assertIn([1, 2], hints['import_edges'])
-        self.assertEqual(hints['missing_imports'][0]['provider_path'], 'TauCeti/Provider.lean')
+        self.assertEqual(hints['missing_imports'], [])
         self.assertIn('TauCeti/Provider.lean', hints['dependency_paths'])
         self.assertEqual(hints['changed_files'][0]['head_sha'], importer)
         self.assertEqual(local.local_imports('/- import TauCeti.Fake /- nested -/ -/\nmodule\nimport TauCeti.Real -- comment\ndef x := 1'), ['TauCeti.Real'])
+        self.request['members'] = [self.member(1, importer)]
+        self.assertEqual(self.run_mirror()['diagnostic_hints']['missing_imports'][0]['provider_path'], 'TauCeti/Provider.lean')
+
+    def test_provider_removed_by_base_is_checked_at_assembled_tree(self):
+        old_base = self.commit(self.base, {'TauCeti/Provider.lean': 'def x := 1\n'})
+        importer = self.commit(old_base, {'Importer.lean': 'module\nimport TauCeti.Provider\n'})
+        advanced_base = self.commit(old_base, {'TauCeti/Provider.lean': None})
+        self.request['identity']['base_sha'] = advanced_base
+        self.request['members'] = [self.member(1, importer)]
+        hints = self.run_mirror()['diagnostic_hints']
+        self.assertTrue(hints['complete'])
+        self.assertEqual(hints['changed_files'][0]['head_sha'], importer)
+        self.assertEqual(hints['missing_imports'][0]['provider_path'], 'TauCeti/Provider.lean')
 
     def test_import_limits_and_ambiguous_headers_do_not_fail_assembly(self):
         head = self.commit(self.base, {'Broken.lean': 'module\nimport «TauCeti.Quoted»\n'})

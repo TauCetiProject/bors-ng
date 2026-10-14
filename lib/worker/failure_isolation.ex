@@ -27,7 +27,9 @@ defmodule BorsNG.Worker.FailureIsolation do
   def split(links, batch, conflict \\ nil) do
     candidate = CandidateJournal.latest(batch.id)
 
-    case partition(links, if(enabled?(), do: hints(candidate)), conflict) do
+    hints = if enabled?() and not uncertain_terminal?(candidate), do: hints(candidate)
+
+    case partition(links, hints, conflict) do
       {:ok, groups, reason} ->
         CandidateJournal.event(candidate, "failure_partition", "bors.failure_isolation", %{
           strategy: reason,
@@ -48,10 +50,29 @@ defmodule BorsNG.Worker.FailureIsolation do
           reason: "unknown, ambiguous or non-narrowing diagnostics"
         })
 
-        if conflict && length(Divider.group_units(links)) == 1,
-          do: Divider.split_batch_with_conflicts(links, batch),
-          else: Divider.split_batch(links, batch)
+        if conflict &&
+             (not enabled?() or conflict["kind"] != "merge_conflict" or
+                length(Divider.group_units(links)) == 1),
+           do: Divider.split_batch_with_conflicts(links, batch),
+           else: Divider.split_batch(links, batch)
     end
+  end
+
+  defp uncertain_terminal?(nil), do: false
+
+  defp uncertain_terminal?(candidate) do
+    event =
+      Repo.one(
+        from(e in CandidateEvent,
+          where:
+            e.candidate_id == ^candidate.id and e.kind == "failure_classified" and
+              e.source == "bors.trusted_failure",
+          order_by: [desc: e.id],
+          limit: 1
+        )
+      )
+
+    event != nil and get_in(event.details, ["evidence", "diagnostic"]) != nil
   end
 
   # Pure planner. Every result is a strict partition of atomic bundle units.
@@ -168,7 +189,15 @@ defmodule BorsNG.Worker.FailureIsolation do
   # policy decision, then passes ordinary live admission. Human scope approvals
   # and terminal bundles still require fresh review. Uncertain comparisons hold.
   def reconsider(conn, patch, decision) do
+    metadata =
+      if get_in(patch.merge_eligibility || %{}, ["head_sha"]) == patch.commit,
+        do: patch.merge_eligibility,
+        else: %{}
+
+    count = metadata["failure_retry_count"] || 0
+
     with true <- enabled?(),
+         true <- is_integer(count) and count >= 0 and count < 3,
          nil <- patch.manual_approval,
          nil <- patch.bundle_id,
          true <- decision["eligible"] and decision["review_safe"],
@@ -194,20 +223,42 @@ defmodule BorsNG.Worker.FailureIsolation do
            current != base and current != (patch.merge_eligibility || %{})["failure_retry_base"],
          {:ok, changed} <- BorsNG.GitHub.failure_base_changes(conn, base, current),
          relevant when relevant != [] <- Enum.filter(changed, &(&1 in q["paths"])) do
-      CandidateJournal.event(
-        Repo.get(BorsNG.Database.Candidate, q["candidate_id"]),
-        "quarantine_reconsidered",
-        "github.compare",
-        %{
-          head_sha: head,
-          failed_base: base,
-          current_base: current,
-          changed_paths: relevant,
-          authority: "ordinary_admission_required"
-        }
-      )
+      candidate = Repo.get(BorsNG.Database.Candidate, q["candidate_id"])
+      # A blocked admission can revisit the same comparison. Keep evidence
+      # append-only but deduplicate its exact head/base observation.
+      already_recorded =
+        if candidate,
+          do:
+            Repo.exists?(
+              from(e in CandidateEvent,
+                where:
+                  e.candidate_id == ^candidate.id and e.kind == "quarantine_reconsidered" and
+                    e.details["current_base"] == ^current
+              )
+            ),
+          else: true
 
-      {:retry, %{"failure_retry_base" => current, "failure_retry_candidate" => q["candidate_id"]}}
+      unless already_recorded do
+        CandidateJournal.event(
+          candidate,
+          "quarantine_reconsidered",
+          "github.compare",
+          %{
+            head_sha: head,
+            failed_base: base,
+            current_base: current,
+            changed_paths: relevant,
+            authority: "ordinary_admission_required"
+          }
+        )
+      end
+
+      {:retry,
+       %{
+         "failure_retry_base" => current,
+         "failure_retry_candidate" => q["candidate_id"],
+         "failure_retry_count" => count + 1
+       }}
     else
       _ -> :defer
     end
@@ -234,7 +285,7 @@ defmodule BorsNG.Worker.FailureIsolation do
 
     %{
       "candidate_id" => if(candidate, do: candidate.id),
-      "head_sha" => patch.commit,
+      "head_sha" => member["head_sha"],
       "base_sha" => if(candidate, do: candidate.snapshot["base_sha"], else: batch.base_sha),
       "reason" =>
         "indivisible #{reason} failure at this exact head/base; bundle members are not individually blamed",
@@ -245,7 +296,9 @@ defmodule BorsNG.Worker.FailureIsolation do
             (hints["dependency_paths"] || []) ++
             ~w(lean-toolchain lakefile.lean lakefile.toml lake-manifest.json)
         ),
-      "diagnostics_complete" => hints["complete"] == true
+      "diagnostics_complete" =>
+        hints["complete"] == true and member["head_sha"] == patch.commit and
+          member["assembly_head_sha"] == patch.commit
     }
   end
 end

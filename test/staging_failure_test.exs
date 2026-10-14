@@ -121,7 +121,9 @@ defmodule BorsNG.StagingFailureTest do
     }
 
     wrap = fn job -> %{"total_count" => 1, "jobs" => [job]} end
-    assert {:infrastructure, _} = StagingFailure.classify_jobs(run, wrap.(job))
+
+    assert {:conclusive, %{diagnostic: "unknown_terminal_failure_bisect"}} =
+             StagingFailure.classify_jobs(run, wrap.(job))
 
     candidate_step = %{
       "name" => "Build exact candidate under bwrap with workflow-pinned audits, offline",
@@ -133,12 +135,21 @@ defmodule BorsNG.StagingFailureTest do
     assert {:conclusive, _} = StagingFailure.classify_jobs(run, wrap.(failed))
 
     for state <- ["cancelled", "timed_out", "stale", "action_required"] do
-      assert {:infrastructure, _} =
+      assert {:conclusive, _} =
                StagingFailure.classify_jobs(run, wrap.(Map.put(failed, "conclusion", state)))
     end
 
-    assert {:infrastructure, _} =
+    assert {:conclusive, _} =
              StagingFailure.classify_jobs(Map.put(run, "conclusion", "timed_out"), wrap.(failed))
+
+    assert {:infrastructure, _} =
+             StagingFailure.classify_jobs(Map.put(run, "conclusion", "cancelled"), wrap.(failed))
+
+    assert {:conclusive, _} =
+             StagingFailure.classify_jobs(run, %{
+               "total_count" => 2,
+               "jobs" => [failed, %{job | "id" => 457, "conclusion" => "cancelled"}]
+             })
 
     assert :unavailable =
              StagingFailure.classify_jobs(run, %{"total_count" => 2, "jobs" => [failed]})
@@ -151,5 +162,58 @@ defmodule BorsNG.StagingFailureTest do
       ])
 
     assert {:infrastructure, _} = StagingFailure.classify_jobs(run, wrap.(setup))
+  end
+
+  test "red verdict reporters cannot disguise config failures as infrastructure" do
+    run = %{"id" => 123, "run_attempt" => 1, "conclusion" => "failure"}
+    step = fn name -> %{"name" => name, "conclusion" => "failure", "number" => 1} end
+
+    job = %{
+      "run_id" => 123,
+      "id" => 1,
+      "status" => "completed",
+      "name" => "sandboxed-build",
+      "conclusion" => "failure",
+      "steps" => [step.("Report build and bump-guard statuses to the PR head commit")]
+    }
+
+    finalizer = %{
+      job
+      | "id" => 2,
+        "name" => "finalize-merge-group-build",
+        "steps" => [step.("Post the terminal merge-group build status")]
+    }
+
+    wrap = fn jobs -> %{"total_count" => length(jobs), "jobs" => jobs} end
+
+    assert {:conclusive, %{diagnostic: "unknown_terminal_failure_bisect"}} =
+             StagingFailure.classify_jobs(run, wrap.([job, finalizer]))
+
+    setup = %{
+      job
+      | "steps" => [step.("Install elan (trusted, pinned + checksum)") | job["steps"]]
+    }
+
+    assert {:infrastructure, _} = StagingFailure.classify_jobs(run, wrap.([setup, finalizer]))
+
+    metadata = %{
+      job
+      | "steps" => [step.("Prepare merge-group cache artifact metadata") | job["steps"]]
+    }
+
+    assert {:conclusive, _} = StagingFailure.classify_jobs(run, wrap.([metadata, finalizer]))
+    # Reusable publisher step names may change independently. A fully green
+    # sandbox followed by publication/finalization failure remains infrastructure.
+    publisher = %{
+      job
+      | "id" => 3,
+        "name" => "publish-merge-group-cache / publish",
+        "steps" => [step.("Publish exact revision map")]
+    }
+
+    green = %{job | "conclusion" => "success", "steps" => []}
+
+    assert {:infrastructure, _} =
+             StagingFailure.classify_jobs(run, wrap.([green, publisher, finalizer]))
   end
 end

@@ -115,7 +115,13 @@ defmodule BorsNG.Worker.MergeEligibility do
 
     recovery =
       if recovery == :defer and not BumpRecovery.automatic?(patch) do
-        BorsNG.Worker.FailureIsolation.reconsider(conn, patch, d)
+        with :ok <- BorsNG.MergeBackend.allow(project, "main", :admit),
+             {:ok, labels} <- GitHub.get_labels(conn, pr.number),
+             true <- MapSet.disjoint?(MapSet.new(labels, &String.downcase/1), MapSet.new(@keep)) do
+          BorsNG.Worker.FailureIsolation.reconsider(conn, patch, d)
+        else
+          _ -> :defer
+        end
       else
         recovery
       end

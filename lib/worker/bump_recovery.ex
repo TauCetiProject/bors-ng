@@ -133,7 +133,7 @@ defmodule BorsNG.Worker.BumpRecovery do
         do:
           Map.take(
             patch.merge_eligibility,
-            ~w(bump_retry_count bump_retry_base bump_retry_batch)
+            ~w(bump_retry_count bump_retry_base bump_retry_batch failure_retry_count failure_retry_base failure_retry_candidate)
           ),
         else: %{}
 

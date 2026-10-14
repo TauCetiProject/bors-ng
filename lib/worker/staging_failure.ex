@@ -84,6 +84,26 @@ defmodule BorsNG.Worker.StagingFailure do
     "Dot-notation namespace lint (Mathlib type namespaces stay at root)"
   ]
 
+  @infrastructure_prefixes [
+    "Set up job",
+    "Raise vm.",
+    "Resolve PR head",
+    "Checkout ",
+    "Install ",
+    "Restore ",
+    "Fetch ",
+    "Require a complete Mathlib cache",
+    "Decide ",
+    "Configure the Lake artifact cache",
+    "Save verified Lake archive",
+    "Validate Lake archive reuse",
+    "Prepare trusted read-only Lean watchdog",
+    "Build the trusted environment-lint driver",
+    "Hand the merge-group oleans",
+    "Summarise CI telemetry",
+    "Upload CI telemetry"
+  ]
+
   def run_evidence(run) do
     %{
       run_id: run["id"],
@@ -101,7 +121,7 @@ defmodule BorsNG.Worker.StagingFailure do
     valid = Enum.all?(jobs, &(&1["run_id"] == run["id"] and &1["status"] == "completed"))
 
     interrupted =
-      run["conclusion"] in ["cancelled", "timed_out"] or
+      run["conclusion"] == "cancelled" or
         Enum.any?(
           jobs,
           &(&1["conclusion"] in ["cancelled", "timed_out", "stale", "action_required"])
@@ -110,16 +130,54 @@ defmodule BorsNG.Worker.StagingFailure do
     failed =
       Enum.flat_map(jobs, fn j ->
         Enum.filter(j["steps"] || [], &(&1["conclusion"] == "failure"))
-        |> Enum.map(&%{job_id: j["id"], name: &1["name"], number: &1["number"]})
+        |> Enum.map(
+          &%{job_id: j["id"], job_name: j["name"], name: &1["name"], number: &1["number"]}
+        )
       end)
 
     evidence = Map.put(run_evidence(run), :failed_steps, failed)
 
+    # Report/finalizer steps deliberately exit nonzero for a red verdict too.
+    # They cannot establish that the cause was infrastructure. Prefer primary
+    # failed steps; reporter-only failures retain legacy deterministic bisection.
+    primary =
+      Enum.reject(failed, fn step ->
+        is_binary(step.name) and
+          (String.starts_with?(step.name, "Report build and bump-guard statuses") or
+             step.name == "Post the terminal merge-group build status")
+      end)
+
+    sandbox_green =
+      Enum.any?(jobs, &(&1["name"] == "sandboxed-build" and &1["conclusion"] == "success"))
+
     cond do
-      not valid -> :unavailable
-      interrupted -> {:infrastructure, evidence}
-      Enum.any?(failed, &(&1.name in @candidate_steps)) -> {:conclusive, evidence}
-      true -> {:infrastructure, evidence}
+      not valid ->
+        :unavailable
+
+      run["conclusion"] == "cancelled" ->
+        {:infrastructure, evidence}
+
+      Enum.any?(failed, &(&1.name in @candidate_steps)) ->
+        {:conclusive, evidence}
+
+      run["conclusion"] == "timed_out" or Enum.any?(jobs, &(&1["conclusion"] == "timed_out")) ->
+        {:conclusive, Map.put(evidence, :diagnostic, "terminal_timeout")}
+
+      interrupted ->
+        {:infrastructure, evidence}
+
+      sandbox_green ->
+        {:infrastructure, evidence}
+
+      primary != [] and
+          Enum.all?(primary, fn step ->
+            is_binary(step.name) and
+                Enum.any?(@infrastructure_prefixes, &String.starts_with?(step.name, &1))
+          end) ->
+        {:infrastructure, evidence}
+
+      true ->
+        {:conclusive, Map.put(evidence, :diagnostic, "unknown_terminal_failure_bisect")}
     end
   end
 

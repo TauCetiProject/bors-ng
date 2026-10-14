@@ -2975,7 +2975,9 @@ defmodule BorsNG.Worker.Batcher do
   end
 
   defp defer_inconclusive_build(batch, cause) do
-    BorsNG.Worker.FailureIsolation.classified(batch, "inconclusive", %{cause: cause})
+    if cause != :infrastructure,
+      do: BorsNG.Worker.FailureIsolation.classified(batch, "inconclusive", %{cause: cause})
+
     count = (batch.recovery_failures || 0) + 1
     delay = min(300 * Integer.pow(2, min(count - 1, 4)), 3_600)
     # Never monopolize staging indefinitely on unverifiable CI evidence.
