@@ -309,7 +309,17 @@ defmodule BorsNG.Worker.FailureIsolationTest do
 
   test "restart and unordered database reads retain frozen candidate split order", c do
     CandidateJournal.begin(c.batch, Enum.reverse(c.links), "base")
-    assert :retrying = FailureIsolation.split(c.links, c.batch)
+    # Simulate a crash after committing only the first half. Replaying a
+    # different SQL row order must create exactly the original second half.
+    BorsNG.Worker.Batcher.Divider.clone_batch(
+      Enum.take(Enum.reverse(c.links), 2),
+      c.project.id,
+      "main",
+      "bisection"
+    )
+
+    shuffled = Enum.drop(c.links, 1) ++ Enum.take(c.links, 1)
+    assert :retrying = FailureIsolation.split(shuffled, c.batch)
     children = Repo.all(from(b in Batch, where: b.id != ^c.batch.id, order_by: b.id))
     assert prs(Enum.map(children, &stored_links(&1.id))) == [[4, 3], [2, 1]]
 
