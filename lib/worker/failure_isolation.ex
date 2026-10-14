@@ -26,6 +26,7 @@ defmodule BorsNG.Worker.FailureIsolation do
 
   def split(links, batch, conflict \\ nil) do
     candidate = CandidateJournal.latest(batch.id)
+    links = ordered_links(links, candidate)
 
     hints = if enabled?() and not uncertain_terminal?(candidate), do: hints(candidate)
 
@@ -56,6 +57,17 @@ defmodule BorsNG.Worker.FailureIsolation do
            do: Divider.split_batch_with_conflicts(links, batch),
            else: Divider.split_batch(links, batch)
     end
+  end
+
+  # SQL row order is unspecified. Freeze split order to the actual recorded
+  # assembly inputs; historical batches without a candidate use durable link IDs.
+  defp ordered_links(links, candidate) do
+    members = if candidate, do: candidate.snapshot["members"], else: []
+
+    order =
+      Map.new(Enum.with_index(members), fn {member, index} -> {member["link_id"], index} end)
+
+    Enum.sort_by(links, &{Map.get(order, &1.id, map_size(order)), &1.id, &1.patch_id})
   end
 
   defp uncertain_terminal?(nil), do: false

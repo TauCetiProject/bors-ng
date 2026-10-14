@@ -52,6 +52,9 @@ once. A single-only member takes its whole bundle into a separate retry. Unusabl
 ambiguous or non-narrowing evidence falls back to deterministic bundle-aware
 bisection. Nonlocal/disabled diagnostics and lone conflicts keep the existing
 mergeability/bundle isolation semantics.
+Split ordering follows the immutable candidate's recorded assembly inputs;
+historical batches without a snapshot use durable link IDs. Unspecified SQL
+row order cannot alter the split after restart.
 Retries use the existing sealed clone/admission path, preserve exact heads,
 reviewer/manual approval, requested priority and lineage, and reconcile replayed
 children after restart. Multi-member diagnostic suspicions never revoke approval.
