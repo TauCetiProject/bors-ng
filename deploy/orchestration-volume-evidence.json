@@ -160,8 +160,8 @@
     "Long preparation, recursive polls and outgoing labels/status projections can still occupy the single executor. They are measured/bounded next in this same issue."
   ],
   "local_validation": {
-    "postgresql": "1023 tests + 7 doctests passed; final locking run in progress",
-    "mysql": "1023 tests + 7 doctests passed; final locking/cleanup run in progress",
+    "postgresql": "1023 tests + 7 doctests passed on final locking and teardown changes",
+    "mysql": "1023 tests + 7 doctests passed on final locking and teardown changes",
     "focused": "74 ingress/wakeup/routing/orchestration tests; 38 final lock/wakeup/orchestration tests passed"
   },
   "production_rollout": "pending; do not infer a production gain from local tests",
@@ -208,8 +208,24 @@
   ],
   "concurrency_fixtures": {
     "workload": "four concurrent producers, 80 authoritative wakeups, 16 interleaved exact commands, one consumer; no GitHub requests",
-    "postgresql": "80 versions conserved; no pending rows or missing receipts",
-    "mysql": "80 versions conserved; 16 exact commands; 8 completed reads in this run, 24 total claims; no pending rows or missing receipts",
+    "postgresql": {
+      "pending": 0,
+      "claims": 21,
+      "adapter": "BorsNG.Database.RepoPostgres",
+      "acknowledged_wakeups": 80,
+      "command_rows": 16,
+      "completed_reads": 5,
+      "missing_versions": 0
+    },
+    "mysql": {
+      "pending": 0,
+      "claims": 24,
+      "adapter": "BorsNG.Database.RepoMysql",
+      "acknowledged_wakeups": 80,
+      "command_rows": 16,
+      "completed_reads": 8,
+      "missing_versions": 0
+    },
     "limits": "Synthetic database operation counts, not a production API or throughput saving. Command/timer ordering and stale-token cases have separate regressions."
   }
 }
