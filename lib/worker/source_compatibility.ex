@@ -173,9 +173,10 @@ defmodule BorsNG.Worker.SourceCompatibility do
           r["status"] == "pass" and requested?(patch, patch.commit) and
             r["repair_policy"] == @policy and r["repair_base"] != base
 
-        r["base_sha"] == base and r["head_sha"] == patch.commit and r["policy"] == @policy and
-          not resolving and
-          (r["status"] not in ["conflict", "missing_source"] or requested?(patch, patch.commit))
+        BorsNG.Worker.BumpRecovery.automatic?(patch) or
+          (r["base_sha"] == base and r["head_sha"] == patch.commit and r["policy"] == @policy and
+             not resolving and
+             (r["status"] not in ["conflict", "missing_source"] or requested?(patch, patch.commit)))
       end)
 
     members = Enum.map(pending, &%{pr: &1.pr_xref, head_sha: &1.commit})

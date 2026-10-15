@@ -88,7 +88,7 @@ class LocalGitTest(unittest.TestCase):
         self.assertEqual(local.compatibility_imports(
             'module\npublic import\n TauCeti.Real\nprivate def localName := 1\n'), ['TauCeti.Real'])
         for header in ['private import TauCeti.Missing', 'import «TauCeti.Hidden»',
-                       'importFoo TauCeti.Hidden', 'import', 'module module import TauCeti.X', 'import TauCeti.' + 'x' * 513]:
+                       'importFoo TauCeti.Hidden', 'import', 'module module import TauCeti.X', 'import TauCeti.' + 'x' * 513, 'import\u00a0TauCeti.Hidden']:
             with self.assertRaises(local.Failure, msg=header):
                 local.compatibility_imports(header)
 

@@ -410,11 +410,13 @@ def compatibility_imports(content):
     Lean has ONE module identifier per import command; whitespace/comments may
     span lines. Unsupported/escaped names or header prefixes mean unknown.
     """
+    if content.startswith('\ufeff'):
+        raise Failure('ambiguous_header')
     i, imports = 0, []
 
     def skip(index):
         while index < len(content):
-            if content[index].isspace() or content[index] == '\ufeff' and index == 0:
+            if content[index] in ' \t\r\n':
                 index += 1
             elif content.startswith('--', index):
                 end = content.find('\n', index)
@@ -470,7 +472,7 @@ def compatibility_imports(content):
         if module is None or len(module) > 512 or module[0].islower() or module in ['import', 'public', 'meta', 'private', 'module', 'prelude']:
             raise Failure('ambiguous_header')
         i += len(module)
-        if i < len(content) and not content[i].isspace() and not content.startswith('/-', i) and not content.startswith('--', i):
+        if i < len(content) and content[i] not in ' \t\r\n' and not content.startswith('/-', i) and not content.startswith('--', i):
             raise Failure('ambiguous_header')
         if module == 'TauCeti' or module.startswith('TauCeti.'):
             imports.append(module)
