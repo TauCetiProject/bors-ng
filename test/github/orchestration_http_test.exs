@@ -317,4 +317,97 @@ defmodule BorsNG.OrchestrationHttpTest do
     assert {:error, :cleanup_deadline} ==
              BorsNG.GitHub.close_pr_bounded(conn, 1, "Title", deadline)
   end
+
+  test "bounded batch reads use one GraphQL request and validate repository identity" do
+    head = String.duplicate("a", 40)
+
+    data = %{
+      "data" => %{
+        "repository" => %{
+          "databaseId" => 14,
+          "p1" => %{
+            "number" => 1,
+            "headRefOid" => head,
+            "baseRefName" => "main",
+            "state" => "OPEN",
+            "isDraft" => false
+          }
+        }
+      }
+    }
+
+    assert {:reply, {:ok, %{1 => %BorsNG.GitHub.Pr{head_sha: ^head}}}, %{}} =
+             response(200, data, fn ->
+               advisory(:batch_read, {"TauCetiProject/TauCeti", [1], :identity})
+             end)
+
+    assert_receive {:request, request}
+    assert request =~ "POST /graphql "
+    [_headers, body] = String.split(request, "\r\n\r\n", parts: 2)
+    assert Jason.decode!(body)["variables"] == %{"owner" => "TauCetiProject", "name" => "TauCeti"}
+    refute_receive {:request, _}, 10
+  end
+
+  test "REST attribution preserves all three commit pages in chronological order" do
+    {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true])
+    {:ok, {_, port}} = :inet.sockname(listener)
+    old = Application.get_env(:bors, :api_github_root)
+    root = "http://127.0.0.1:#{port}"
+    Application.put_env(:bors, :api_github_root, root)
+
+    on_exit(fn ->
+      :gen_tcp.close(listener)
+      Application.put_env(:bors, :api_github_root, old)
+    end)
+
+    spawn_link(fn ->
+      for page <- 1..3 do
+        {:ok, socket} = :gen_tcp.accept(listener, 5000)
+        {:ok, _request} = :gen_tcp.recv(socket, 0, 5000)
+
+        numbers =
+          case page do
+            1 -> 1..30
+            2 -> 31..60
+            3 -> 61..65
+          end
+
+        body =
+          Jason.encode!(
+            Enum.map(numbers, fn number ->
+              %{
+                "sha" => "head#{number}",
+                "commit" => %{
+                  "author" => %{
+                    "name" => "Author#{number}",
+                    "email" => "a#{number}@example.invalid"
+                  },
+                  "message" => "Message",
+                  "tree" => %{"sha" => "tree"}
+                }
+              }
+            end)
+          )
+
+        link =
+          if page < 3,
+            do:
+              "Link: <#{root}/repositories/14/pulls/1/commits?page=#{page + 1}>; rel=\"next\"\r\n",
+            else: ""
+
+        :gen_tcp.send(
+          socket,
+          "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n#{link}Content-Length: #{byte_size(body)}\r\nConnection: close\r\n\r\n#{body}"
+        )
+
+        :gen_tcp.close(socket)
+      end
+    end)
+
+    assert {:ok, commits} =
+             Server.do_handle_call(:get_pr_commits, {{:raw, "test-token"}, 14}, {1})
+
+    assert Enum.map(commits, & &1.sha) == Enum.map(1..65, &"head#{&1}")
+    assert Enum.map(commits, & &1.author_name) == Enum.map(1..65, &"Author#{&1}")
+  end
 end

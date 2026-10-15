@@ -308,6 +308,38 @@ defmodule BorsNG.GitHub.ServerMock do
     end
   end
 
+  def do_handle_call(
+        :batch_read,
+        _conn,
+        {_repository, _numbers, mode},
+        %{batch_read_error: {mode, error}} = state
+      ),
+      do: {error, state}
+
+  def do_handle_call(:public_user, {token, _repo_id}, {login}, state) do
+    state = Map.update(state, :public_user_calls, [login], &[login | &1])
+    do_handle_call(:get_user_by_login, token, {login}, state)
+  end
+
+  def do_handle_call(:batch_read, conn, {_repository, numbers, mode}, state) do
+    state = Map.update(state, :batch_read_calls, [{mode, numbers}], &[{mode, numbers} | &1])
+
+    Enum.reduce_while(numbers, {{:ok, %{}}, state}, fn number, {{:ok, acc}, state} ->
+      case do_handle_call(:get_pr, conn, {number}, state) do
+        {{:ok, pr}, state} ->
+          value =
+            if mode == :identity,
+              do: pr,
+              else: get_in(state, [:batch_read_metadata, number]) || :rest
+
+          {:cont, {{:ok, Map.put(acc, number, value)}, state}}
+
+        {error, state} ->
+          {:halt, {error, state}}
+      end
+    end)
+  end
+
   def do_handle_call(:cleanup_policy, conn, {commit}, state) do
     case do_handle_call(:get_file, conn, {commit, "bors.toml"}, state) do
       {{:ok, nil}, state} -> do_handle_call(:get_file, conn, {commit, ".github/bors.toml"}, state)

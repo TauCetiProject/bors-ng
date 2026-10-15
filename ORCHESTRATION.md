@@ -345,3 +345,24 @@ rollback to code without these handlers must drain `post_merge_cleanup`,
 `expand_post_merge_cleanup` and `close_merged_pr` jobs using forward code first,
 as well as earlier versioned wakeups, projections and service continuations.
 Do not delete queued work or clear keys to manufacture drainage.
+
+## Bounded live read batches
+
+TauCeti's public-GitHub async lane groups metadata and live PR identities in serial GraphQL
+requests of at most20PRs. The whole group shares an eight-second deadline through
+an isolated single API client, without hidden HTTP retries or a mutable read
+cache. Queries validate the numeric repository identity and every requested PR;
+partial GraphQL errors, missing identities and malformed fields fail closed.
+A second live identity read still follows metadata collection. Dispatch and
+promotion retain their separate final live-head/open/draft/base checks and all
+existing generation, approval and pending-command fences.
+
+Complete metadata includes current title/body, public author identity and every
+commit author. Author profile attribution uses the existing REST endpoint once
+per distinct author within the same eight-second metadata deadline; public
+profile reuse ends with the operation and never carries approval authority.
+The REST fallback retains every page in chronological order. Histories beyond100commits, pagination, unsupported author types
+or inconsistent head coverage retain the complete REST path. This conservative
+fallback can still exceed the service target; it never silently truncates
+attribution. Native and other-repository paths retain their serial reads.
+No status verdict, approval decision or command is combined by these queries.
