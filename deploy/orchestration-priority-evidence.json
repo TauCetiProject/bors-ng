@@ -1,0 +1,178 @@
+{
+  "issue": "https://github.com/TauCetiProject/TauCeti/issues/16811",
+  "candidate_journal": "https://bors.taucetiproject.org/repositories/1/candidates?base=main&batch_id=745",
+  "dispatch_745": {
+    "inserted_at_utc": "2026-10-15T01:51:56",
+    "claimed_at_utc": "2026-10-15T01:55:53",
+    "queue_wait_seconds": 237,
+    "rejection": "membership_changed; correct safety rejection"
+  },
+  "composition": {
+    "sample": "319 older jobs completed during batch745 dispatch wait01:51:56\u201301:55:53",
+    "total": 319,
+    "command_counts": [
+      {
+        "kind": "cast",
+        "command": "status",
+        "count": 206
+      },
+      {
+        "kind": "cast",
+        "command": "eligibility",
+        "count": 72
+      },
+      {
+        "kind": "info",
+        "command": "recover_queue",
+        "count": 11
+      },
+      {
+        "kind": "info",
+        "command": "wake_backend_holds",
+        "count": 11
+      },
+      {
+        "kind": "cancel",
+        "command": "cancel_generation",
+        "count": 11
+      },
+      {
+        "kind": "info",
+        "command": "poll",
+        "count": 6
+      },
+      {
+        "kind": "cast",
+        "command": "set_priority",
+        "count": 1
+      },
+      {
+        "kind": "cast",
+        "command": "maintainer_reviewed_generation",
+        "count": 1
+      }
+    ],
+    "exact_repeat_jobs": 42,
+    "unique_status_keys": 203,
+    "status_jobs": 206,
+    "unique_eligibility_prs": 55,
+    "eligibility_jobs": 72,
+    "eligibility_repeats": 17,
+    "exact_repeats_by_command": [
+      {
+        "kind": "info",
+        "command": "poll",
+        "extra": 5
+      },
+      {
+        "kind": "cast",
+        "command": "eligibility",
+        "extra": 1
+      },
+      {
+        "kind": "info",
+        "command": "recover_queue",
+        "extra": 10
+      },
+      {
+        "kind": "cast",
+        "command": "eligibility",
+        "extra": 2
+      },
+      {
+        "kind": "info",
+        "command": "wake_backend_holds",
+        "extra": 10
+      },
+      {
+        "kind": "cast",
+        "command": "eligibility",
+        "extra": 3
+      },
+      {
+        "kind": "cast",
+        "command": "eligibility",
+        "extra": 1
+      },
+      {
+        "kind": "cast",
+        "command": "eligibility",
+        "extra": 1
+      },
+      {
+        "kind": "cast",
+        "command": "eligibility",
+        "extra": 1
+      },
+      {
+        "kind": "cast",
+        "command": "eligibility",
+        "extra": 1
+      },
+      {
+        "kind": "cast",
+        "command": "eligibility",
+        "extra": 1
+      },
+      {
+        "kind": "cast",
+        "command": "eligibility",
+        "extra": 1
+      },
+      {
+        "kind": "cast",
+        "command": "eligibility",
+        "extra": 1
+      },
+      {
+        "kind": "cast",
+        "command": "eligibility",
+        "extra": 1
+      },
+      {
+        "kind": "cast",
+        "command": "eligibility",
+        "extra": 1
+      },
+      {
+        "kind": "cast",
+        "command": "eligibility",
+        "extra": 1
+      },
+      {
+        "kind": "cast",
+        "command": "eligibility",
+        "extra": 1
+      }
+    ]
+  },
+  "correlation": {
+    "distinct_status_shas": 181,
+    "matching_recorded_project_1_batches_or_attempts": 0
+  },
+  "limits": [
+    "Operation counts do not measure service-time, API, CPU or throughput savings.",
+    "Only batch745 is a directly measured 237-second queue wait; constructed-to-request also includes live validation/publication.",
+    "Priority release does not yet filter/coalesce status or wakeup traffic. Those follow in this same issue.",
+    "No production queue mutation or CI cancellation manufactured this evidence."
+  ],
+  "local_validation": {
+    "postgresql": "1005 tests + 7 doctests passed; final focused orchestration/train checks passed 45 tests",
+    "mysql": "1005 tests + 7 doctests passed; final focused orchestration/train checks passed 45 tests",
+    "populated_migration": "pending dispatch/command/status/cancel upgrade passed on PostgreSQL and MySQL; frozen idempotent migration rechecked before final push"
+  },
+  "production_baseline": {
+    "captured_at": "2026-10-15T02:08:34.204497+00:00",
+    "active_batches": 25,
+    "memberships": 335,
+    "duplicate_active_heads": 0,
+    "pending_at_capture": 0,
+    "limitations": "Instantaneous snapshot, not a sustained load or throughput claim."
+  },
+  "review_corrections": [
+    "Fence deferrals retain failure count, respect pending command backoff and wake immediately after command completion.",
+    "Subject commands use dynamic waiting/running class so same-PR FIFO is preserved after batch completion.",
+    "Legacy nil-candidate promotion, final request-record fencing and millisecond end-to-end queue timing are covered.",
+    "Priority result bound is not a constant database scan bound. Tick bursts are debounced; per-repository fairness is not a global service guarantee."
+  ]
+}

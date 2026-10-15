@@ -15,7 +15,17 @@ defmodule BorsNG.Worker.Orchestration.Dispatcher do
     # At most one timer, regardless of webhook rate.
     if timer = Process.get(:tick_timer), do: Process.cancel_timer(timer)
     Process.put(:tick_timer, Process.send_after(self(), :tick, 1000))
-    state = if Outbox.enabled?(), do: drain(state), else: state
+    now = System.monotonic_time(:millisecond)
+    last = Process.get(:last_drain_at)
+
+    state =
+      if Outbox.enabled?() and (is_nil(last) or now - last >= 100) do
+        Process.put(:last_drain_at, now)
+        drain(state)
+      else
+        state
+      end
+
     {:noreply, state}
   end
 
@@ -23,7 +33,14 @@ defmodule BorsNG.Worker.Orchestration.Dispatcher do
     case Map.get(state.active, pid) do
       {ref, %{token: token}} when token == job.token ->
         Process.demonitor(ref, [:flush])
-        if result == :ok, do: Outbox.finish(job), else: Outbox.fail(job, result)
+
+        case result do
+          :ok -> Outbox.finish(job)
+          {:defer, reason} -> Outbox.defer(job, reason)
+          error -> Outbox.fail(job, error)
+        end
+
+        Process.delete(:last_drain_at)
         send(self(), :tick)
         {:noreply, %{state | active: Map.delete(state.active, pid)}}
 
@@ -60,7 +77,8 @@ defmodule BorsNG.Worker.Orchestration.Dispatcher do
         _ -> 2
       end
 
-    # Scan bound is independent of backlog size. Skip occupied repositories.
+    # Bound returned work and exclude occupied repositories before selection.
+    # The joined priority query may still sort a larger eligible backlog.
     Enum.reduce(Outbox.due(32), state, fn job, state ->
       if map_size(state.active) < cap do
         case Outbox.claim(job.id) do

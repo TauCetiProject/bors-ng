@@ -1628,6 +1628,13 @@ defmodule BorsNG.Worker.Batcher do
   end
 
   defp start_waiting_batch_allowed(batch, predecessor \\ nil) do
+    if Process.get(:orchestration_executor, false),
+      do:
+        ensure_no_withdrawal!(
+          batch,
+          Repo.all(LinkPatchBatch.from_batch(batch.id)) |> Enum.map(& &1.patch_id)
+        )
+
     # Persist before staging work: a restart or priority preemption may leave
     # this batch waiting again, but its tested membership must never grow.
     batch = batch |> Batch.changeset(%{sealed: true}) |> Repo.update!()
@@ -2667,6 +2674,7 @@ defmodule BorsNG.Worker.Batcher do
 
       ensure_no_withdrawal!(batch, patch_ids(candidate))
       conn = get_repo_conn(batch.project)
+      ensure_live_members!(batch, conn)
       requested = Enum.find(events, &(&1.kind == "dispatch_requested"))
       # A single bounded Actions page reconciles an ambiguous repository_dispatch.
       # No retry is allowed on an unavailable or truncated lookup.
@@ -2704,9 +2712,12 @@ defmodule BorsNG.Worker.Batcher do
         end
 
         # A push to the same SHA is idempotent and never fires another push build.
+        ensure_no_withdrawal!(batch, patch_ids(candidate))
         publish_bound_candidate!(batch, candidate, conn, publisher)
 
         if System.get_env("BORS_STAGE_DISPATCH_PROJECT") == batch.project.name do
+          ensure_no_withdrawal!(batch, patch_ids(candidate))
+
           unless requested,
             do:
               CandidateJournal.event(candidate, "dispatch_requested", "bors.outbox", %{
@@ -3515,6 +3526,20 @@ defmodule BorsNG.Worker.Batcher do
 
   defp patch_ids(candidate), do: Enum.map(candidate.snapshot["members"], & &1["patch_id"])
 
+  defp ensure_live_members!(batch, conn) do
+    Enum.each(Repo.all(LinkPatchBatch.from_batch(batch.id)), fn link ->
+      # Fail closed on an unavailable live read. Cached webhook heads cannot
+      # authorize a prioritized dispatch while a push/close is still in transit.
+      pr = GitHub.get_pr!(conn, link.patch.pr_xref)
+
+      if link.patch.commit != link.head_sha or pr.head_sha != link.head_sha or
+           pr.state != :open or pr.draft or pr.base_ref != batch.into_branch do
+        do_handle_cast({:cancel, link.patch_id, :changed_head}, batch.project_id)
+        throw(:stale_candidate_member)
+      end
+    end)
+  end
+
   defp ensure_no_withdrawal!(batch, ids) do
     job = Process.get(:orchestration_job)
     if job && not Outbox.owned?(job), do: throw(:stale_outbox_claim)
@@ -3561,14 +3586,7 @@ defmodule BorsNG.Worker.Batcher do
       links = Repo.all(LinkPatchBatch.from_batch(batch.id))
       ensure_no_withdrawal!(batch, Enum.map(links, & &1.patch_id))
 
-      Enum.each(links, fn link ->
-        pr = GitHub.get_pr!(repo_conn, link.patch.pr_xref)
-
-        if link.patch.commit != link.head_sha or pr.head_sha != link.head_sha do
-          do_handle_cast({:cancel, link.patch_id, :changed_head}, batch.project_id)
-          throw(:stale_promotion)
-        end
-      end)
+      ensure_live_members!(batch, repo_conn)
     end
 
     if Process.get(:orchestration_executor, false) and not promotion_requested?(batch) do
@@ -3591,6 +3609,13 @@ defmodule BorsNG.Worker.Batcher do
       {:hold, _} ->
         throw(:train_predecessor_pending)
     end
+
+    if Process.get(:orchestration_executor, false),
+      do:
+        ensure_no_withdrawal!(
+          batch,
+          Repo.all(LinkPatchBatch.from_batch(batch.id)) |> Enum.map(& &1.patch_id)
+        )
 
     push_result =
       if Train.tracked?(CandidateJournal.current(batch)) do
