@@ -470,6 +470,49 @@ defmodule BorsNG.Worker.SourceCompatibilityTest do
     assert GitHub.get_labels(@conn, 1) == {:ok, []}
   end
 
+  test "releasing a hold on an already requested head clears stale hold metadata", c do
+    [patch | _] = c.patches
+    SourceCompatibility.apply_results(c.project, @conn, @base, [patch], [result(1)])
+    update_mock(:labels, %{1 => ["keep"], 2 => []})
+    SourceCompatibility.apply_results(c.project, @conn, @base, [patch], [result(1)])
+    held = Repo.get!(Patch, patch.id)
+    assert held.source_compatibility["hold_head"] == @head
+    update_mock(:labels, %{1 => [], 2 => []})
+
+    SourceCompatibility.check(c.project, @conn, @base, [held], fn _, _, _, _ ->
+      flunk("an existing exact request must not repeat source work")
+    end)
+
+    current = Repo.get!(Patch, patch.id)
+    assert SourceCompatibility.requested?(current, @head)
+    refute Map.has_key?(current.source_compatibility, "hold_head")
+    refute Map.has_key?(current.source_compatibility, "action")
+    assert Repo.aggregate(OrchestrationJob, :count, :id) == 1
+  end
+
+  test "cached held findings cannot move an automatic bump out of its dedicated path", c do
+    [patch | _] = c.patches
+    user = Repo.insert!(%BorsNG.Database.User{login: "tauceti-review-bot[bot]", user_xref: 77})
+
+    patch =
+      patch
+      |> Ecto.Changeset.change(
+        author_id: user.id,
+        head_ref: "bump-mathlib/example",
+        source_compatibility: Map.put(result(1), "hold_head", @head)
+      )
+      |> Repo.update!()
+
+    assert BorsNG.Worker.BumpRecovery.automatic?(patch)
+
+    SourceCompatibility.check(c.project, @conn, @base, [patch], fn _, _, _, _ ->
+      flunk("automatic bumps retain their dedicated recovery path")
+    end)
+
+    refute SourceCompatibility.requested?(Repo.get!(Patch, patch.id), @head)
+    assert Repo.aggregate(OrchestrationJob, :count, :id) == 0
+  end
+
   test "partial label publication is retried without duplicating the request or source work", c do
     [patch | _] = c.patches
     SourceCompatibility.apply_results(c.project, @conn, @base, [patch], [result(1)])

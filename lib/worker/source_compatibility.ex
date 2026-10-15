@@ -179,7 +179,8 @@ defmodule BorsNG.Worker.SourceCompatibility do
       Enum.filter(patches, fn patch ->
         r = patch.source_compatibility || %{}
 
-        r["base_sha"] == base and r["head_sha"] == patch.commit and r["policy"] == @policy and
+        not BorsNG.Worker.BumpRecovery.automatic?(patch) and
+          r["base_sha"] == base and r["head_sha"] == patch.commit and r["policy"] == @policy and
           ((r["status"] in ["conflict", "missing_source"] and r["hold_head"] == patch.commit) or
              (r["status"] == "pass" and requested?(patch, patch.commit) and
                 r["repair_policy"] == @policy and r["repair_base"] != base))
@@ -378,6 +379,8 @@ defmodule BorsNG.Worker.SourceCompatibility do
             })
         )
         |> Repo.update!()
+      else
+        patch |> Ecto.Changeset.change(source_compatibility: result) |> Repo.update!()
       end
 
       # A label is a projection, never a passing compatibility status. Its

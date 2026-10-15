@@ -122,7 +122,10 @@ Production background turns exhausted the original 30-second helper budget
 Background turns now use an 8-second helper budget, including Git and root-lock
 waits, to yield the mutator sooner. GitHub/token/metadata overhead is additional;
 this is not a claim of a hard 8-second total operation deadline. Selected-head
-admission retains its separate 30-second budget. Cold cache timeouts stay unknown
+admission retains its separate 30-second budget when source work is needed. An
+exact cached unknown falls back to authoritative CI without a costlier cheap
+retry. Held evidence waits for re-admission or changed main/head inputs; simply
+removing a hold does not start a new Git scan. Cold cache timeouts stay unknown
 and use authoritative validation; ordinary candidate assembly may warm the same
 Git mirror. Validated immutable header entries are also retained atomically after
 an interrupted partial inventory; a later turn can continue parsing other blobs.
