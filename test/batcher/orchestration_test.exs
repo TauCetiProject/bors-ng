@@ -336,9 +336,11 @@ defmodule BorsNG.Worker.OrchestrationTest do
     # Also put the dispatch behind the entire backlog by durable FIFO ID.
     Repo.delete!(dispatch)
     dispatch = Outbox.enqueue(ctx.project.id, "dispatch", Outbox.payload(dispatch))
-    assert Outbox.due(32) == []
+    # Repository lanes are independent: another project's recovery may be due.
+    own_due = fn -> Enum.filter(Outbox.due(32), &(&1.project_id == ctx.project.id)) end
+    assert own_due.() == []
     Outbox.finish(running)
-    assert hd(Outbox.due(32)).id == dispatch.id
+    assert hd(own_due.()).id == dispatch.id
     assert :ok == execute(ctx.worker, dispatch)
 
     assert Repo.get!(Batch, ctx.batch.id).commit ==
