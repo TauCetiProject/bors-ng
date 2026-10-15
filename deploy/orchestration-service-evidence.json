@@ -152,6 +152,15 @@
         "state": "pending"
       }
     ],
-    "limit": "No stage-status jobs in this short post-rollout interval; filtered ingress rate not measured. Eligibility27387 still occupied the executor after132s."
+    "limit": "No stage-status jobs in this short post-rollout interval; filtered ingress rate not measured. Eligibility27387 held an old running lease across deployment, was reclaimed after lease expiry, and completed in2276ms. Its132s row age was not measured service.",
+    "lease_replay": {
+      "job_id": 27387,
+      "first_claimed_at_ms": 1792036277728,
+      "unchanged_lease_until": 1792036578,
+      "reclaimed_at_ms": 1792036612601,
+      "completed_at_ms": 1792036614877,
+      "attempts": 2,
+      "final_service_ms": 2276
+    }
   }
 }
