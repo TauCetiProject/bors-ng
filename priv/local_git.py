@@ -145,11 +145,13 @@ class Mirror:
             if self.request['operation'] == 'compatibility' and self.request.get('timeout') == 8:
                 counts, _ = self.git('count-objects', '-v')
                 counts = dict(line.split(': ', 1) for line in counts.splitlines())
-                if counts.get('count') == '0' and counts.get('in-pack') == '0':
+                bootstrap = self.repo / 'bors-source-bootstrap-v1'
+                if counts.get('count') == '0' and counts.get('in-pack') == '0' and not bootstrap.exists():
                     # An empty mirror cannot retain a half-fetched pack after
                     # Git is killed. Allow the existing 30s admission budget
                     # once to seed it, then keep ordinary background work at 8s.
                     # The total includes lock/startup time, not 30s per input.
+                    bootstrap.touch(exist_ok=False)
                     self.deadline = self.started + 30
             self.git('fetch', '--quiet', '--no-tags', '--no-write-fetch-head', '--no-auto-gc',
                      self.url, *dict.fromkeys(missing))

@@ -127,6 +127,7 @@ class LocalGitTest(unittest.TestCase):
         first = TestMirror(request, self.upstream)
         self.assertEqual(first.run()['results'][0]['status'], 'pass')
         self.assertEqual(first.deadline - first.started, 30)
+        self.assertTrue((first.repo / 'bors-source-bootstrap-v1').exists())
         next_head = self.commit(self.base, {'TauCeti/New.lean': 'def newValue := 1'})
         warm = TestMirror(request | dict(members=[dict(pr=1, head_sha=next_head)]), self.upstream)
         self.assertEqual(warm.run()['results'][0]['status'], 'pass')
@@ -134,6 +135,25 @@ class LocalGitTest(unittest.TestCase):
         foreground = TestMirror(request | dict(timeout=5, root=str(self.root / 'other')), self.upstream)
         self.assertEqual(foreground.run()['results'][0]['status'], 'pass')
         self.assertEqual(foreground.deadline - foreground.started, 5)
+
+    def test_failed_bootstrap_is_not_repeated_for_another_pr_on_the_same_empty_mirror(self):
+        request = self.request | dict(operation='compatibility', timeout=8, base_sha=self.base,
+                                      members=[dict(pr=1, head_sha=self.base)])
+
+        class FailedFetch(TestMirror):
+            def git(self, *args, **kwargs):
+                if args[0] == 'fetch':
+                    raise local.Failure('timeout', operation='fetch')
+                return super().git(*args, **kwargs)
+
+        first = FailedFetch(request, self.upstream)
+        with self.assertRaises(local.Failure):
+            first.run()
+        self.assertEqual(first.deadline - first.started, 30)
+        again = FailedFetch(request | dict(members=[dict(pr=2, head_sha=self.base)]), self.upstream)
+        with self.assertRaises(local.Failure):
+            again.run()
+        self.assertEqual(again.deadline - again.started, 8)
 
     def test_header_batches_bound_bytes_without_one_process_per_twelve_files(self):
         from unittest.mock import patch
