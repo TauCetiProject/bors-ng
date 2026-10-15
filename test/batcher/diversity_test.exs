@@ -85,6 +85,7 @@ defmodule BorsNG.Worker.Batcher.DiversityTest do
 
   test "provenance binds project, PR and exact head, with inclusive freshness boundary" do
     m = hd(unit(1).members)
+    assert m.label_hint["timestamp_unit"] == "unix_seconds"
     assert MapSet.size(Diversity.areas(m, 1, 1900)) == 1
     assert MapSet.size(Diversity.areas(m, 1, 1901)) == 0
 
@@ -92,7 +93,8 @@ defmodule BorsNG.Worker.Batcher.DiversityTest do
           Map.put(m.label_hint, "project_id", 2),
           Map.put(m.label_hint, "pr", 2),
           Map.put(m.label_hint, "head_sha", "replaced"),
-          Map.put(m.label_hint, "source", "unbound")
+          Map.put(m.label_hint, "source", "unbound"),
+          Map.put(m.label_hint, "timestamp_unit", "microseconds")
         ] do
       assert Diversity.areas(%{m | label_hint: h}, 1, 1000) == MapSet.new()
     end

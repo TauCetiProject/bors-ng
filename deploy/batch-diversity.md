@@ -10,7 +10,7 @@ The current policy remains in production. No live throughput gain is claimed.
 The useful immediate change is bounded admission evidence from label reads that
 preflight already performs. No extra GitHub requests or Lean builds are made.
 New journal snapshots record exact local project/PR/head, observation time,
-read source, priority, singleton status and labels. The record explicitly says
+read source, explicit Unix-second timestamp units, priority, singleton status and labels. The record explicitly says
 that labels are mutable PR metadata, not an atomic head/label response. These
 facts grant no approval, merge, source-compatibility or cache authority.
 
@@ -87,7 +87,7 @@ import edges are therefore diagnostics here, never dependencies or an oracle.
 caller. It accepts already eligible fresh atomic units for one repository/base
 lane, refuses immutable inputs and duplicate PR membership, and compares FIFO,
 soft marginal shared-area-pair penalty, grouping and soft caps 2/3. It anchors
-the oldest unit at the highest **exact** priority, scans at most 256 units, never
+the oldest unit at the highest **exact** priority, scores at most 256 units, never
 fills across priority boundaries and never waits for diversity. It preserves
 atomic bundles and singleton isolation; an oversized oldest unit runs alone.
 It reverts to the reference formation if alternative atomic packing underfills.

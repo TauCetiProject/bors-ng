@@ -16,6 +16,8 @@ defmodule BorsNG.Worker.Batcher.Diversity do
     if is_list(labels) and length(labels) <= 100 and
          Enum.all?(labels, &(is_binary(&1) and byte_size(&1) <= 256)) do
       %{
+        "schema" => "bors.scheduling-label-hint/v1",
+        "timestamp_unit" => "unix_seconds",
         "project_id" => project_id,
         "pr" => pr,
         "head_sha" => head,
@@ -61,6 +63,8 @@ defmodule BorsNG.Worker.Batcher.Diversity do
   def areas(member, project_id, now) do
     case Map.get(member, :label_hint) do
       %{
+        "schema" => "bors.scheduling-label-hint/v1",
+        "timestamp_unit" => "unix_seconds",
         "project_id" => ^project_id,
         "pr" => pr,
         "head_sha" => head,
