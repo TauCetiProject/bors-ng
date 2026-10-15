@@ -305,6 +305,48 @@ defmodule BorsNG.Worker.SourceCompatibilityTest do
     assert [%{state: "done"}] = Repo.all(OrchestrationJob)
   end
 
+  test "partial label publication is retried without duplicating the request or source work", c do
+    [patch | _] = c.patches
+    SourceCompatibility.apply_results(c.project, @conn, @base, [patch], [result(1)])
+    assert :ok = GitHub.remove_label(@conn, 1, "needs-rebase")
+    current = Repo.get!(Patch, patch.id)
+
+    current =
+      current
+      |> Ecto.Changeset.change(
+        source_compatibility: Map.put(current.source_compatibility, "projection_pending", true)
+      )
+      |> Repo.update!()
+
+    SourceCompatibility.check(c.project, @conn, @base, [current], fn _, _, _, _ ->
+      flunk("a pending label projection must reuse the exact diagnosis")
+    end)
+
+    assert {:ok, ["needs-rebase"]} = GitHub.get_labels(@conn, 1)
+    refute Repo.get!(Patch, patch.id).source_compatibility["projection_pending"]
+    assert Repo.aggregate(OrchestrationJob, :count, :id) == 1
+  end
+
+  test "a new head supersedes stored repair and projection metadata", c do
+    [patch | _] = c.patches
+    SourceCompatibility.apply_results(c.project, @conn, @base, [patch], [result(1)])
+    new_head = String.duplicate("e", 40)
+    current = Repo.get!(Patch, patch.id) |> Patch.changeset(%{commit: new_head}) |> Repo.update!()
+
+    update_mock(:pulls, %{
+      1 => %GitHub.Pr{number: 1, state: :open, base_ref: "main", head_sha: new_head}
+    })
+
+    SourceCompatibility.apply_results(c.project, @conn, @base, [current], [
+      Map.put(result(1, "pass"), "head_sha", new_head)
+    ])
+
+    updated = Repo.get!(Patch, patch.id)
+    refute SourceCompatibility.requested?(updated, new_head)
+    refute Map.has_key?(updated.source_compatibility, "repair_head")
+    refute Map.has_key?(updated.source_compatibility, "projection_pending")
+  end
+
   test "promotion and heartbeat wakeups coalesce durably", c do
     Enum.each(1..5, fn _ -> SourceCompatibility.wake(c.project, @base) end)
     SourceCompatibility.wake(c.project)

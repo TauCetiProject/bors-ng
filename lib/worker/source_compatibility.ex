@@ -68,6 +68,7 @@ defmodule BorsNG.Worker.SourceCompatibility do
           from(p in eligible,
             where:
               is_nil(p.source_compatibility) or
+                p.source_compatibility["projection_pending"] == true or
                 type(p.source_compatibility["base_sha"], :string) != ^base or
                 type(p.source_compatibility["head_sha"], :string) != p.commit or
                 type(p.source_compatibility["policy"], :string) != ^@policy or
@@ -158,6 +159,12 @@ defmodule BorsNG.Worker.SourceCompatibility do
   def check(_, _, _, [], _), do: :ok
 
   def check(project, conn, base, patches, checker) do
+    Enum.each(patches, fn patch ->
+      if requested?(patch, patch.commit) and
+           patch.source_compatibility["projection_pending"] == true,
+         do: project_request(conn, patch)
+    end)
+
     pending =
       Enum.reject(patches, fn patch ->
         r = patch.source_compatibility || %{}
@@ -204,11 +211,7 @@ defmodule BorsNG.Worker.SourceCompatibility do
             result =
               Map.merge(
                 result,
-                Map.take(current.source_compatibility || %{}, [
-                  "repair_head",
-                  "repair_base",
-                  "repair_policy"
-                ])
+                repair_metadata(current)
               )
 
             result = maybe_resolve(project, conn, current, result)
@@ -251,7 +254,7 @@ defmodule BorsNG.Worker.SourceCompatibility do
         if get_in(patch.queue_approval || %{}, ["reason"]) == "source_compatibility",
           do: patch |> Patch.changeset(%{merge_eligibility_id: nil}) |> Repo.update!()
 
-        Map.drop(result, ["repair_head", "repair_base", "repair_policy"])
+        Map.drop(result, ["repair_head", "repair_base", "repair_policy", "projection_pending"])
       else
         _ -> result
       end
@@ -311,7 +314,8 @@ defmodule BorsNG.Worker.SourceCompatibility do
             Map.merge(result, %{
               "repair_head" => patch.commit,
               "repair_base" => result["base_sha"],
-              "repair_policy" => result["policy"]
+              "repair_policy" => result["policy"],
+              "projection_pending" => true
             })
         )
         |> Repo.update!()
@@ -319,8 +323,7 @@ defmodule BorsNG.Worker.SourceCompatibility do
 
       # A label is a projection, never a passing compatibility status. Its
       # current head is withdrawn through the existing serialized cancellation.
-      :ok = GitHub.add_labels(conn, patch.pr_xref, ["needs-rebase"])
-      :ok
+      project_request(conn, Repo.get!(Patch, patch.id))
     else
       false ->
         held =
@@ -333,6 +336,36 @@ defmodule BorsNG.Worker.SourceCompatibility do
 
       _ ->
         :ok
+    end
+  end
+
+  defp repair_metadata(patch) do
+    if requested?(patch, patch.commit),
+      do:
+        Map.take(
+          patch.source_compatibility || %{},
+          ~w(repair_head repair_base repair_policy projection_pending)
+        ),
+      else: %{}
+  end
+
+  defp project_request(conn, patch) do
+    with false <- Outbox.withdrawal_pending?(patch.project_id, [patch.id]),
+         {:ok, pr} <- GitHub.get_pr(conn, patch.pr_xref),
+         true <- pr.head_sha == patch.commit and pr.state == :open and not pr.draft do
+      pending = GitHub.add_labels(conn, patch.pr_xref, ["needs-rebase"]) != :ok
+      current = Repo.get!(Patch, patch.id)
+
+      if current.commit == patch.commit do
+        current
+        |> Ecto.Changeset.change(
+          source_compatibility:
+            Map.put(current.source_compatibility || %{}, "projection_pending", pending)
+        )
+        |> Repo.update!()
+      end
+    else
+      _ -> :ok
     end
   end
 
@@ -392,11 +425,7 @@ defmodule BorsNG.Worker.SourceCompatibility do
         result =
           Map.merge(
             result,
-            Map.take(patch.source_compatibility || %{}, [
-              "repair_head",
-              "repair_base",
-              "repair_policy"
-            ])
+            repair_metadata(patch)
           )
 
         patch = patch |> Ecto.Changeset.change(source_compatibility: result) |> Repo.update!()
@@ -411,12 +440,12 @@ defmodule BorsNG.Worker.SourceCompatibility do
     details =
       case result["status"] do
         "missing_source" ->
-          Enum.map_join(result["missing_imports"], "\n", fn finding ->
+          Enum.map_join(Enum.take(result["missing_imports"], 8), "\n", fn finding ->
             "- `#{finding["path"]}` imports missing `#{finding["module"]}` (`#{finding["provider_path"]}`)."
           end)
 
         "conflict" ->
-          "Textual merge conflicts: " <> Enum.join(result["paths"], ", ")
+          "Textual merge conflicts: " <> Enum.join(Enum.take(result["paths"], 8), ", ")
 
         "integrated_failure" ->
           "Authoritative exact single-PR integrated build failed: #{result["run_url"]}. " <>

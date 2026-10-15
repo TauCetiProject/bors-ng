@@ -467,7 +467,7 @@ def compatibility_imports(content):
         if word(i) == 'all':
             i = skip(i + len('all'))
         module = word(i)
-        if module is None or module[0].islower() or module in ['import', 'public', 'meta', 'private', 'module', 'prelude']:
+        if module is None or len(module) > 512 or module[0].islower() or module in ['import', 'public', 'meta', 'private', 'module', 'prelude']:
             raise Failure('ambiguous_header')
         i += len(module)
         if i < len(content) and not content[i].isspace() and not content.startswith('/-', i) and not content.startswith('--', i):

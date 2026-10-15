@@ -57,7 +57,9 @@ and authoritative CI; the background pass does not claim to reimplement them.
 ## Request and withdrawal lifecycle
 
 A concrete failure records exact evidence and queues one existing durable notice
-per head/evidence base. The notice carries importer/module and tested main, or the
+per head/evidence base. Partial label publication records a pending projection and
+retries it from the saved diagnosis without duplicating the request or source
+work. The bounded notice carries up to eight importer/module findings and tested main, or the
 link to a genuinely conclusive exact single-PR CI build. Only trusted individual
 compiler/build evidence triggers API/proof/duplicate repair; suspect partitions,
 quarantine labels, timeouts and infrastructure failures cannot. Automatic Mathlib

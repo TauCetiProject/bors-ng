@@ -21,11 +21,38 @@ defmodule BorsNG.Worker.TestCase do
   end
 
   setup tags do
-    :ok = Ecto.Adapters.SQL.Sandbox.checkout(:persistent_term.get(:db_repo))
+    owner =
+      Ecto.Adapters.SQL.Sandbox.start_owner!(
+        :persistent_term.get(:db_repo),
+        shared: not tags[:async]
+      )
 
-    unless tags[:async] do
-      Ecto.Adapters.SQL.Sandbox.mode(:persistent_term.get(:db_repo), {:shared, self()})
-    end
+    on_exit(fn ->
+      # Keep the transaction owner alive while fixture workers shut down.
+      # Otherwise a late eligibility/cancellation can lose its connection and
+      # crash a shared registry during the following test.
+      unless tags[:async] do
+        for supervisor <- [
+              BorsNG.Worker.Batcher.Supervisor,
+              BorsNG.Worker.Attemptor.Supervisor,
+              BorsNG.Worker.Orchestration.Workers
+            ] do
+          for {_, pid, _, _} <- DynamicSupervisor.which_children(supervisor), is_pid(pid) do
+            DynamicSupervisor.terminate_child(supervisor, pid)
+          end
+        end
+
+        for registry <- [BorsNG.Worker.Batcher.Registry, BorsNG.Worker.Attemptor.Registry] do
+          try do
+            :sys.get_state(registry, 1_000)
+          catch
+            :exit, _ -> :ok
+          end
+        end
+      end
+
+      Ecto.Adapters.SQL.Sandbox.stop_owner(owner)
+    end)
 
     :ok
   end
