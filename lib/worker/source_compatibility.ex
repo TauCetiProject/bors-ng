@@ -64,31 +64,30 @@ defmodule BorsNG.Worker.SourceCompatibility do
             order_by: p.id
           )
 
-        stale =
+        metadata =
           from(p in eligible,
-            where:
-              is_nil(p.source_compatibility) or
-                p.source_compatibility["projection_pending"] == true or
-                type(p.source_compatibility["base_sha"], :string) != ^base or
-                type(p.source_compatibility["head_sha"], :string) != p.commit or
-                type(p.source_compatibility["policy"], :string) != ^@policy or
-                (type(p.source_compatibility["status"], :string) in ["conflict", "missing_source"] and
-                   is_nil(p.source_compatibility["repair_head"])) or
-                (type(p.source_compatibility["status"], :string) == "pass" and
-                   not is_nil(p.source_compatibility["repair_head"]) and
-                   type(p.source_compatibility["repair_base"], :string) != ^base)
+            select: %{id: p.id, commit: p.commit, source_compatibility: p.source_compatibility}
           )
 
-        newer = Repo.all(from(p in stale, where: p.id > ^cursor, limit: 4))
+        # Compare decoded identities in Elixir: SQL JSON string casts have
+        # different quoting/collation semantics on PostgreSQL and MySQL 8.4.
+        # Inspect bounded lightweight metadata and perform source work for only
+        # one stale head before yielding the repository's mutator lane.
+        newer = Repo.all(from(p in metadata, where: p.id > ^cursor, limit: 16))
 
-        selected =
+        page =
           newer ++
             Repo.all(
-              from(p in stale,
+              from(p in metadata,
                 where: p.id <= ^cursor,
-                limit: ^(4 - length(newer))
+                limit: ^(16 - length(newer))
               )
             )
+
+        next = Enum.find(page, &stale?(&1, base))
+        selected = if next, do: [Repo.get!(Patch, next.id)], else: []
+        visited = if next, do: next.id, else: if(page == [], do: cursor, else: List.last(page).id)
+        more = if next, do: Enum.any?(newer, &(&1.id == next.id)), else: length(newer) == 16
 
         check(project, conn, base, selected, checker)
 
@@ -104,8 +103,8 @@ defmodule BorsNG.Worker.SourceCompatibility do
         progress = %{
           "base_sha" => base,
           "policy" => @policy,
-          "cursor" => if(selected == [], do: cursor, else: List.last(selected).id),
-          "checked_at" => if(length(selected) == 4, do: Outbox.now() - 240, else: Outbox.now())
+          "cursor" => visited,
+          "checked_at" => if(more, do: Outbox.now() - 240, else: Outbox.now())
         }
 
         project |> Ecto.Changeset.change(source_compatibility: progress) |> Repo.update!()
@@ -149,6 +148,15 @@ defmodule BorsNG.Worker.SourceCompatibility do
 
   def admit(_, _, _, links, _), do: links
 
+  defp stale?(patch, base) do
+    r = patch.source_compatibility || %{}
+
+    r["projection_pending"] == true or r["base_sha"] != base or
+      r["head_sha"] != patch.commit or r["policy"] != @policy or
+      (r["status"] in ["conflict", "missing_source"] and is_nil(r["repair_head"])) or
+      (r["status"] == "pass" and not is_nil(r["repair_head"]) and r["repair_base"] != base)
+  end
+
   def requested?(patch, head),
     do: get_in(patch.source_compatibility || %{}, ["repair_head"]) == head
 
@@ -187,8 +195,33 @@ defmodule BorsNG.Worker.SourceCompatibility do
         %{"status" => "ok", "results" => results} ->
           apply_results(project, conn, base, pending, results)
 
-        _ ->
-          :ok
+        failure ->
+          # A bounded fetch/lock/auth failure is unknown coverage, not a pass
+          # and not an invisible completed sweep. Keep it exact-head/base bound
+          # and leave authoritative staging available without repeated scans.
+          reason =
+            case failure do
+              %{"details" => %{"kind" => kind}}
+              when kind in ~w(timeout lock_timeout git_failed mirror_limit output_limit helper_failed helper_or_auth_failed helper_unavailable) ->
+                "source_helper_" <> kind
+
+              _ ->
+                "source_helper_unavailable"
+            end
+
+          results =
+            Enum.map(members, fn member ->
+              %{
+                "pr" => member.pr,
+                "head_sha" => member.head_sha,
+                "base_sha" => base,
+                "policy" => @policy,
+                "status" => "unknown",
+                "reason" => reason
+              }
+            end)
+
+          apply_results(project, conn, base, pending, results)
       end
     end
   end

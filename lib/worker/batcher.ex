@@ -1742,15 +1742,31 @@ defmodule BorsNG.Worker.Batcher do
     patch_links = Bundles.sort_links_for_merge(patch_links)
 
     base =
-      if predecessor,
-        do: %{
-          commit: CandidateJournal.commit_binding(predecessor)["commit"],
-          tree: CandidateJournal.commit_binding(predecessor)["tree"]
-        },
-        else: get_base(repo_conn, batch.into_branch)
+      cond do
+        patch_links == [] ->
+          nil
+
+        predecessor ->
+          %{
+            commit: CandidateJournal.commit_binding(predecessor)["commit"],
+            tree: CandidateJournal.commit_binding(predecessor)["tree"]
+          }
+
+        true ->
+          get_base(repo_conn, batch.into_branch)
+      end
 
     patch_links =
-      BorsNG.Worker.SourceCompatibility.admit(project, repo_conn, batch, patch_links, base.commit)
+      if patch_links == [],
+        do: [],
+        else:
+          BorsNG.Worker.SourceCompatibility.admit(
+            project,
+            repo_conn,
+            batch,
+            patch_links,
+            base.commit
+          )
 
     # If all patches were closed and removed, cancel the batch early
     if Enum.empty?(patch_links) do
