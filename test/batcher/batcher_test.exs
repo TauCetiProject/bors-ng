@@ -7969,6 +7969,8 @@ defmodule BorsNG.Worker.BatcherTest do
     %LinkPatchBatch{patch_id: patch.id, batch_id: batch.id, reviewer: "rvr"}
     |> Repo.insert!()
 
+    # No GitHub fixture exists: even an accidental base/source read must fail.
+    GitHub.ServerMock.put_state(%{})
     # Trigger a single poll cycle; should early-cancel the batch without touching GitHub
     Batcher.handle_info({:poll, :once}, proj.id)
 

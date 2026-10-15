@@ -50,6 +50,34 @@ defmodule BorsNG.GitHub.Server do
     {:ok, %{}}
   end
 
+  def handle_call({:advisory, type, {token, repo_xref}, args, deadline}, _from, state)
+      when type in [:post_comment, :notice_comments_since, :post_commit_status] do
+    # Include time spent behind another API request. Never execute an expired
+    # advisory call or hide retries/token refreshes inside its service budget.
+    Process.put(:github_advisory_deadline, deadline)
+
+    try do
+      if deadline <= System.monotonic_time(:millisecond), do: throw(:advisory_expired)
+      {raw, state} = raw_token!(token, state)
+      result = do_handle_call(type, {raw, repo_xref}, args)
+
+      state =
+        case {token, result} do
+          {{:installation, id}, {:error, _, 401, _}} -> Map.delete(state, id)
+          {{:installation, id}, {:error, _, 401}} -> Map.delete(state, id)
+          _ -> state
+        end
+
+      {:reply, result, state}
+    rescue
+      _ -> {:reply, {:error, :advisory_request}, state}
+    catch
+      _, _ -> {:reply, {:error, :advisory_request}, state}
+    after
+      Process.delete(:github_advisory_deadline)
+    end
+  end
+
   def handle_call({type, {{_, _} = token, repo_xref}, args}, _from, state) do
     use_token!(token, state, fn token ->
       do_handle_call(type, {token, repo_xref}, args)
@@ -1737,6 +1765,10 @@ defmodule BorsNG.GitHub.Server do
   end
 
   defp tesla_client(authorization, content_type \\ @content_type) do
+    deadline = Process.get(:github_advisory_deadline)
+    remaining = if deadline, do: deadline - System.monotonic_time(:millisecond)
+    if deadline && remaining <= 1, do: throw(:advisory_expired)
+
     middleware = [
       {Tesla.Middleware.BaseUrl, site()},
       {Tesla.Middleware.Headers,
@@ -1744,9 +1776,13 @@ defmodule BorsNG.GitHub.Server do
          {"authorization", authorization},
          {"accept", content_type},
          {"user-agent", "bors-ng https://bors.tech"}
-       ]},
-      {Tesla.Middleware.Retry, delay: 100, max_retries: 5}
+       ]}
     ]
+
+    middleware =
+      if deadline,
+        do: middleware,
+        else: middleware ++ [{Tesla.Middleware.Retry, delay: 100, max_retries: 5}]
 
     middleware =
       if Confex.get_env(:bors, :log_outgoing, false) do
@@ -1755,11 +1791,18 @@ defmodule BorsNG.GitHub.Server do
         middleware
       end
 
+    connect_timeout =
+      if deadline,
+        do: max(remaining, 1),
+        else: Confex.get_env(:bors, :api_github_timeout, 8_000) - 1
+
+    recv_timeout =
+      if deadline,
+        do: max(remaining, 1),
+        else: Confex.get_env(:bors, :api_github_timeout, 8_000) - 1
+
     params =
-      [
-        connect_timeout: Confex.get_env(:bors, :api_github_timeout, 8_000) - 1,
-        recv_timeout: Confex.get_env(:bors, :api_github_timeout, 8_000) - 1
-      ] ++
+      [connect_timeout: connect_timeout, recv_timeout: recv_timeout] ++
         case System.get_env("HTTPS_PROXY") do
           nil ->
             []

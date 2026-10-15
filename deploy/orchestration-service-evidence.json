@@ -1,0 +1,166 @@
+{
+  "issue": "https://github.com/TauCetiProject/TauCeti/issues/16811",
+  "captured_at": "2026-10-15T03:30:30.535233+00:00",
+  "priority_release_pr": "https://github.com/TauCetiProject/bors-ng/pull/30",
+  "production_read_only": true,
+  "pending_jobs": 0,
+  "running_jobs": 0,
+  "duplicate_active_heads": [],
+  "fresh_dispatches": [
+    {
+      "job_id": 26793,
+      "batch_id": 747,
+      "ready_wait_ms": 4739,
+      "service_ms": 6453,
+      "preceding_completion_gap_ms": 169,
+      "occupied_at_enqueue": [
+        {
+          "job_id": 26718,
+          "operation": "poll",
+          "service_ms": 68690
+        }
+      ]
+    },
+    {
+      "job_id": 27030,
+      "batch_id": 775,
+      "ready_wait_ms": 26132,
+      "service_ms": 25750,
+      "preceding_completion_gap_ms": 226,
+      "occupied_at_enqueue": [
+        {
+          "job_id": 26986,
+          "operation": "status",
+          "service_ms": 191612
+        }
+      ]
+    }
+  ],
+  "limits": [
+    "Snapshot before volume/service follow-up rollout; not a before-after throughput rate comparison.",
+    "Ready wait includes the current non-preemptible operation. Both fresh dispatches were claimed within226ms of the preceding completion.",
+    "Batch775 ready wait26.132s and service25.750s miss seconds-scale end-to-end target.",
+    "A191.612s status/completion and68.690s poll demonstrate remaining service work.",
+    "Preparation/live publication/labels remain partly synchronous. A watchdog bound is not a service latency target.",
+    "No production queue mutation, approval replay, forced CI cancellation or speculation expansion.",
+    "At03:39 candidate97/batch747 had one dispatch response and one successful promotion response; candidate98/batch775 had one dispatch response. This is not a like-for-like accepted-throughput rate comparison."
+  ],
+  "journal_followup_captured_at": "2026-10-15T03:39:34.155625+00:00",
+  "journal_observations": [
+    {
+      "candidate_id": 97,
+      "kind": "constructed",
+      "source": "bors.local_git",
+      "observed_at": 1792033886281452
+    },
+    {
+      "candidate_id": 97,
+      "kind": "dispatch_requested",
+      "source": "bors.outbox",
+      "observed_at": 1792033896985486
+    },
+    {
+      "candidate_id": 97,
+      "kind": "dispatched",
+      "source": "github.workflow_dispatch_response",
+      "observed_at": 1792033897415993
+    },
+    {
+      "candidate_id": 97,
+      "kind": "promotion_requested",
+      "source": "bors.outbox",
+      "observed_at": 1792034631855372
+    },
+    {
+      "candidate_id": 97,
+      "kind": "promoted",
+      "source": "github.base_push_response",
+      "observed_at": 1792034634882353
+    },
+    {
+      "candidate_id": 98,
+      "kind": "constructed",
+      "source": "bors.local_git",
+      "observed_at": 1792034792138256
+    },
+    {
+      "candidate_id": 98,
+      "kind": "dispatch_requested",
+      "source": "bors.outbox",
+      "observed_at": 1792034843808408
+    },
+    {
+      "candidate_id": 98,
+      "kind": "dispatched",
+      "source": "github.workflow_dispatch_response",
+      "observed_at": 1792034844008022
+    }
+  ],
+  "immutable_baseline_checks": {
+    "candidate_snapshots_unchanged": 93,
+    "admission_snapshots_unchanged": 2082,
+    "valid_approvals_before": 323,
+    "approval_changes": [
+      {
+        "pr": 15904,
+        "reason": "closed_or_merged"
+      },
+      {
+        "pr": 15905,
+        "reason": "closed_or_merged"
+      },
+      {
+        "pr": 16109,
+        "reason": "head_changed"
+      },
+      {
+        "pr": 16698,
+        "reason": "head_changed"
+      },
+      {
+        "pr": 16713,
+        "reason": "head_changed"
+      },
+      {
+        "pr": 16784,
+        "reason": "closed_or_merged"
+      }
+    ],
+    "unexplained_approval_changes": [],
+    "duplicate_active_heads": 0
+  },
+  "volume_rollout_sample": {
+    "captured_at": "2026-10-15T03:53:29.793194+00:00",
+    "duplicate_active_heads": [],
+    "dirty_pending_wakes": [
+      {
+        "id": 27391,
+        "operation": "recover_queue",
+        "wake_version": 2,
+        "state": "pending"
+      },
+      {
+        "id": 27396,
+        "operation": "wake_backend_holds",
+        "wake_version": 2,
+        "state": "pending"
+      },
+      {
+        "id": 27397,
+        "operation": "eligibility",
+        "wake_version": 2,
+        "state": "pending"
+      }
+    ],
+    "limit": "No stage-status jobs in this short post-rollout interval; filtered ingress rate not measured. Eligibility27387 held an old running lease across deployment, was reclaimed after lease expiry, and completed in2276ms. Its132s row age was not measured service.",
+    "lease_replay": {
+      "job_id": 27387,
+      "first_claimed_at_ms": 1792036277728,
+      "unchanged_lease_until": 1792036578,
+      "reclaimed_at_ms": 1792036612601,
+      "completed_at_ms": 1792036614877,
+      "attempts": 2,
+      "final_service_ms": 2276
+    }
+  }
+}

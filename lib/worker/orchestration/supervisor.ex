@@ -5,6 +5,7 @@ defmodule BorsNG.Worker.Orchestration.Supervisor do
   def init(_) do
     Supervisor.init(
       [
+        {BorsNG.GitHub.Advisory, []},
         {Registry, keys: :unique, name: BorsNG.Worker.Orchestration.Registry},
         {DynamicSupervisor, strategy: :one_for_one, name: BorsNG.Worker.Orchestration.Workers},
         {BorsNG.Worker.Orchestration.Dispatcher, []}

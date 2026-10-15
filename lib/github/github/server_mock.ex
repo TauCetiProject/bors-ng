@@ -130,6 +130,12 @@ defmodule BorsNG.GitHub.ServerMock do
     {:reply, state, state}
   end
 
+  def handle_call({:advisory, type, conn, args, deadline}, from, state) do
+    if deadline > System.monotonic_time(:millisecond),
+      do: handle_call({type, conn, args}, from, state),
+      else: {:reply, {:error, :advisory_request}, state}
+  end
+
   def handle_call({type, t, args}, _from, state) do
     {res, state} = do_handle_call(type, t, args, state)
     {:reply, res, state}

@@ -216,7 +216,12 @@ In async mode, webhook ingress avoids durable stage-status jobs for SHAs that
 match no recorded batch, outside an assembling candidate's conservative fallback.
 Trying receipts still go directly to their independent serialized actor. Async dispatch binds its commit before publication. An unbound candidate
 on a waiting batch retains unmatched observations to cover temporary-ref assembly
-races; a database/read failure fails the webhook for its ordinary durable retry.
+races only for the latest generation while construction can still publish before
+binding. Stopped/bound/superseded generations cannot keep that fallback alive.
+An append-only `local_assembly_selected` fact disables the fallback for async
+local assembly, whose remote publication follows binding. Unknown and shadow
+assemblers remain conservative; native mode always retains publication races.
+A database/read failure fails the webhook for its ordinary durable retry.
 Legacy mode still forwards every status because its publication can precede its
 record write. Trying delivery remains unconditional in the controller. Candidate
 check receipts are journaled and ordinary PR eligibility notifications are queued
@@ -230,3 +235,73 @@ and drain pending/running versioned wakeups, including dirty follow-ups. Do not
 clear a key or delete a row to force drainage. Additive columns may remain after
 rollback. Deployment/restart on this release retains the same lease and version
 fences; restart does not require replaying approval comments.
+
+## Cooperative service boundaries and advisory delivery
+
+In async mode, a terminal completion finishes its durable mutation and enqueues
+an immediate completion poll instead of constructing the next batch recursively.
+Its per-batch key is separate from ordinary poll retries, so an unrelated failed
+poll cannot impose its infrastructure backoff on fresh completion. Queue and
+backend-hold recovery handle one PR per operation, with at most four distinct PRs
+per original wakeup. The remaining bounded budget and visited IDs travel in
+durable continuation messages; a short queue cannot wrap and repeatedly read the
+same PR in that wakeup. Native recovery retains its existing four-PR pass.
+Restart may revisit a PR; live identity, approval and active-membership guards
+still decide whether recovery may admit it.
+
+Advisory notices and PR-head `bors` status writes have one separate global
+notification slot, with one durable lease per repository. The mutation lane
+retains one executor per repository and its existing global worker cap. Only
+`notice` and `projection` payloads enter the notification executor; it rejects
+merge work and ignores legacy poll messages. Project-row locking still serializes
+all short mailbox transitions. Neither lane holds a database transaction during
+GitHub calls. This permits advisory HTTP work alongside a merge mutation; it
+never permits two staging/main mutators.
+
+Notification jobs keep repository FIFO across retry deadlines. Each notification operation
+has an eight-second shared deadline across reconciliation and delivery, including
+advisory API queue time, with a ten-second maximum caller timeout. A separate
+single API client and token cache keep advisory HTTP off the merge API server.
+A request task is terminated at its deadline, including slowly streaming HTTP;
+this bounds local service, without claiming to revoke an already accepted remote
+write. Expired queued requests do no HTTP work; advisory HTTP requests
+share the remaining deadline across token acquisition and delivery, without
+middleware retries or token refresh replay. An error or lost response waits at
+least five minutes before another attempt. Permanent HTTP4xx (except403/429)
+and a truncated notice reconciliation terminate visibly; other advisory failures
+terminate after six attempts. Terminal rows retain their tombstones and a
+`notification_terminal:` error, and emit a warning before releasing FIFO.
+Exact merge/approval commands and verdict observations have no such attempt cap.
+A401 evicts that advisory installation token without replaying the write.
+Notice retries reconcile their stable marker before posting again.
+Status retries may repeat the same logical advisory status. Completed source-job
+projection keys remain tombstones. Delivery rechecks the batch and current
+candidate before publishing green; canceled/error/conflict or superseded
+candidates cannot publish delayed green, and completed batches cannot publish a
+late non-green status. A missing/deleted batch can still publish its cancellation
+red, while green is suppressed. A projection is skipped if its SHA has become a
+recorded tested commit; the synchronous tested status owns that identity. Candidate/trying verdict observations remain unchanged.
+The tested commit's `bors` status remains synchronous before promotion because
+branch protection may require it. Label reconciliation also remains synchronous
+to preserve merged-label history.
+
+These boundaries reduce completion and recovery occupancy; candidate preparation,
+live dispatch validation/publication and label reconciliation may still exceed
+the ten-second service target. The 1,100-second watchdog is an infrastructure
+safety bound, not a latency target. Keep measuring ready wait, free-lane claim gap
+and service separately; a fast free-lane claim does not meet the user-visible
+ready-to-dispatch target while another operation occupies the lane.
+
+Rollback to code without these payload handlers requires stopping new intake and
+draining pending/running `projection`, `completion_poll`, `recover_queue_slice`
+and `backend_holds_slice` work as well as versioned wakeups. Keep the forward
+worker available for drainage and retain all terminal errors/tombstones. Do not
+mutate queue rows to force a rollback. A rollback during a live lease must wait
+for its ordinary fence; it is not evidence of running CI.
+
+Phase telemetry `[:bors, :outbox, :phase]` and `outbox_phase` logs separate metadata
+preparation, local Git assembly, assembly live-head reads, dispatch live-member
+validation and publication. Metadata includes job/project/batch IDs and a fixed
+phase name, with monotonic service time; it carries no tokens or status payloads.
+Statistics never decide candidate validity. Separate notification kinds when
+comparing merge-lane ready wait and service distributions.

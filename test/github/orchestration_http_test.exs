@@ -158,4 +158,142 @@ defmodule BorsNG.OrchestrationHttpTest do
     assert query["since"] == since
     assert query["per_page"] == "100"
   end
+
+  defp advisory(type, args, budget \\ 1_000) do
+    old = Application.get_env(:bors, :server)
+    Application.put_env(:bors, :server, Server)
+
+    try do
+      BorsNG.GitHub.Advisory.handle_call(
+        {:advisory, type, {{:raw, "test-token"}, 14}, args,
+         System.monotonic_time(:millisecond) + budget},
+        {self(), make_ref()},
+        %{}
+      )
+    after
+      Application.put_env(:bors, :server, old)
+    end
+  end
+
+  test "advisory HTTP errors make one attempt without middleware or token refresh retries" do
+    assert {:reply, {:error, :post_commit_status, 500, _}, %{}} =
+             response(500, %{"message" => "unavailable"}, fn ->
+               advisory(:post_commit_status, {"head", :error, "red", "url"})
+             end)
+
+    assert_receive {:request, request}
+    assert request =~ "/statuses/head"
+    refute_receive {:request, _}, 10
+    refute Process.get(:github_advisory_deadline)
+  end
+
+  test "an advisory request expired behind another API call makes no HTTP request" do
+    assert {:reply, {:error, :advisory_request}, %{}} =
+             advisory(:post_commit_status, {"head", :ok, "green", "url"}, -1)
+
+    refute Process.get(:github_advisory_deadline)
+  end
+
+  test "advisory HTTP service stops at its remaining request budget" do
+    {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true])
+    {:ok, {_, port}} = :inet.sockname(listener)
+    old = Application.get_env(:bors, :api_github_root)
+    Application.put_env(:bors, :api_github_root, "http://127.0.0.1:#{port}")
+
+    on_exit(fn ->
+      :gen_tcp.close(listener)
+      Application.put_env(:bors, :api_github_root, old)
+    end)
+
+    parent = self()
+
+    server =
+      spawn(fn ->
+        {:ok, socket} = :gen_tcp.accept(listener, 5000)
+        {:ok, request} = :gen_tcp.recv(socket, 0, 5000)
+        send(parent, {:request, request})
+
+        receive do
+          :stop -> :gen_tcp.close(socket)
+        end
+      end)
+
+    on_exit(fn -> send(server, :stop) end)
+    started = System.monotonic_time(:millisecond)
+
+    assert {:reply, {:error, :advisory_request}, %{}} =
+             advisory(:post_commit_status, {"head", :ok, "green", "url"}, 200)
+
+    assert System.monotonic_time(:millisecond) - started < 1_000
+    assert_receive {:request, _}
+    refute Process.get(:github_advisory_deadline)
+  end
+
+  test "advisory HTTP runs while the mutation API client is occupied" do
+    :sys.suspend(BorsNG.GitHub)
+
+    try do
+      assert {:reply, :ok, %{}} =
+               response(201, %{}, fn ->
+                 advisory(:post_commit_status, {"head", :ok, "green", "url"})
+               end)
+
+      assert_receive {:request, _}
+    after
+      :sys.resume(BorsNG.GitHub)
+    end
+  end
+
+  test "an unauthorized advisory evicts its installation token without replay" do
+    assert {:reply, {:error, :post_commit_status, 401, _}, %{}} =
+             response(401, %{}, fn ->
+               Server.handle_call(
+                 {:advisory, :post_commit_status, {{:installation, 91}, 14},
+                  {"head", :error, "red", "url"}, System.monotonic_time(:millisecond) + 1_000},
+                 {self(), make_ref()},
+                 %{91 => {"test-token", Joken.current_time()}}
+               )
+             end)
+
+    assert_receive {:request, _}
+    refute_receive {:request, _}, 10
+  end
+
+  test "a slowly streaming response cannot extend the advisory operation deadline" do
+    {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true])
+    {:ok, {_, port}} = :inet.sockname(listener)
+    old = Application.get_env(:bors, :api_github_root)
+    Application.put_env(:bors, :api_github_root, "http://127.0.0.1:#{port}")
+
+    on_exit(fn ->
+      :gen_tcp.close(listener)
+      Application.put_env(:bors, :api_github_root, old)
+    end)
+
+    server =
+      spawn(fn ->
+        {:ok, socket} = :gen_tcp.accept(listener, 5000)
+        {:ok, _} = :gen_tcp.recv(socket, 0, 5000)
+
+        :gen_tcp.send(
+          socket,
+          "HTTP/1.1 201 Result\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n"
+        )
+
+        Enum.each(1..30, fn _ ->
+          :gen_tcp.send(socket, " ")
+          Process.sleep(30)
+        end)
+
+        :gen_tcp.close(socket)
+      end)
+
+    on_exit(fn -> Process.exit(server, :kill) end)
+    started = System.monotonic_time(:millisecond)
+
+    assert {:reply, {:error, :advisory_request}, %{}} =
+             advisory(:post_commit_status, {"head", :ok, "green", "url"}, 200)
+
+    assert System.monotonic_time(:millisecond) - started < 800
+  end
 end
