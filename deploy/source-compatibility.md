@@ -28,7 +28,9 @@ all build/audit/policy/pin/size guards remain mandatory. External Mathlib invent
 import cycles and declaration-name grep conviction are out of scope.
 
 Parsed headers are reused only by immutable Git blob plus `local-source-v2`
-checker policy. Each new base still inventories the exact main and prospective
+header-parser policy. Scheduling results use `local-source-v3`, so old timeout
+results are revisited lazily with the existing fair cursor after this rollout.
+The parser/cache itself is unchanged. Each new base still inventories the exact main and prospective
 trees; passing results are keyed to full main/head/policy identity and never
 relabelled fresh across main commits. Bump the policy/cache version when changing
 the parser semantics. Helper limits: 8 seconds for ordinary background turns, 30 seconds

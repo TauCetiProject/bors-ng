@@ -320,7 +320,7 @@ class Mirror:
             base_error = error.details if isinstance(error, Failure) else dict(kind='non_text_source')
         for member in members:
             identity = dict(pr=member['pr'], head_sha=member['head_sha'], base_sha=base,
-                            policy='local-source-v2')
+                            policy='local-source-v3')
             try:
                 self.phase = 'merge_tree'
                 output, status = self.git('merge-tree', '--write-tree', '--name-only', '-z',

@@ -1,0 +1,76 @@
+{
+  "production_runtime": false,
+  "external_mutations": false,
+  "cpu_quota_percent": 25,
+  "cpu_limit_source": "Local reproduction assumption, not measured production cgroup",
+  "base_sha": "31cef0a59993a80eaa430d219c38f4907746cd1e",
+  "head_sha": "de3420f9b28e0b47ef669efc9ec511abf3218b13",
+  "pr": 16970,
+  "measurements": {
+    "quarter-cold-network": {
+      "wall": 8.002290344011271,
+      "result": {
+        "status": "error",
+        "details": {
+          "kind": "timeout",
+          "operation": "fetch",
+          "phase": "fetch"
+        }
+      }
+    },
+    "quarter-bootstrap": {
+      "wall": 29.398708329972578,
+      "result": {
+        "status": "ok",
+        "results": [
+          {
+            "pr": 16970,
+            "head_sha": "de3420f9b28e0b47ef669efc9ec511abf3218b13",
+            "base_sha": "31cef0a59993a80eaa430d219c38f4907746cd1e",
+            "policy": "local-source-v2",
+            "status": "pass",
+            "tree": "0cf8664e2fcd720bb2be9e20ac534e91860b3810",
+            "missing_imports": [],
+            "coverage": "all_project_local_headers"
+          }
+        ]
+      }
+    },
+    "quarter-cold-fixed": {
+      "wall": 30.0056091559818,
+      "result": {
+        "status": "ok",
+        "results": [
+          {
+            "pr": 16970,
+            "head_sha": "de3420f9b28e0b47ef669efc9ec511abf3218b13",
+            "base_sha": "31cef0a59993a80eaa430d219c38f4907746cd1e",
+            "policy": "local-source-v2",
+            "status": "unknown",
+            "reason": "timeout",
+            "phase": "candidate_headers",
+            "operation": "ls-tree"
+          }
+        ]
+      }
+    },
+    "quarter-cold-fixed-resume": {
+      "wall": 1.0073624659853522,
+      "result": {
+        "status": "ok",
+        "results": [
+          {
+            "pr": 16970,
+            "head_sha": "de3420f9b28e0b47ef669efc9ec511abf3218b13",
+            "base_sha": "31cef0a59993a80eaa430d219c38f4907746cd1e",
+            "policy": "local-source-v2",
+            "status": "pass",
+            "tree": "0cf8664e2fcd720bb2be9e20ac534e91860b3810",
+            "missing_imports": [],
+            "coverage": "all_project_local_headers"
+          }
+        ]
+      }
+    }
+  }
+}

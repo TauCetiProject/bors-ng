@@ -3,7 +3,7 @@ defmodule BorsNG.SourceRequestHttpTest do
   @head String.duplicate("a", 40)
   @base String.duplicate("b", 40)
 
-  defp request(author, policy \\ "local-source-v2") do
+  defp request(author, policy) do
     %{
       id: 23,
       user: %{login: author},
@@ -47,22 +47,25 @@ defmodule BorsNG.SourceRequestHttpTest do
     action.()
   end
 
-  test "resolution edits only the owned local-source marker and retains diagnosis" do
-    serve([{200, [request("tau-ceti-bors[bot]")]}, {200, %{}}], fn ->
-      assert :ok =
-               BorsNG.GitHub.Server.do_handle_call(
-                 :resolve_source_request,
-                 {{:raw, "test"}, 14},
-                 {1, @head, @base}
-               )
+  for policy <- ~w(local-source-v2 local-source-v3) do
+    @policy policy
+    test "resolution edits only the owned #{@policy} marker and retains diagnosis" do
+      serve([{200, [request("tau-ceti-bors[bot]", @policy)]}, {200, %{}}], fn ->
+        assert :ok =
+                 BorsNG.GitHub.Server.do_handle_call(
+                   :resolve_source_request,
+                   {{:raw, "test"}, 14},
+                   {1, @head, @base}
+                 )
 
-      assert_receive {:http, get}
-      assert get =~ "GET /repositories/14/issues/1/comments?per_page=100"
-      assert_receive {:http, patch}
-      assert patch =~ "PATCH /repositories/14/issues/comments/23"
-      assert patch =~ "Source evidence superseded"
-      refute patch =~ "<!--tauceti-rebase:v1"
-    end)
+        assert_receive {:http, get}
+        assert get =~ "GET /repositories/14/issues/1/comments?per_page=100"
+        assert_receive {:http, patch}
+        assert patch =~ "PATCH /repositories/14/issues/comments/23"
+        assert patch =~ "Source evidence superseded"
+        refute patch =~ "<!--tauceti-rebase:v1"
+      end)
+    end
   end
 
   make_request = fn author, policy ->

@@ -135,7 +135,7 @@ defmodule BorsNG.Worker.SourceCompatibilityTest do
       "pr" => pr,
       "head_sha" => @head,
       "base_sha" => @base,
-      "policy" => "local-source-v2",
+      "policy" => "local-source-v3",
       "status" => status,
       "coverage" => "all_project_local_headers",
       "missing_imports" => [
@@ -203,6 +203,29 @@ defmodule BorsNG.Worker.SourceCompatibilityTest do
              @base
            )
            |> length() == 2
+  end
+
+  test "a prior checker timeout is retried lazily without changing the source identity", c do
+    patches =
+      Enum.map(c.patches, fn patch ->
+        old = result(patch.pr_xref, "unknown") |> Map.put("policy", "local-source-v2")
+        patch |> Ecto.Changeset.change(source_compatibility: old) |> Repo.update!()
+      end)
+
+    SourceCompatibility.check(c.project, @conn, @base, patches, fn _, _, base, members ->
+      assert base == @base
+      assert Enum.map(members, & &1.head_sha) == [@head, @head]
+      %{"status" => "ok", "results" => Enum.map(members, &result(&1.pr, "pass"))}
+    end)
+
+    for patch <- patches do
+      assert %{
+               "policy" => "local-source-v3",
+               "status" => "pass",
+               "head_sha" => @head,
+               "base_sha" => @base
+             } = Repo.get!(Patch, patch.id).source_compatibility
+    end
   end
 
   test "a helper timeout persists exact unknown coverage without a hold or repeated source work",

@@ -5,7 +5,7 @@ defmodule BorsNG.Worker.SourceCompatibility do
   alias BorsNG.GitHub
   alias BorsNG.Worker.{Batcher, LocalGit}
   alias BorsNG.Worker.Orchestration.Outbox
-  @policy "local-source-v2"
+  @policy "local-source-v3"
   @keep ~w(keep hold wip human do-not-close)
 
   def enabled?, do: System.get_env("BORS_SOURCE_COMPATIBILITY", "on") != "off"
