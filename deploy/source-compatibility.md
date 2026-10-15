@@ -31,7 +31,8 @@ Parsed headers are reused only by immutable Git blob plus `local-source-v2`
 checker policy. Each new base still inventories the exact main and prospective
 trees; passing results are keyed to full main/head/policy identity and never
 relabelled fresh across main commits. Bump the policy/cache version when changing
-the parser semantics. Helper limits: 30 seconds total, 32 selected heads, 4 MiB
+the parser semantics. Helper limits: 8 seconds for background turns, 30 seconds
+for selected-head admission, 32 selected heads, 4 MiB
 per inventory/batch read, 256 KiB per source, existing 2 GiB mirror budget and
 root flock. It executes no candidate code and writes no remote refs.
 
@@ -110,6 +111,16 @@ staging remains available; the same inputs do not trigger an unbounded retry
 loop. Later main/head identities are checked normally. The first production
 chunks advanced their cursor without storing these failures; this observability
 gap was caught during rollout rather than reported as a successful source pass.
+
+Production background turns exhausted the original 30-second helper budget
+(31.745–32.722 seconds total observed service) without conclusive coverage.
+Background turns now use an 8-second helper budget, including Git and root-lock
+waits, to yield the mutator sooner. GitHub/token/metadata overhead is additional;
+this is not a claim of a hard 8-second total operation deadline. Selected-head
+admission retains its separate 30-second budget. Cold cache timeouts stay unknown
+and use authoritative validation; ordinary candidate assembly may warm the same
+Git mirror. No warm-cache success or reduced production latency is claimed until
+measured, and no extra warmup service, repeated CI or faster poll is introduced.
 
 Acceptance is still pending: genuine deployed request, actual tending-worker
 pickup and validated changed-head outcome, normal new-head CI/review/re-admission,

@@ -34,7 +34,7 @@ defmodule BorsNG.Worker.SourceCompatibility do
 
   def wake(_, _), do: :ok
 
-  def chunk(project_id, checker \\ &LocalGit.compatibility/4) do
+  def chunk(project_id, checker \\ &LocalGit.compatibility(&1, &2, &3, &4, 8)) do
     project = Repo.get!(Project, project_id)
     conn = Project.installation_connection(project.repo_xref, Repo)
     previous = project.source_compatibility || %{}
