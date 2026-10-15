@@ -47,7 +47,20 @@ defmodule BorsNG.Worker.CandidateJournal do
             original -> original.snapshot["original_admitted_at"]
             source_link -> nil
             true -> observed_at
-          end
+          end,
+        "scheduling" =>
+          if(source_link,
+            do: if(original, do: original.snapshot["scheduling"]),
+            else: %{
+              "priority" => patch.priority,
+              "singleton" => patch.is_single,
+              "label_hint" =>
+                if(patch.commit == link.head_sha,
+                  do: BorsNG.Worker.Batcher.Diversity.cached(patch)
+                ),
+              "policy" => "existing_admission; diversity_disabled"
+            }
+          )
       }
     })
 

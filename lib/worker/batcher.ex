@@ -4467,6 +4467,7 @@ defmodule BorsNG.Worker.Batcher do
     Delegation.reconcile_default_expiry(patch, toml.delegation_default_expiry_sec)
 
     with {:ok, labels} <- GitHub.get_labels(repo_conn, patch.pr_xref),
+         :ok <- Batcher.Diversity.remember(patch, labels),
          {:ok, github_commit_statuses} <- GitHub.get_commit_status(repo_conn, patch.commit),
          {:ok, reviews} <- GitHub.get_reviews(repo_conn, patch.pr_xref),
          {:ok, commit_reviews} <- maybe_get_commit_reviews(repo_conn, patch, toml) do
@@ -4515,15 +4516,32 @@ defmodule BorsNG.Worker.Batcher do
 
       case {passed_label, no_error_status, no_waiting_status, no_unset_status, passed_review,
             code_owners_approved, passed_up_to_date_review} do
-        {true, true, true, true, :sufficient, true, :sufficient} -> {:ok, toml.max_batch_size}
-        {false, _, _, _, _, _, _} -> {:error, :blocked_labels}
-        {_, _, _, _, :insufficient, _, _} -> {:error, :insufficient_approvals}
-        {_, _, _, _, :failed, _, _} -> {:error, :blocked_review}
-        {_, _, _, _, _, false, _} -> {:error, :missing_code_owner_approval}
-        {_, false, _, _, _, _, _} -> {:error, :pr_status}
-        {_, _, false, _, _, _, _} -> {:waiting, toml}
-        {_, _, _, false, _, _, _} -> {:waiting, toml}
-        {_, _, _, _, _, _, :insufficient} -> {:error, :insufficient_up_to_date_approvals}
+        {true, true, true, true, :sufficient, true, :sufficient} ->
+          {:ok, toml.max_batch_size}
+
+        {false, _, _, _, _, _, _} ->
+          {:error, :blocked_labels}
+
+        {_, _, _, _, :insufficient, _, _} ->
+          {:error, :insufficient_approvals}
+
+        {_, _, _, _, :failed, _, _} ->
+          {:error, :blocked_review}
+
+        {_, _, _, _, _, false, _} ->
+          {:error, :missing_code_owner_approval}
+
+        {_, false, _, _, _, _, _} ->
+          {:error, :pr_status}
+
+        {_, _, false, _, _, _, _} ->
+          {:waiting, toml}
+
+        {_, _, _, false, _, _, _} ->
+          {:waiting, toml}
+
+        {_, _, _, _, _, _, :insufficient} ->
+          {:error, :insufficient_up_to_date_approvals}
       end
     else
       error when is_tuple(error) and tuple_size(error) >= 2 and elem(error, 0) == :error ->

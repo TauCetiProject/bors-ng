@@ -92,10 +92,12 @@ defmodule BorsNG.Worker.CandidateJournalTest do
   end
 
   test "retry ancestry preserves approval identity and replay appends nothing", ctx do
+    BorsNG.Worker.Batcher.Diversity.remember(ctx.patch, ["roadmap/A"])
     link = member(ctx.batch, ctx.patch)
     parent = begin(ctx.batch)
     ctx.batch |> Batch.changeset(%{state: :error}) |> Repo.update!()
     links = Repo.all(LinkPatchBatch.from_batch(ctx.batch.id))
+    BorsNG.Worker.Batcher.Diversity.remember(ctx.patch, ["roadmap/B"])
     child = Divider.clone_batch(links, ctx.project.id, "main", "inconclusive_ci")
     child_link = Repo.one!(LinkPatchBatch.from_batch(child.id))
     a = Journal.admission(child_link.id)
@@ -106,9 +108,23 @@ defmodule BorsNG.Worker.CandidateJournalTest do
     assert a.snapshot["original_admitted_at"] == original.snapshot["original_admitted_at"]
     assert a.snapshot["retry_reason"] == "inconclusive_ci"
     assert a.snapshot["manual_approval"] == original.snapshot["manual_approval"]
+    assert a.snapshot["scheduling"] == original.snapshot["scheduling"]
+    assert a.snapshot["scheduling"]["label_hint"]["labels"] == ["roadmap/A"]
     assert Divider.clone_batch(links, ctx.project.id, "main").id == child.id
     assert Repo.aggregate(CandidateAdmission, :count, :id) == 2
     assert Journal.admission(child_link.id) == a
+  end
+
+  test "scheduling evidence is expendable and never changes approval identity", ctx do
+    BorsNG.Worker.Batcher.Diversity.remember(ctx.patch, ["roadmap/A"])
+    link = member(ctx.batch, ctx.patch)
+    a = Journal.admission(link.id)
+    assert a.snapshot["scheduling"]["label_hint"]["head_sha"] == link.head_sha
+    assert a.snapshot["scheduling"]["priority"] == ctx.patch.priority
+    assert a.snapshot["manual_approval"] == ctx.patch.manual_approval
+    Process.delete(BorsNG.Worker.Batcher.Diversity)
+    candidate = begin(ctx.batch)
+    assert hd(candidate.snapshot["members"])["scheduling"] == a.snapshot["scheduling"]
   end
 
   test "historical rows retain explicitly unknown admissions and ancestry", ctx do
