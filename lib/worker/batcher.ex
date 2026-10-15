@@ -1909,7 +1909,8 @@ defmodule BorsNG.Worker.Batcher do
   defp assemble_candidate_batch(batch, links, base, candidate, "local") do
     conn = get_repo_conn(batch.project)
 
-    with {:ok, toml} <- Batcher.GetBorsToml.get_required(conn, base.commit),
+    with :ok <- BorsNG.Worker.LocalGit.capacity(links),
+         {:ok, toml} <- Batcher.GetBorsToml.get_required(conn, base.commit),
          true <- toml.use_squash_merge and batch.project.staging_branch == "staging",
          {:ok, result, context} <- local_assembly(batch, links, candidate, toml),
          expected <-
@@ -2005,6 +2006,27 @@ defmodule BorsNG.Worker.Batcher do
 
       :race ->
         start_waiting_merged_batch(batch, links, base, :race)
+
+      {:error, %{"kind" => "member_limit"} = details} ->
+        # Reuse durable, bundle-aware retry creation; never retry an unchanged
+        # permanently unsupported formation or split an atomic bundle.
+        state = Divider.split_batch(links, batch)
+
+        CandidateJournal.event(candidate, "local_capacity_partitioned", "bors.local_git", %{
+          error: details,
+          members: length(links),
+          result: state
+        })
+
+        if state == :failed do
+          patches = Enum.map(links, & &1.patch)
+          QueueApproval.fail(patches, batch, :member_limit)
+          Bundles.drop_held_approvals(patches)
+          Labeler.mark_awaiting_requeue(conn, batch.into_branch, patches)
+        end
+
+        poll_after_delay(batch.project)
+        {:error, nil}
 
       {:error, details} ->
         CandidateJournal.event(candidate, "local_error", "bors.local_git", %{error: details})

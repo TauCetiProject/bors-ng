@@ -30,6 +30,13 @@ defmodule BorsNG.Worker.LocalGitTest do
     assert LocalGit.mode(project, "main", conn) == "off"
   end
 
+  test "assembly capacity supports the configured maximum and rejects excess before helper work" do
+    for count <- [32, 33, 128], do: assert(LocalGit.capacity(Enum.to_list(1..count)) == :ok)
+
+    assert {:error, %{"kind" => "member_limit", "max_members" => 128}} =
+             LocalGit.capacity(Enum.to_list(1..129))
+  end
+
   test "metadata cannot reorder or replace approved immutable members" do
     candidate = %Candidate{
       id: 1,

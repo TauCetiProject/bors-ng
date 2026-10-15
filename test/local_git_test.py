@@ -154,6 +154,38 @@ class LocalGitTest(unittest.TestCase):
         local.validate(self.request)
         return TestMirror(self.request, self.upstream).run()
 
+    def test_assembly_capacity_with_real_independent_heads(self):
+        # Exercise actual merge ancestry and squash construction, not repeated
+        # copies of one head (which would fail as already merged).
+        members = []
+        for n in range(1, 129):
+            head = self.commit(self.base, {f'member-{n}': str(n)})
+            members.append(self.member(n, head))
+        for count in [33, 128]:
+            with self.subTest(members=count):
+                self.request.update(members=members[:count], timeout=120, diagnostics=False)
+                result = self.run_mirror()
+                self.assertEqual(result['status'], 'ok')
+                self.assertEqual([m['pr'] for m in result['commits']], list(range(1, count + 1)))
+                mirror = Path(self.request['root']) / 'example--repository.git'
+                commit = result['result']['commit']
+                self.assertEqual(git(mirror, 'rev-list', '--count', self.base + '..' + commit), str(count))
+                self.assertEqual(git(mirror, 'show', commit + f':member-{count}'), str(count))
+                self.assertEqual(result['result']['base_sha'], self.base)
+                self.assertLessEqual(result['mirror_bytes'], self.request['max_bytes'])
+
+    def test_operation_specific_member_boundaries(self):
+        for operation, limit in [('assemble', 128), ('compatibility', 32)]:
+            request = self.request | dict(operation=operation, base_sha=self.base)
+            for count in [1, 32, limit]:
+                local.validate(request | dict(members=[self.member(n, self.base) for n in range(count)]))
+            with self.assertRaises(local.Failure) as error:
+                local.validate(request | dict(members=[self.member(n, self.base) for n in range(limit + 1)]))
+            self.assertEqual(error.exception.details, dict(kind='member_limit', max_members=limit, members=limit + 1))
+            with self.assertRaises(local.Failure) as error:
+                local.validate(request | dict(members=[]))
+            self.assertEqual(error.exception.details['kind'], 'empty_members')
+
     def test_order_squash_attribution_and_restart(self):
         one = self.commit(self.base, {'a': 'a'})
         two = self.commit(self.base, {'b': 'b'})

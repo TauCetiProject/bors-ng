@@ -48,6 +48,19 @@ missing SHAs are fetched; force-pushed/unavailable objects never fall back to a
 PR's live ref. Local refs retain current inputs/result; they are replaced at the
 next construction. Missing/evicted objects during publication defer safely.
 
+Assembly accepts at most 128 ordered members, matching the current candidate
+policy maximum. Existing waiting batches of 33–128 members need no migration:
+the next normal attempt uses their immutable approvals and heads. Larger local
+formations use the existing durable bundle-aware bisection path before metadata
+or Git work; sealed child retries retain admission lineage and priority. An
+indivisible oversized bundle stops for maintainer attention instead of repeatedly
+attempting an unsupported formation. Lower policy admission limits still apply.
+The helper's compatibility limit remains independently bounded at 32 members;
+source checks chunk larger supplied lists into separate requests. Admission still
+selects at most 32 singleton heads, and background reconciliation still checks
+one stale head at a time. The existing time, disk, output and diagnostic bounds
+apply to larger assemblies unchanged; optional diagnostics may remain incomplete.
+
 Publication is separate from assembly. The caller validates the current candidate
 identity and live heads, persists CI intent, then pushes exactly the assembled
 commit to `refs/heads/staging` with an explicit expected old SHA lease. No other

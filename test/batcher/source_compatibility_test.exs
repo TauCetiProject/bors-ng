@@ -82,6 +82,54 @@ defmodule BorsNG.Worker.SourceCompatibilityTest do
     {:ok, project: project, batch: batch, patches: patches}
   end
 
+  test "assembly-sized compatibility input uses independent bounded requests", ctx do
+    extra =
+      for n <- 3..65 do
+        Repo.insert!(%Patch{
+          project_id: ctx.project.id,
+          pr_xref: n,
+          commit: @head,
+          into_branch: "main"
+        })
+      end
+
+    mock = GitHub.ServerMock.get_state()
+
+    pulls =
+      Map.new(
+        1..65,
+        &{&1, %GitHub.Pr{number: &1, state: :open, base_ref: "main", head_sha: @head}}
+      )
+
+    GitHub.ServerMock.put_state(put_in(mock, [@conn, :pulls], pulls))
+
+    checker = fn _, _, base, members ->
+      assert base == @base
+      assert length(members) <= 32
+      send(self(), {:chunk, Enum.map(members, & &1.pr)})
+      # A failure in the middle chunk cannot discard results from its siblings.
+      if hd(members).pr == 33 do
+        %{"status" => "error", "details" => %{"kind" => "timeout"}}
+      else
+        %{"status" => "ok", "results" => Enum.map(members, &result(&1.pr, "pass"))}
+      end
+    end
+
+    SourceCompatibility.check(ctx.project, @conn, @base, ctx.patches ++ extra, checker)
+    assert_received {:chunk, first}
+    assert_received {:chunk, second}
+    assert_received {:chunk, third}
+    assert first == Enum.to_list(1..32)
+    assert second == Enum.to_list(33..64)
+    assert third == [65]
+    refute_received {:chunk, _}
+
+    for patch <- ctx.patches ++ extra do
+      actual = Repo.get!(Patch, patch.id).source_compatibility
+      assert actual["status"] == if(patch.pr_xref in 33..64, do: "unknown", else: "pass")
+    end
+  end
+
   defp result(pr, status \\ "missing_source") do
     %{
       "pr" => pr,

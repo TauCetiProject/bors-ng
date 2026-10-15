@@ -200,9 +200,11 @@ defmodule BorsNG.Worker.SourceCompatibility do
              (r["status"] not in ["conflict", "missing_source"] or blocked?(patch, patch.commit)))
       end)
 
-    members = Enum.map(pending, &%{pr: &1.pr_xref, head_sha: &1.commit})
+    # Independent helper requests keep inventory work bounded even when a
+    # caller supplies an assembly-sized batch. Failures affect only their chunk.
+    Enum.each(Enum.chunk_every(pending, 32), fn pending ->
+      members = Enum.map(pending, &%{pr: &1.pr_xref, head_sha: &1.commit})
 
-    if members != [] do
       case checker.(project, conn, base, members) do
         %{"status" => "ok", "results" => results} ->
           apply_results(project, conn, base, pending, results)
@@ -235,7 +237,7 @@ defmodule BorsNG.Worker.SourceCompatibility do
 
           apply_results(project, conn, base, pending, results)
       end
-    end
+    end)
   end
 
   @doc false

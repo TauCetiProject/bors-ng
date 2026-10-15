@@ -286,6 +286,100 @@ defmodule BorsNG.Worker.LocalGitIntegrationTest do
     end
   end
 
+  test "over-capacity existing batch is durably split before metadata or CI", ctx do
+    System.put_env("BORS_SOURCE_COMPATIBILITY", "off")
+    on_exit(fn -> System.delete_env("BORS_SOURCE_COMPATIBILITY") end)
+
+    for n <- 2..129 do
+      patch =
+        Repo.insert!(%Patch{
+          project_id: ctx.project.id,
+          pr_xref: n,
+          commit: @head,
+          into_branch: "main",
+          manual_approval: ctx.patch.manual_approval,
+          priority: 7
+        })
+
+      CandidateJournal.insert_member(
+        LinkPatchBatch.changeset(%LinkPatchBatch{}, %{
+          batch_id: ctx.batch.id,
+          patch_id: patch.id,
+          head_sha: @head,
+          reviewer: "human",
+          manual_approval: patch.manual_approval
+        })
+      )
+    end
+
+    # The capacity check must precede per-member metadata, for which this mock
+    # deliberately has no PRs beyond the original member.
+    Batcher.handle_info({:poll, :once}, ctx.project.id)
+    assert Repo.get!(Batch, ctx.batch.id).state == :error
+    children = Repo.all(from(b in Batch, where: b.id != ^ctx.batch.id, order_by: b.id))
+    assert length(children) == 2
+    assert Enum.all?(children, &(&1.sealed and &1.priority == 7 and &1.state == :waiting))
+    links = Enum.flat_map(children, &Repo.all(LinkPatchBatch.from_batch(&1.id)))
+    assert length(links) == 129
+
+    assert Enum.all?(
+             links,
+             &(&1.head_sha == @head and &1.manual_approval == ctx.link.manual_approval)
+           )
+
+    assert Enum.all?(
+             links,
+             &(CandidateJournal.admission(&1.id).snapshot["retry_reason"] == "bisection")
+           )
+
+    assert Enum.any?(events(ctx.batch), &(&1.kind == "local_capacity_partitioned"))
+    refute Enum.any?(events(ctx.batch), &(&1.kind in ["local_assembled", "dispatch_requested"]))
+    assert Repo.all(Status.all_for_batch(ctx.batch.id)) == []
+  end
+
+  test "over-capacity indivisible bundle stops without retrying forever", ctx do
+    System.put_env("BORS_SOURCE_COMPATIBILITY", "off")
+    on_exit(fn -> System.delete_env("BORS_SOURCE_COMPATIBILITY") end)
+
+    for n <- 2..129 do
+      patch =
+        Repo.insert!(%Patch{
+          project_id: ctx.project.id,
+          pr_xref: n,
+          commit: @head,
+          into_branch: "main",
+          manual_approval: ctx.patch.manual_approval,
+          priority: 7
+        })
+
+      CandidateJournal.insert_member(
+        LinkPatchBatch.changeset(%LinkPatchBatch{}, %{
+          batch_id: ctx.batch.id,
+          patch_id: patch.id,
+          head_sha: @head,
+          reviewer: "human",
+          manual_approval: patch.manual_approval
+        })
+      )
+    end
+
+    bundle = Repo.insert!(BorsNG.Database.PatchBundle.new(ctx.project.id))
+
+    Repo.update_all(from(p in Patch, where: p.project_id == ^ctx.project.id),
+      set: [bundle_id: bundle.id, bundle_reviewer: "human"]
+    )
+
+    Batcher.handle_info({:poll, :once}, ctx.project.id)
+    assert Repo.get!(Batch, ctx.batch.id).state == :error
+    assert Repo.aggregate(Batch, :count, :id) == 1
+    assert Repo.get!(Patch, ctx.patch.id).queue_approval["reason"] == "member_limit"
+    assert Repo.get!(Patch, ctx.patch.id).queue_approval["state"] == "failed"
+    assert Repo.get!(Patch, ctx.patch.id).bundle_reviewer == nil
+    assert Enum.any?(events(ctx.batch), &(&1.kind == "local_capacity_partitioned"))
+    refute Enum.any?(events(ctx.batch), &(&1.kind in ["local_assembled", "dispatch_requested"]))
+    assert Repo.all(Status.all_for_batch(ctx.batch.id)) == []
+  end
+
   test "local result binds exact tree/base and authorizes the existing CI path", ctx do
     Batcher.handle_info({:poll, :once}, ctx.project.id)
     batch = Repo.get!(Batch, ctx.batch.id)
