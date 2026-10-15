@@ -86,7 +86,13 @@ defmodule BorsNG.Worker.OrchestrationTest do
     assert claimed
     send(worker, {:execute, self(), claimed})
     assert_receive {:finished, ^worker, ^claimed, result}, 5000
-    if result == :ok, do: Outbox.finish(claimed), else: Outbox.fail(claimed, result)
+
+    case result do
+      :ok -> Outbox.finish(claimed)
+      {:defer, reason} -> Outbox.defer(claimed, reason)
+      error -> Outbox.fail(claimed, error)
+    end
+
     result
   end
 
@@ -269,7 +275,7 @@ defmodule BorsNG.Worker.OrchestrationTest do
   test "durable withdrawal vetoes staging then cancels without an orphan candidate", ctx do
     dispatch = construct(ctx)
     cancellation = Outbox.enqueue(ctx.project.id, "cast", {:cancel, ctx.patch.id, :requested})
-    assert {:error, :throw} == execute(ctx.worker, dispatch)
+    assert {:defer, :withdrawal_pending} == execute(ctx.worker, dispatch)
     assert get_in(GitHub.ServerMock.get_state(), [ctx.conn, :branches, "staging"]) == "old"
     assert :ok == execute(ctx.worker, cancellation)
     assert Repo.get!(Batch, ctx.batch.id).state == :canceled
@@ -399,7 +405,7 @@ defmodule BorsNG.Worker.OrchestrationTest do
     assert command.priority == 2
     # Construct while a durable command is still pending. The command must
     # outrank a ready dispatch even though its receipt-time class was background.
-    assert {:error, :throw} ==
+    assert {:defer, :withdrawal_pending} ==
              execute(ctx.worker, Outbox.enqueue(ctx.project.id, "info", {:poll, :once}))
 
     # Construction itself is fenced; simulate the same state transition another
@@ -411,6 +417,62 @@ defmodule BorsNG.Worker.OrchestrationTest do
     assert claimed.priority == 0
     Outbox.finish(claimed)
     assert dispatch.priority == 1
+  end
+
+  test "same-PR commands retain FIFO when a batch finishes before either runs", ctx do
+    older = Outbox.enqueue(ctx.project.id, "cast", {:set_priority, ctx.patch.id, 10})
+    ctx.batch |> Batch.changeset(%{state: :running}) |> Repo.update!()
+    newer = Outbox.enqueue(ctx.project.id, "cast", {:set_priority, ctx.patch.id, 5})
+    ctx.batch |> Batch.changeset(%{state: :canceled}) |> Repo.update!()
+
+    assert Enum.filter(Enum.map(Outbox.due(32), & &1.id), &(&1 in [older.id, newer.id])) == [
+             older.id,
+             newer.id
+           ]
+
+    assert :ok == execute(ctx.worker, older)
+    assert :ok == execute(ctx.worker, newer)
+    assert Repo.get!(Patch, ctx.patch.id).priority == 5
+  end
+
+  test "an unjournaled legacy running batch can promote in the executor", ctx do
+    ctx.batch
+    |> Batch.changeset(%{
+      state: :running,
+      commit: "iniN",
+      base_sha: "ini",
+      timeout_at: Outbox.now() + 300
+    })
+    |> Repo.update!()
+
+    for identifier <- ["ci", "cd"],
+        do: Repo.insert!(%Status{batch_id: ctx.batch.id, identifier: identifier, state: :waiting})
+
+    GitHub.ServerMock.put_state(
+      put_in(GitHub.ServerMock.get_state(), [ctx.conn, :statuses, "iniN"], %{
+        "ci" => :ok,
+        "cd" => :ok
+      })
+    )
+
+    assert CandidateJournal.current(Repo.get!(Batch, ctx.batch.id)) == nil
+
+    assert :ok ==
+             execute(
+               ctx.worker,
+               Outbox.enqueue(ctx.project.id, "cast", {:status, {"iniN", "ci", :ok, "url"}})
+             )
+
+    assert Repo.get!(Batch, ctx.batch.id).state == :ok
+  end
+
+  test "eligibility received before a patch exists conservatively fences the project", ctx do
+    dispatch = construct(ctx)
+    policy = Outbox.enqueue(ctx.project.id, "cast", {:eligibility, 999_999})
+    assert policy.subject_id == 0 and policy.priority == 0
+    assert {:defer, :withdrawal_pending} == execute(ctx.worker, dispatch)
+    assert :ok == execute(ctx.worker, policy)
+    assert :ok == execute(ctx.worker, Repo.get!(OrchestrationJob, dispatch.id))
   end
 
   test "pending policy and other candidate commands fence dispatch even in backoff", ctx do
@@ -426,11 +488,19 @@ defmodule BorsNG.Worker.OrchestrationTest do
       )
 
     assert policy.subject_id == ctx.patch.id
-    assert {:error, :throw} == execute(ctx.worker, dispatch)
+    assert {:defer, :withdrawal_pending} == execute(ctx.worker, dispatch)
+    deferred = Repo.get!(OrchestrationJob, dispatch.id)
+    assert deferred.attempts == 0
+    assert deferred.available_at >= policy.available_at
+    assert deferred.last_error == "deferred:withdrawal_pending"
     assert get_in(GitHub.ServerMock.get_state(), [ctx.conn, :branches, "staging"]) == "old"
     assert :ok == execute(ctx.worker, policy)
+    assert Repo.get!(OrchestrationJob, dispatch.id).available_at <= Outbox.now()
     command = Outbox.enqueue(ctx.project.id, "cast", {:set_priority, ctx.patch.id, 7})
-    assert {:error, :throw} == execute(ctx.worker, Repo.get!(OrchestrationJob, dispatch.id))
+
+    assert {:defer, :withdrawal_pending} ==
+             execute(ctx.worker, Repo.get!(OrchestrationJob, dispatch.id))
+
     assert :ok == execute(ctx.worker, command)
     assert :ok == execute(ctx.worker, Repo.get!(OrchestrationJob, dispatch.id))
   end
@@ -446,7 +516,7 @@ defmodule BorsNG.Worker.OrchestrationTest do
       )
     )
 
-    assert {:error, :throw} == execute(ctx.worker, dispatch)
+    assert {:error, {:throw, :stale_candidate_member}} == execute(ctx.worker, dispatch)
     assert get_in(GitHub.ServerMock.get_state(), [ctx.conn, :branches, "staging"]) == "old"
     assert Repo.get!(Batch, ctx.batch.id).state == :canceled
   end
@@ -492,7 +562,7 @@ defmodule BorsNG.Worker.OrchestrationTest do
 
     assert id == job.id and wait >= 0 and service >= 0
     done = Repo.get!(OrchestrationJob, job.id)
-    assert done.completed_at >= done.claimed_at
+    assert done.completed_at_ms >= done.claimed_at_ms
   end
 
   test "deleted repository work terminates without restarting the dispatcher", ctx do
@@ -548,7 +618,7 @@ defmodule BorsNG.Worker.OrchestrationTest do
 
     :sys.resume(GitHub)
     # The newly persisted priority command fences publication until processed.
-    assert_receive {:finished, worker, _, {:error, :throw}}, 5000
+    assert_receive {:finished, worker, _, {:defer, :withdrawal_pending}}, 5000
     assert worker == ctx.worker
     Outbox.finish(claimed)
   end

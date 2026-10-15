@@ -122,35 +122,49 @@ change must be verified before a separate small canary activation. See
 
 The mailbox has three stable FIFO classes: candidate commands (0), lane progress
 (1), and background work (2). Dispatch, poll/recheck restoration, promotion retries
-and every status observation of a currently running candidate use class 1. Both
+and every status observation of a recorded candidate use class 1. Both
 red and green observations share the class; priority does not select verdicts.
-Cancellation uses class 0. Other commands use class 0 only for a running member;
-ordinary PR status, unrelated eligibility/admission/recovery and notices use class
-2. Classification is recorded at receipt; pending commands are also upgraded when
-their subject becomes a running member, with a current recheck under the claim
+Cancellation uses class 0. Other commands have base class 2, with effective
+class 0 for a running member and class 1 for a waiting member; ordinary PR status,
+unrelated eligibility/admission/recovery and notices use class 2. Classification is recorded at receipt; pending commands are also upgraded when
+their subject joins an incomplete batch, with a current recheck under the claim
 lock. The additive migration classifies
 existing pending/running rows in bounded pages. A late observation after a
 candidate becomes terminal cannot grant it new authority. No observations are
 coalesced or removed by this policy.
 
 After eight critical claims in a repository, its oldest due background operation
-gets one turn. The project row stores this counter under the existing claim lock,
+gets one turn. This fairness promise is per repository, not a cross-repository
+service guarantee under a global single-worker cap. The project row stores this counter under the existing claim lock,
 so restarts, retries and multiple dispatcher claimers retain fairness. Backoff
 still determines eligibility. FIFO within each class and the configured global
 worker cap remain in force. A running repository is excluded before the bounded
-32-row selection, so its backlog cannot hide another free repository.
+32-row result selection, so its backlog cannot hide another free repository.
+The joined priority query still sorts eligible rows; the bound limits returned
+work, not total database scan cost. Webhook tick bursts are debounced to at most
+ten drains per second, with completion always triggering an immediate drain.
 
-Pending candidate commands, including policy eligibility, fence dispatch and
-promotion even during retry backoff. Receipt-time approval tokens still fence
+Pending candidate commands, including policy eligibility, fence construction,
+dispatch and promotion even during retry backoff. An eligibility wakeup received
+before its PR has a patch row conservatively fences the whole project until read.
+Fence hits defer without increasing failure attempts. Their next check respects
+the earliest pending-command deadline, with completion of a command waking
+blocked operations immediately; they do not cause exponential failure backoff.
+All other errors retain infrastructure backoff, and six failed attempts emit a
+stuck-operation warning. A failed command is retained and keeps fencing rather
+than being silently discarded. Receipt-time approval tokens still fence
 r+/r-/cancel-all generations. Dispatch now also reads every exact live PR head,
 open/draft/base identity before publication; promotion uses the same check.
 The pending-command/lease fence is repeated immediately before external mutation.
 Unavailable identity reads defer with ordinary durable retry semantics. No
 staging/main lock or train reservation is bypassed.
 
-For each attempt, `claimed_at` and `completed_at` retain wall-clock seconds;
+For each attempt, `enqueued_at_ms`, `claimed_at_ms` and `completed_at_ms` retain
+wall-clock milliseconds;
 `outbox_start`/`outbox_finish` log job/project/kind/priority/attempt, ready queue wait
-and monotonic operation service milliseconds. The `[:bors, :outbox, :operation]`
+and monotonic operation service milliseconds. `total_wait_ms` also includes all
+prior deferrals/backoff from original insertion; pre-upgrade insertion times
+have only one-second resolution. The `[:bors, :outbox, :operation]`
 telemetry event carries both durations separately. Ready wait starts at the later
 of insertion and `available_at`; intentional infrastructure backoff is excluded.
 An operation exceeding the **10-second service target** emits

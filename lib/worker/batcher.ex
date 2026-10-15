@@ -1628,6 +1628,13 @@ defmodule BorsNG.Worker.Batcher do
   end
 
   defp start_waiting_batch_allowed(batch, predecessor \\ nil) do
+    if Process.get(:orchestration_executor, false),
+      do:
+        ensure_no_withdrawal!(
+          batch,
+          Repo.all(LinkPatchBatch.from_batch(batch.id)) |> Enum.map(& &1.patch_id)
+        )
+
     # Persist before staging work: a restart or priority preemption may leave
     # this batch waiting again, but its tested membership must never grow.
     batch = batch |> Batch.changeset(%{sealed: true}) |> Repo.update!()
@@ -2709,6 +2716,8 @@ defmodule BorsNG.Worker.Batcher do
         publish_bound_candidate!(batch, candidate, conn, publisher)
 
         if System.get_env("BORS_STAGE_DISPATCH_PROJECT") == batch.project.name do
+          ensure_no_withdrawal!(batch, patch_ids(candidate))
+
           unless requested,
             do:
               CandidateJournal.event(candidate, "dispatch_requested", "bors.outbox", %{
@@ -2718,8 +2727,6 @@ defmodule BorsNG.Worker.Batcher do
 
           members =
             Enum.map(candidate.snapshot["members"], &%{pr: &1["pr"], head_sha: &1["head_sha"]})
-
-          ensure_no_withdrawal!(batch, patch_ids(candidate))
 
           :ok =
             GitHub.dispatch_staging_once(
@@ -3604,7 +3611,11 @@ defmodule BorsNG.Worker.Batcher do
     end
 
     if Process.get(:orchestration_executor, false),
-      do: ensure_no_withdrawal!(batch, patch_ids(candidate))
+      do:
+        ensure_no_withdrawal!(
+          batch,
+          Repo.all(LinkPatchBatch.from_batch(batch.id)) |> Enum.map(& &1.patch_id)
+        )
 
     push_result =
       if Train.tracked?(CandidateJournal.current(batch)) do

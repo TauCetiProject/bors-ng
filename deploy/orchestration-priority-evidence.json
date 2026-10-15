@@ -157,9 +157,9 @@
     "No production queue mutation or CI cancellation manufactured this evidence."
   ],
   "local_validation": {
-    "postgresql": "1002 tests + 7 doctests passed; final focused lock/priority checks passed 42 tests",
-    "mysql": "1001 tests + 7 doctests passed before dynamic command upgrade; final validation pending",
-    "populated_migration": "pending dispatch/command/status/cancel upgrade passed on PostgreSQL and MySQL"
+    "postgresql": "1005 tests + 7 doctests passed; final focused orchestration/train checks passed 45 tests",
+    "mysql": "1005 tests + 7 doctests passed; final focused orchestration/train checks passed 45 tests",
+    "populated_migration": "pending dispatch/command/status/cancel upgrade passed on PostgreSQL and MySQL; frozen idempotent migration rechecked before final push"
   },
   "production_baseline": {
     "captured_at": "2026-10-15T02:08:34.204497+00:00",
@@ -168,5 +168,11 @@
     "duplicate_active_heads": 0,
     "pending_at_capture": 0,
     "limitations": "Instantaneous snapshot, not a sustained load or throughput claim."
-  }
+  },
+  "review_corrections": [
+    "Fence deferrals retain failure count, respect pending command backoff and wake immediately after command completion.",
+    "Subject commands use dynamic waiting/running class so same-PR FIFO is preserved after batch completion.",
+    "Legacy nil-candidate promotion, final request-record fencing and millisecond end-to-end queue timing are covered.",
+    "Priority result bound is not a constant database scan bound. Tick bursts are debounced; per-repository fairness is not a global service guarantee."
+  ]
 }

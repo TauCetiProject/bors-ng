@@ -4,6 +4,7 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
   random tokens; restart never replays an operation while its lease is live.
   Repository lanes serialize staging and main promotion, including all branches.
   """
+  require Logger
   import Ecto.Query
   alias BorsNG.Database.{Batch, LinkPatchBatch, OrchestrationJob, Patch, Project, Repo}
 
@@ -37,6 +38,7 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
           kind: kind,
           subject_id: subject || attributes.subject_id,
           priority: attributes.priority,
+          enqueued_at_ms: System.system_time(:millisecond),
           payload: :erlang.term_to_binary(payload),
           dedup_key: key,
           available_at: available_at
@@ -63,7 +65,7 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
               where: p.project_id == ^project_id and p.pr_xref == ^pr,
               select: p.id
             )
-          )
+          ) || 0
 
         command when kind == "cast" and is_tuple(command) and tuple_size(command) >= 2 ->
           if is_integer(elem(command, 1)), do: elem(command, 1)
@@ -83,26 +85,14 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
         {"cast", {:status, {commit, _, _, _}}} ->
           if database.exists?(
                from(b in Batch,
-                 where:
-                   b.project_id == ^project_id and b.commit == ^commit and b.state == :running
+                 where: b.project_id == ^project_id and b.commit == ^commit
                )
              ),
              do: 1,
              else: 2
 
         {"cast", _} ->
-          if subject &&
-               database.exists?(
-                 from(l in LinkPatchBatch,
-                   join: b in Batch,
-                   on: b.id == l.batch_id,
-                   where:
-                     b.project_id == ^project_id and b.state == :running and
-                       l.patch_id == ^subject
-                 )
-               ),
-             do: 0,
-             else: 2
+          if subject == 0, do: 0, else: 2
 
         {"info", {:poll, _}} ->
           1
@@ -153,24 +143,29 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
 
           # A command received before construction can become relevant while
           # queued. Upgrade it under the same lane lock before accounting fairness.
+          member_state =
+            if job.kind == "cast" and job.subject_id && job.subject_id != 0 do
+              Repo.one(
+                from(l in LinkPatchBatch,
+                  join: b in Batch,
+                  on: b.id == l.batch_id,
+                  where:
+                    b.project_id == ^job.project_id and b.state in [:waiting, :running] and
+                      l.patch_id == ^job.subject_id,
+                  order_by: [desc: b.state],
+                  select: b.state,
+                  limit: 1,
+                  lock: "FOR UPDATE"
+                )
+              )
+            end
+
           priority =
-            if job.kind == "cast" and job.subject_id &&
-                 not is_nil(
-                   Repo.one(
-                     from(l in LinkPatchBatch,
-                       join: b in Batch,
-                       on: b.id == l.batch_id,
-                       where:
-                         b.project_id == ^job.project_id and b.state == :running and
-                           l.patch_id == ^job.subject_id,
-                       select: l.id,
-                       limit: 1,
-                       lock: "FOR UPDATE"
-                     )
-                   )
-                 ),
-               do: 0,
-               else: job.priority
+            case member_state do
+              :running -> 0
+              :waiting -> 1
+              _ -> job.priority
+            end
 
           # Fairness survives dispatcher/executor restarts and retries. One
           # background operation gets a turn after at most eight critical claims.
@@ -179,14 +174,14 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
 
           job
           |> Ecto.Changeset.change(
-            priority: priority,
-            claimed_at: now(),
+            claimed_at_ms: System.system_time(:millisecond),
             state: "running",
             token: token,
             lease_until: now() + 300,
             attempts: job.attempts + 1
           )
           |> Repo.update!()
+          |> Map.put(:priority, priority)
         end
       end
     end)
@@ -195,20 +190,68 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
   def renew(job), do: owned(job) |> Repo.update_all(set: [lease_until: now() + 300])
 
   def finish(job) do
+    result =
+      owned(job)
+      |> Repo.update_all(
+        set: [
+          state: "done",
+          completed_at_ms: System.system_time(:millisecond),
+          dedup_key: if(job.kind in ["notice", "dispatch"], do: job.dedup_key, else: nil),
+          token: nil,
+          lease_until: 0,
+          updated_at: NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)
+        ]
+      )
+
+    if elem(result, 0) > 0 and (job.subject_id || job.kind == "cancel_all"),
+      do: wake_deferred(job.project_id)
+
+    result
+  end
+
+  defp wake_deferred(project_id) do
+    Repo.update_all(
+      from(j in OrchestrationJob,
+        where:
+          j.project_id == ^project_id and j.state == "pending" and
+            j.last_error == "deferred:withdrawal_pending"
+      ),
+      set: [available_at: now()]
+    )
+  end
+
+  def defer(job, reason) do
+    pending_at =
+      Repo.one(
+        from(j in OrchestrationJob,
+          where:
+            j.project_id == ^job.project_id and j.state == "pending" and
+              (j.kind == "cancel_all" or not is_nil(j.subject_id)),
+          select: min(j.available_at)
+        )
+      )
+
     owned(job)
     |> Repo.update_all(
       set: [
-        state: "done",
-        completed_at: now(),
-        dedup_key: if(job.kind in ["notice", "dispatch"], do: job.dedup_key, else: nil),
+        state: "pending",
         token: nil,
         lease_until: 0,
-        updated_at: NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)
+        available_at: max(now() + 1, pending_at || 0),
+        attempts: max(job.attempts - 1, 0),
+        completed_at_ms: System.system_time(:millisecond),
+        last_error: "deferred:#{reason}"
       ]
     )
   end
 
   def fail(job, reason) do
+    if job.attempts >= 6,
+      do:
+        Logger.warning(
+          "outbox_retry_stuck job=#{job.id} project=#{job.project_id} kind=#{job.kind} attempts=#{job.attempts}"
+        )
+
     delay = min(60 * Integer.pow(2, min(job.attempts - 1, 6)), 3600)
     delay = if match?({:worker_exit, _}, reason), do: max(delay, 300), else: delay
 
@@ -216,7 +259,7 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
     |> Repo.update_all(
       set: [
         state: "pending",
-        completed_at: now(),
+        completed_at_ms: System.system_time(:millisecond),
         available_at: now() + delay,
         token: nil,
         lease_until: 0,
@@ -231,7 +274,8 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
         where:
           j.project_id == ^project_id and j.state == "pending" and
             (j.kind == "cancel_all" or
-               (j.kind in ["cancel", "cast"] and j.subject_id in ^patch_ids))
+               (j.kind in ["cancel", "cast"] and
+                  (j.subject_id in ^patch_ids or j.subject_id == 0)))
       )
     )
   end
@@ -250,9 +294,13 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
     from(l in LinkPatchBatch,
       join: b in Batch,
       on: b.id == l.batch_id,
-      where: b.state == :running,
-      distinct: true,
-      select: %{project_id: b.project_id, patch_id: l.patch_id}
+      where: b.state in [:waiting, :running],
+      group_by: [b.project_id, l.patch_id],
+      select: %{
+        project_id: b.project_id,
+        patch_id: l.patch_id,
+        rank: min(fragment("CASE WHEN ? = 1 THEN 0 ELSE 1 END", b.state))
+      }
     )
   end
 
@@ -274,11 +322,12 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
         order_by: [
           asc:
             fragment(
-              "CASE WHEN ? >= 8 AND ? = 2 AND ? IS NULL THEN -1 WHEN ? IS NOT NULL THEN 0 ELSE ? END",
+              "CASE WHEN ? >= 8 AND ? = 2 AND ? IS NULL THEN -1 WHEN ? IS NOT NULL THEN ? ELSE ? END",
               p.orchestration_streak,
               j.priority,
               a.patch_id,
               a.patch_id,
+              a.rank,
               j.priority
             ),
           asc: j.id
