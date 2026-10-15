@@ -57,7 +57,9 @@ defmodule BorsNG.GitHub.Server do
              :post_commit_status,
              :get_pr,
              :close_merged_pr,
-             :cleanup_policy
+             :cleanup_policy,
+             :batch_read,
+             :public_user
            ] do
     # Include time spent behind another API request. Never execute an expired
     # advisory call or hide retries/token refreshes inside its service budget.
@@ -244,6 +246,24 @@ defmodule BorsNG.GitHub.Server do
 
       %{body: body, status: status} ->
         {:error, :push, status, body}
+    end
+  end
+
+  def do_handle_call(:public_user, {token, _repo_id}, {login}),
+    do: do_handle_call(:get_user_by_login, token, {login})
+
+  def do_handle_call(:batch_read, {{:raw, token}, repo_id}, {repository, numbers, mode}) do
+    request = GitHub.BatchRead.request(repository, numbers, mode)
+
+    case Tesla.post(tesla_client("token #{token}"), "/graphql", Jason.encode!(request)) do
+      {:ok, %{status: 200, body: body}} ->
+        GitHub.BatchRead.decode(Jason.decode!(body), repo_id, numbers, mode)
+
+      {:ok, %{status: status}} ->
+        {:error, :batch_read, status}
+
+      _ ->
+        {:error, :batch_read_unavailable}
     end
   end
 
@@ -1421,8 +1441,8 @@ defmodule BorsNG.GitHub.Server do
         next_headers = get_next_headers(headers)
 
         case next_headers do
-          [] -> {:ok, commits ++ append}
-          [next] -> get_pr_commits_(token, next.url, commits)
+          [] -> {:ok, append ++ commits}
+          [next] -> get_pr_commits_(token, next.url, append ++ commits)
         end
 
       {:error, %{status: status}} ->

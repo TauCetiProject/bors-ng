@@ -105,7 +105,7 @@ defmodule BorsNG.Worker.LocalGitIntegrationTest do
         hints={}
         if os.environ.get('BORS_TEST_MISSING_IMPORT'):
             hints=dict(complete=True,changed_files=[dict(pr=m['pr'],head_sha=m['head_sha'],paths=['TauCeti/File'+str(m['pr'])+'.lean']) for m in request['members']],import_edges=[],missing_imports=[dict(pr=1,path='TauCeti/File1.lean',provider_path='TauCeti/Absent.lean')])
-        print(json.dumps(dict(status='ok',result=request['identity'] | dict(commit='#{@commit}',tree='#{@tree}'),diagnostic_hints=hints,commits=[],git_version='test',mirror_bytes=1)))
+        print(json.dumps(dict(status='ok',result=request['identity'] | dict(commit='#{@commit}',tree='#{@tree}'),diagnostic_hints=hints,commits=request['members'],git_version='test',mirror_bytes=1)))
     else:
         print(json.dumps(dict(status='ok')))
     """
@@ -132,6 +132,159 @@ defmodule BorsNG.Worker.LocalGitIntegrationTest do
           where: e.candidate_id == ^CandidateJournal.latest(batch.id).id
         )
       )
+
+  for {profile, email, name} <- [
+        {nil, "6+author@users.noreply.github.com", "author"},
+        {%GitHub.FullUser{id: 6, login: "author", email: nil, name: nil},
+         "6+author@users.noreply.github.com", "author"},
+        {%GitHub.FullUser{
+           id: 6,
+           login: "author",
+           email: "public@example.invalid",
+           name: "Public Name"
+         }, "public@example.invalid", "Public Name"},
+        {%GitHub.FullUser{id: 6, login: "author", email: "public@example.invalid", name: nil},
+         "public@example.invalid", "author"}
+      ] do
+    test "async batched metadata preserves REST attribution (email=#{email}, name=#{name}, missing=#{is_nil(profile)})",
+         ctx do
+      :sys.suspend(BorsNG.Worker.Orchestration.Dispatcher)
+      System.put_env("BORS_ASYNC_ORCHESTRATION", "true")
+      Process.put(:orchestration_executor, true)
+      mock = GitHub.ServerMock.get_state()
+      pr = get_in(mock, [@conn, :pulls, 1])
+
+      commits =
+        get_in(mock, [@conn, :pr_commits, 1]) ++
+          [
+            %GitHub.Commit{
+              sha: @head,
+              author_name: unquote(name),
+              author_email: "same-name@example.invalid"
+            },
+            %GitHub.Commit{sha: @head, author_name: "Same Email", author_email: unquote(email)}
+          ]
+
+      data = %{pr: pr, commits: commits}
+
+      mock =
+        Map.put(mock, :batch_read_metadata, %{1 => data})
+        |> Map.put(:users, %{"author" => unquote(Macro.escape(profile))})
+        |> put_in([@conn, :pr_commits, 1], :invalid_if_rest_fallback)
+
+      GitHub.ServerMock.put_state(mock)
+
+      try do
+        Batcher.handle_info({:poll, :once}, ctx.project.id)
+        assert Repo.get!(Batch, ctx.batch.id).state == :running
+        mock = GitHub.ServerMock.get_state()
+        assert Enum.any?(mock.batch_read_calls, &(&1 == {:metadata, [1]}))
+        assert Enum.any?(mock.batch_read_calls, &(&1 == {:identity, [1]}))
+        assert mock.public_user_calls == ["author"]
+        local = Enum.find(events(ctx.batch), &(&1.kind == "local_assembled"))
+        [actual] = local.details["evidence"]["commits"]
+        assert actual["committer"] == %{"name" => unquote(name), "email" => unquote(email)}
+
+        expected =
+          Batcher.Message.generate_squash_commit_message(
+            pr,
+            commits,
+            unquote(email),
+            unquote(name),
+            nil
+          )
+
+        assert actual["commit_message"] == expected
+
+        assert BorsNG.Worker.Orchestration.Outbox.pending?(
+                 ctx.project.id,
+                 "dispatch:#{ctx.batch.id}"
+               )
+      after
+        Process.delete(:orchestration_executor)
+        System.delete_env("BORS_ASYNC_ORCHESTRATION")
+        :sys.resume(BorsNG.Worker.Orchestration.Dispatcher)
+      end
+    end
+  end
+
+  test "batched preparation reads a repeated author's public profile once", ctx do
+    :sys.suspend(BorsNG.Worker.Orchestration.Dispatcher)
+    System.put_env("BORS_ASYNC_ORCHESTRATION", "true")
+    Process.put(:orchestration_executor, true)
+
+    patch =
+      Repo.insert!(%Patch{
+        project_id: ctx.project.id,
+        pr_xref: 2,
+        commit: @head,
+        into_branch: "main",
+        manual_approval: ctx.patch.manual_approval
+      })
+
+    CandidateJournal.insert_member(
+      LinkPatchBatch.changeset(%LinkPatchBatch{}, %{
+        batch_id: ctx.batch.id,
+        patch_id: patch.id,
+        head_sha: @head,
+        reviewer: "human",
+        manual_approval: patch.manual_approval
+      })
+    )
+
+    mock = GitHub.ServerMock.get_state()
+    pr1 = mock[@conn].pulls[1]
+    pr2 = %{pr1 | number: 2}
+    commits = mock[@conn].pr_commits[1]
+
+    mock =
+      put_in(mock, [@conn, :pulls, 2], pr2)
+      |> Map.put(:batch_read_metadata, %{
+        1 => %{pr: pr1, commits: commits},
+        2 => %{pr: pr2, commits: commits}
+      })
+
+    GitHub.ServerMock.put_state(mock)
+
+    try do
+      Batcher.handle_info({:poll, :once}, ctx.project.id)
+      assert Repo.get!(Batch, ctx.batch.id).state == :running
+      assert GitHub.ServerMock.get_state().public_user_calls == ["author"]
+    after
+      Process.delete(:orchestration_executor)
+      System.delete_env("BORS_ASYNC_ORCHESTRATION")
+      :sys.resume(BorsNG.Worker.Orchestration.Dispatcher)
+    end
+  end
+
+  test "unavailable batched metadata stops construction without a dispatch or proof failure",
+       ctx do
+    :sys.suspend(BorsNG.Worker.Orchestration.Dispatcher)
+    System.put_env("BORS_ASYNC_ORCHESTRATION", "true")
+    Process.put(:orchestration_executor, true)
+
+    GitHub.ServerMock.put_state(
+      Map.put(
+        GitHub.ServerMock.get_state(),
+        :batch_read_error,
+        {:metadata, {:error, :unavailable}}
+      )
+    )
+
+    try do
+      Batcher.handle_info({:poll, :once}, ctx.project.id)
+      batch = Repo.get!(Batch, ctx.batch.id)
+      assert batch.state == :waiting
+      assert batch.recovery_after >= BorsNG.Worker.Orchestration.Outbox.now() + 290
+      assert Enum.any?(events(batch), &(&1.kind == "construction_stopped"))
+      refute Enum.any?(events(batch), &(&1.kind in ["constructed", "failure_classified"]))
+      refute BorsNG.Worker.Orchestration.Outbox.pending?(ctx.project.id, "dispatch:#{batch.id}")
+    after
+      Process.delete(:orchestration_executor)
+      System.delete_env("BORS_ASYNC_ORCHESTRATION")
+      :sys.resume(BorsNG.Worker.Orchestration.Dispatcher)
+    end
+  end
 
   test "local result binds exact tree/base and authorizes the existing CI path", ctx do
     Batcher.handle_info({:poll, :once}, ctx.project.id)

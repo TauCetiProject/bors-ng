@@ -10,6 +10,10 @@ defmodule BorsNG.Worker.Orchestration.Supervisor do
           {BorsNG.GitHub.Advisory, [name: BorsNG.GitHub.Cleanup]},
           id: BorsNG.GitHub.Cleanup
         ),
+        Supervisor.child_spec(
+          {BorsNG.GitHub.Advisory, [name: BorsNG.GitHub.ReadOnly]},
+          id: BorsNG.GitHub.ReadOnly
+        ),
         {Registry, keys: :unique, name: BorsNG.Worker.Orchestration.Registry},
         {DynamicSupervisor, strategy: :one_for_one, name: BorsNG.Worker.Orchestration.Workers},
         {BorsNG.Worker.Orchestration.Dispatcher, []}
