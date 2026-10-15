@@ -133,6 +133,7 @@ defmodule BorsNG.Worker.SourceCompatibility do
             Repo.delete!(link)
             BorsNG.Worker.ManualApproval.revoke(current.id)
             BorsNG.Worker.QueueApproval.stop([current], :source_compatibility)
+            BorsNG.Worker.Labeler.reconcile_queue(conn, batch.into_branch, [current])
             true
           else
             false

@@ -128,6 +128,8 @@ defmodule BorsNG.Worker.SourceCompatibilityTest do
     links = Repo.all(LinkPatchBatch.from_batch(c.batch.id))
     assert [remaining] = SourceCompatibility.admit(c.project, @conn, c.batch, links, @base)
     assert remaining.patch_id == healthy.id
+    assert {:ok, ["needs-rebase"]} = GitHub.get_labels(@conn, 1)
+    assert {:ok, ["ready-to-merge"]} = GitHub.get_labels(@conn, 2)
     assert Repo.get!(Patch, healthy.id).queue_approval == before
     assert Repo.aggregate(Status, :count, :id) == 0
   end
