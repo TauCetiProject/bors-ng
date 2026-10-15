@@ -1,7 +1,7 @@
 defmodule BorsNG.Worker.FailureIsolation do
   @moduledoc "Conservative scheduling hints; only an indivisible failed retry is quarantined."
   import Ecto.Query
-  alias BorsNG.Database.{CandidateEvent, Repo}
+  alias BorsNG.Database.{Batch, CandidateEvent, Repo}
   alias BorsNG.Worker.{CandidateJournal, Batcher.Divider}
 
   def enabled?, do: System.get_env("BORS_FAILURE_DIAGNOSTICS") != "off"
@@ -14,19 +14,30 @@ defmodule BorsNG.Worker.FailureIsolation do
     if enabled?() and is_map(hints) and hints["complete"] == true and
          (hints["missing_imports"] || []) != [] and
          match?({:ok, _, "missing_import"}, partition(links, hints, nil)) do
-      candidate = CandidateJournal.latest(batch.id)
+      # There is no running CI binding to replay here. Retire the waiting
+      # parent in the same transaction as every child: after a crash it must
+      # never reconstruct beside live children against a newly advanced base.
+      {:ok, :partitioned} =
+        Repo.transaction(fn ->
+          parent = Repo.one!(from(b in Batch, where: b.id == ^batch.id, lock: "FOR UPDATE"))
+          candidate = CandidateJournal.latest(batch.id)
 
-      CandidateJournal.event(candidate, "local_import_failure", "bors.local_git", %{
-        assembly_identity: BorsNG.Worker.CandidateAssembler.identity(candidate),
-        commit: result.commit,
-        tree: result.tree,
-        missing_imports: hints["missing_imports"],
-        authority: "retry_only",
-        proof_authority: false,
-        ci_dispatched: false
-      })
+          CandidateJournal.event(candidate, "local_import_failure", "bors.local_git", %{
+            assembly_identity: BorsNG.Worker.CandidateAssembler.identity(candidate),
+            commit: result.commit,
+            tree: result.tree,
+            missing_imports: hints["missing_imports"],
+            authority: "retry_only",
+            proof_authority: false,
+            ci_dispatched: false,
+            parent_retired_atomically: true
+          })
 
-      :retrying = split(links, batch)
+          :retrying = split(links, batch)
+          parent |> Batch.changeset(%{state: :error, commit: nil}) |> Repo.update!()
+          :partitioned
+        end)
+
       :partitioned
     else
       :dispatch
