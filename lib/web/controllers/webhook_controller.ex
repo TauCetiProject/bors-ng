@@ -378,8 +378,7 @@ defmodule BorsNG.WebhookController do
 
         project = Repo.get_by!(Project, repo_xref: repo_xref)
 
-        batcher = Batcher.Registry.get(project.id)
-        Batcher.status(batcher, {commit, identifier, state, url})
+        route_batch_status(project, {commit, identifier, state, url})
 
         attemptor = Attemptor.Registry.get(project.id)
         Attemptor.status(attemptor, {commit, identifier, state, url})
@@ -400,8 +399,7 @@ defmodule BorsNG.WebhookController do
     url = conn.body_params["target_url"]
     state = GitHub.map_state_to_status(conn.body_params["state"])
     project = Repo.get_by!(Project, repo_xref: repo_xref)
-    batcher = Batcher.Registry.get(project.id)
-    Batcher.status(batcher, {commit, identifier, state, url})
+    route_batch_status(project, {commit, identifier, state, url})
     attemptor = Attemptor.Registry.get(project.id)
     Attemptor.status(attemptor, {commit, identifier, state, url})
   end
@@ -409,6 +407,14 @@ defmodule BorsNG.WebhookController do
   def do_webhook(_conn, "github", event) do
     Logger.info(["WebhookController: Got unknown GitHub event: ", event])
     :unknown
+  end
+
+  defp route_batch_status(project, {commit, _, _, _} = observation) do
+    if BorsNG.Worker.StatusRouting.batch?(project.id, commit) do
+      Batcher.status(Batcher.Registry.get(project.id), observation)
+    else
+      BorsNG.Worker.StatusRouting.filtered(project.id)
+    end
   end
 
   def do_webhook_installation_sync(conn) do

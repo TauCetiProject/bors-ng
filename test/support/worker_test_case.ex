@@ -20,38 +20,41 @@ defmodule BorsNG.Worker.TestCase do
     end
   end
 
-  setup tags do
-    owner =
-      Ecto.Adapters.SQL.Sandbox.start_owner!(
-        :persistent_term.get(:db_repo),
-        shared: not tags[:async]
-      )
-
-    on_exit(fn ->
-      # Keep the transaction owner alive while fixture workers shut down.
-      # Otherwise a late eligibility/cancellation can lose its connection and
-      # crash a shared registry during the following test.
-      unless tags[:async] do
-        for supervisor <- [
-              BorsNG.Worker.Batcher.Supervisor,
-              BorsNG.Worker.Attemptor.Supervisor,
-              BorsNG.Worker.Orchestration.Workers
-            ] do
-          for {_, pid, _, _} <- DynamicSupervisor.which_children(supervisor), is_pid(pid) do
-            DynamicSupervisor.terminate_child(supervisor, pid)
-          end
-        end
-
-        for registry <- [BorsNG.Worker.Batcher.Registry, BorsNG.Worker.Attemptor.Registry] do
-          try do
-            :sys.get_state(registry, 1_000)
-          catch
-            :exit, _ -> :ok
-          end
+  # Keep SQL ownership alive while globally supervised fixture actors stop.
+  # Otherwise a final asynchronous webhook cast can outlive its test process
+  # and take the application down through repeated sandbox ownership exits.
+  def stop_actors do
+    for supervisor <- [
+          BorsNG.Worker.Batcher.Supervisor,
+          BorsNG.Worker.Attemptor.Supervisor,
+          BorsNG.Worker.Orchestration.Workers
+        ] do
+      if Process.whereis(supervisor) do
+        for {_, pid, _, _} <- DynamicSupervisor.which_children(supervisor), is_pid(pid) do
+          DynamicSupervisor.terminate_child(supervisor, pid)
         end
       end
+    end
 
-      Ecto.Adapters.SQL.Sandbox.stop_owner(owner)
+    for registry <- [BorsNG.Worker.Batcher.Registry, BorsNG.Worker.Attemptor.Registry] do
+      try do
+        :sys.get_state(registry, 1_000)
+      catch
+        :exit, _ -> :ok
+      end
+    end
+  end
+
+  setup tags do
+    repo = :persistent_term.get(:db_repo)
+    owner = Ecto.Adapters.SQL.Sandbox.start_owner!(repo, shared: not tags[:async])
+
+    on_exit(fn ->
+      try do
+        unless tags[:async], do: stop_actors()
+      after
+        Ecto.Adapters.SQL.Sandbox.stop_owner(owner)
+      end
     end)
 
     :ok

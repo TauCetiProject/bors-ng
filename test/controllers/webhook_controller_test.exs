@@ -79,6 +79,196 @@ defmodule BorsNG.WebhookControllerTest do
     assert Repo.all(BorsNG.Database.Status.all_for_batch(batch.id)) == []
   end
 
+  defp async_webhooks(project) do
+    :sys.suspend(BorsNG.Worker.Orchestration.Dispatcher)
+    System.put_env("BORS_ASYNC_ORCHESTRATION", "true")
+    {:ok, batcher} = BorsNG.Worker.Batcher.start_link(project.id)
+    :sys.get_state(BorsNG.Worker.Batcher.Registry)
+    attemptor = BorsNG.Worker.Attemptor.Registry.get(project.id)
+
+    on_exit(fn ->
+      if Process.alive?(batcher), do: GenServer.stop(batcher)
+
+      if Process.alive?(attemptor),
+        do: DynamicSupervisor.terminate_child(BorsNG.Worker.Attemptor.Supervisor, attemptor)
+
+      System.delete_env("BORS_ASYNC_ORCHESTRATION")
+      :sys.resume(BorsNG.Worker.Orchestration.Dispatcher)
+    end)
+
+    attemptor
+  end
+
+  test "async ingress filters bors self feedback before the durable lane", %{
+    conn: conn,
+    project: project
+  } do
+    attemptor = async_webhooks(project)
+    Repo.insert!(%Patch{project_id: project.id, commit: "ordinary", pr_xref: 1})
+
+    body = %{
+      "repository" => %{"id" => project.repo_xref},
+      "commit" => %{"sha" => "ordinary"},
+      "context" => "bors",
+      "state" => "pending",
+      "target_url" => "https://bors.example/batch/1"
+    }
+
+    conn =
+      conn
+      |> put_req_header("x-github-event", "status")
+      |> post(webhook_path(conn, :webhook, "github"), body)
+
+    assert conn.status == 200
+    :sys.get_state(attemptor)
+
+    refute Enum.any?(Repo.all(BorsNG.Database.OrchestrationJob), fn j ->
+             match?({:status, _}, BorsNG.Worker.Orchestration.Outbox.payload(j))
+           end)
+  end
+
+  test "async stage-status filtering still delivers trying receipts to its serialized actor", %{
+    conn: conn,
+    project: project
+  } do
+    attemptor = async_webhooks(project)
+    :sys.suspend(attemptor)
+    on_exit(fn -> if Process.alive?(attemptor), do: :sys.resume(attemptor) end)
+
+    body = %{
+      "repository" => %{"id" => project.repo_xref},
+      "commit" => %{"sha" => "not-yet-recorded-try"},
+      "context" => "build",
+      "state" => "success",
+      "target_url" => "https://ci.example/try"
+    }
+
+    result =
+      conn
+      |> put_req_header("x-github-event", "status")
+      |> post(webhook_path(conn, :webhook, "github"), body)
+
+    assert result.status == 200
+    {:messages, messages} = Process.info(attemptor, :messages)
+
+    assert {:"$gen_cast",
+            {:status, {"not-yet-recorded-try", "build", :ok, "https://ci.example/try"}}} in messages
+
+    refute Enum.any?(Repo.all(BorsNG.Database.OrchestrationJob), fn j ->
+             match?({:status, _}, BorsNG.Worker.Orchestration.Outbox.payload(j))
+           end)
+
+    :sys.resume(attemptor)
+    :sys.get_state(attemptor)
+  end
+
+  test "async filtering preserves ordinary PR eligibility notifications and dirty versions", %{
+    conn: conn,
+    project: project
+  } do
+    project = project |> Project.changeset(%{name: "TauCetiProject/TauCeti"}) |> Repo.update!()
+    attemptor = async_webhooks(project)
+    previous = System.get_env("TAUCETI_REVIEW_APP_ID")
+    System.put_env("TAUCETI_REVIEW_APP_ID", "4811")
+
+    on_exit(fn ->
+      if previous,
+        do: System.put_env("TAUCETI_REVIEW_APP_ID", previous),
+        else: System.delete_env("TAUCETI_REVIEW_APP_ID")
+    end)
+
+    Repo.insert!(%Patch{project_id: project.id, commit: "ordinary", pr_xref: 1})
+
+    body = %{
+      "repository" => %{"id" => project.repo_xref},
+      "action" => "completed",
+      "check_run" => %{
+        "id" => 123,
+        "head_sha" => "ordinary",
+        "status" => "completed",
+        "name" => "merge eligibility",
+        "conclusion" => "failure",
+        "html_url" => "https://ci.example/check",
+        "app" => %{"id" => 4811},
+        "external_id" => Jason.encode!(%{"repo" => "TauCetiProject/TauCeti", "pr" => 1})
+      }
+    }
+
+    for _ <- 1..2 do
+      result =
+        conn
+        |> put_req_header("x-github-event", "check_run")
+        |> post(webhook_path(conn, :webhook, "github"), body)
+
+      assert result.status == 200
+    end
+
+    :sys.get_state(attemptor)
+    jobs = Repo.all(BorsNG.Database.OrchestrationJob)
+
+    [eligibility] =
+      Enum.filter(jobs, fn j ->
+        match?({:eligibility, 1}, BorsNG.Worker.Orchestration.Outbox.payload(j))
+      end)
+
+    assert eligibility.wake_version == 2
+
+    refute Enum.any?(jobs, fn j ->
+             match?({:status, _}, BorsNG.Worker.Orchestration.Outbox.payload(j))
+           end)
+  end
+
+  test "async candidate check retains its journal receipt and serialized terminal observation", %{
+    conn: conn,
+    project: project
+  } do
+    alias BorsNG.Database.{Batch, CandidateEvent}
+    alias BorsNG.Worker.CandidateJournal
+    attemptor = async_webhooks(project)
+    batch = Repo.insert!(Batch.new(project.id, "main"))
+    candidate = CandidateJournal.begin(batch, [], "base")
+
+    CandidateJournal.bind(
+      candidate,
+      "built",
+      "tree",
+      "base",
+      %BorsNG.Worker.Batcher.BorsToml{status: ["build"]},
+      %{}
+    )
+
+    batch |> Batch.changeset(%{commit: "built", state: :running}) |> Repo.update!()
+
+    body = %{
+      "repository" => %{"id" => project.repo_xref},
+      "action" => "completed",
+      "check_run" => %{
+        "id" => 124,
+        "head_sha" => "built",
+        "status" => "completed",
+        "name" => "build",
+        "conclusion" => "success",
+        "html_url" => "https://ci.example/build"
+      }
+    }
+
+    result =
+      conn
+      |> put_req_header("x-github-event", "check_run")
+      |> post(webhook_path(conn, :webhook, "github"), body)
+
+    assert result.status == 200
+    :sys.get_state(attemptor)
+    assert Repo.get_by!(CandidateEvent, candidate_id: candidate.id, kind: "check_run_observed")
+
+    assert Enum.any?(Repo.all(BorsNG.Database.OrchestrationJob), fn j ->
+             BorsNG.Worker.Orchestration.Outbox.payload(j) ==
+               {:status, {"built", "build", :ok, "https://ci.example/build"}}
+           end)
+
+    assert Repo.get!(Batch, batch.id).state == :running
+  end
+
   test "edit PR", %{conn: conn, project: project} do
     patch =
       Repo.insert!(%Patch{

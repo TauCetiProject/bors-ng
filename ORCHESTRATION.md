@@ -182,3 +182,51 @@ cancellation. Large preparation, recovery and live-read operations remain servic
 bottlenecks to measure and split at durable boundaries within #16811. This first
 increment establishes queue priority and observable service budgets; it does not
 claim an achieved production latency or throughput gain before rollout evidence.
+
+## Authoritative wakeups and status ingress
+
+Per-PR eligibility reconsideration, ordinary poll wakeups, queue recovery and
+backend-hold recovery now use separate durable keys. The payload requests a read
+of current state; it does not carry a verdict. Enqueue increments `wake_version`
+under a row lock. Claim snapshots it in `claimed_version`. Completion clears the
+key only when those versions still match. A receipt during execution increments
+the version and records the earliest requested `rerun_at`, so completion re-pends
+one follow-up read in a new FIFO row, atomically completing the old owner and
+transferring the key. This puts a late read after commands queued during the
+previous read. A pending wakeup separated by a command also gets a new row,
+retaining the earlier read and preserving command order. The comparison and key
+transfer hold the same row lock as receipt, preventing a lost wakeup on either
+side of completion. A receipt that
+races key removal retries insertion instead of disappearing.
+
+Short mailbox transactions use the same project-then-job lock order for
+receipt, completion, recovery and leases on both adapters. They never hold that
+lock over GitHub work. This prevents MySQL unique-key/gap-lock deadlocks between
+producers and a completing/claiming consumer.
+
+Repeated pending wakeups share one read. Only immediately due wakeups coalesce. Future timers retain their original
+per-deadline keys: an earlier read cannot satisfy a later admission deadline.
+Fresh receipts cannot shorten infrastructure-error backoff. A retry/expired-lease
+claim snapshots the latest durable version; stale tokens cannot complete it.
+No approval, withdrawal, head-change, bundle/priority command or candidate status
+verdict uses this coalescing mechanism. Existing exact status-payload deduplication
+and immutable check/candidate observation receipts retain their prior semantics.
+
+In async mode, webhook ingress avoids durable stage-status jobs for SHAs that
+match no recorded batch, outside an assembling candidate's conservative fallback.
+Trying receipts still go directly to their independent serialized actor. Async dispatch binds its commit before publication. An unbound candidate
+on a waiting batch retains unmatched observations to cover temporary-ref assembly
+races; a database/read failure fails the webhook for its ordinary durable retry.
+Legacy mode still forwards every status because its publication can precede its
+record write. Trying delivery remains unconditional in the controller. Candidate
+check receipts are journaled and ordinary PR eligibility notifications are queued
+before filtering the stage-status route. The filter uses identities, without
+assuming a context called `bors` can never be required. The
+`[:bors, :webhook, :status_filtered]` counter measures avoided stage-status jobs.
+Ordinary PR admission still reads its current GitHub statuses normally.
+
+Before rolling this release back to code without wake versions, stop new intake
+and drain pending/running versioned wakeups, including dirty follow-ups. Do not
+clear a key or delete a row to force drainage. Additive columns may remain after
+rollback. Deployment/restart on this release retains the same lease and version
+fences; restart does not require replaying approval comments.
