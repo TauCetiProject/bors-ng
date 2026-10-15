@@ -1789,6 +1789,17 @@ defmodule BorsNG.Worker.Batcher do
     end
   end
 
+  defp local_import_preflight(batch, links, candidate, result) do
+    if Train.tracked?(candidate) do
+      :dispatch
+    else
+      if Process.get(:orchestration_executor, false),
+        do: ensure_no_withdrawal!(batch, patch_ids(candidate))
+
+      BorsNG.Worker.FailureIsolation.preflight(links, batch, result)
+    end
+  end
+
   defp assemble_candidate_batch(batch, links, base, candidate, "local") do
     conn = get_repo_conn(batch.project)
 
@@ -1801,7 +1812,8 @@ defmodule BorsNG.Worker.Batcher do
              else: GitHub.get_branch!(conn, batch.project.staging_branch).commit
            ),
          :ok <- BorsNG.Worker.CandidateAssembler.validate_result(candidate, result),
-         :ok <- local_live_heads(conn, links) do
+         :ok <- local_live_heads(conn, links),
+         :dispatch <- local_import_preflight(batch, links, candidate, result) do
       if Train.tracked?(candidate) do
         CandidateJournal.event(candidate, "train_barrier_checked", "bors.local_git", %{
           commit: result.commit,
@@ -1862,6 +1874,10 @@ defmodule BorsNG.Worker.Batcher do
         end
       end
     else
+      :partitioned ->
+        poll_after_delay(batch.project)
+        {:error, nil}
+
       false ->
         if Train.tracked?(candidate),
           do: {:waiting, nil},
@@ -3154,6 +3170,9 @@ defmodule BorsNG.Worker.Batcher do
              batch.base_sha
            ) do
         {:ok, {:conclusive, evidence}} ->
+          if Process.get(:orchestration_executor, false),
+            do: BorsNG.Worker.FailureDiagnostics.observe(batch, evidence, get_repo_conn(project))
+
           BorsNG.Worker.FailureIsolation.classified(batch, "candidate_failure", evidence)
           complete_failed_batch(batch, statuses)
 

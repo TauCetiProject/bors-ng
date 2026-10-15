@@ -6,6 +6,33 @@ defmodule BorsNG.Worker.FailureIsolation do
 
   def enabled?, do: System.get_env("BORS_FAILURE_DIAGNOSTICS") != "off"
 
+  # Only a strict multi-unit retry is eligible for this shortcut. A singleton
+  # still goes to authoritative CI; source inventory alone never quarantines.
+  def preflight(links, batch, result) do
+    hints = get_in(result, [:evidence, "diagnostic_hints"])
+
+    if enabled?() and is_map(hints) and hints["complete"] == true and
+         (hints["missing_imports"] || []) != [] and
+         match?({:ok, _, "missing_import"}, partition(links, hints, nil)) do
+      candidate = CandidateJournal.latest(batch.id)
+
+      CandidateJournal.event(candidate, "local_import_failure", "bors.local_git", %{
+        assembly_identity: BorsNG.Worker.CandidateAssembler.identity(candidate),
+        commit: result.commit,
+        tree: result.tree,
+        missing_imports: hints["missing_imports"],
+        authority: "retry_only",
+        proof_authority: false,
+        ci_dispatched: false
+      })
+
+      :retrying = split(links, batch)
+      :partitioned
+    else
+      :dispatch
+    end
+  end
+
   def hints(candidate) do
     if candidate do
       Repo.all(
@@ -29,6 +56,14 @@ defmodule BorsNG.Worker.FailureIsolation do
     links = ordered_links(links, candidate)
 
     hints = if enabled?() and not uncertain_terminal?(candidate), do: hints(candidate)
+
+    hints =
+      if is_map(hints) do
+        case BorsNG.Worker.FailureDiagnostics.suspects(candidate, hints) do
+          {:ok, prs} -> Map.put(hints, "compiler_suspects", prs)
+          _ -> hints
+        end
+      end
 
     case partition(links, hints, conflict) do
       {:ok, groups, reason} ->
@@ -119,7 +154,8 @@ defmodule BorsNG.Worker.FailureIsolation do
         if conflict do
           [owner[conflict["pr"]]]
         else
-          Enum.map(hints["missing_imports"] || [], &owner[&1["pr"]])
+          Enum.map(hints["missing_imports"] || [], &owner[&1["pr"]]) ++
+            Enum.map(hints["compiler_suspects"] || [], &owner[&1])
         end
         |> Enum.reject(&is_nil/1)
         |> Enum.uniq()
@@ -135,7 +171,14 @@ defmodule BorsNG.Worker.FailureIsolation do
         cond do
           suspects != [] and length(suspects) < length(units) ->
             {[suspects, ids -- suspects],
-             if(conflict, do: "structured_conflict", else: "missing_import")}
+             cond do
+               conflict -> "structured_conflict"
+               hints["compiler_suspects"] != nil -> "compiler_diagnostics"
+               true -> "missing_import"
+             end}
+
+          hints["compiler_suspects"] != nil ->
+            {[], nil}
 
           length(components) > 1 and Enum.any?(components, &(length(&1) > 1)) ->
             [first | rest] = Enum.sort_by(components, &{-length(&1), hd(&1)})

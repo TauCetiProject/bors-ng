@@ -102,7 +102,10 @@ defmodule BorsNG.Worker.LocalGitIntegrationTest do
     if kind == request['operation']:
         print(json.dumps(dict(status='error',details=dict(kind='network_unavailable'))))
     elif request['operation']=='assemble':
-        print(json.dumps(dict(status='ok',result=request['identity'] | dict(commit='#{@commit}',tree='#{@tree}'),commits=[],git_version='test',mirror_bytes=1)))
+        hints={}
+        if os.environ.get('BORS_TEST_MISSING_IMPORT'):
+            hints=dict(complete=True,changed_files=[dict(pr=m['pr'],head_sha=m['head_sha'],paths=['TauCeti/File'+str(m['pr'])+'.lean']) for m in request['members']],import_edges=[],missing_imports=[dict(pr=1,path='TauCeti/File1.lean',provider_path='TauCeti/Absent.lean')])
+        print(json.dumps(dict(status='ok',result=request['identity'] | dict(commit='#{@commit}',tree='#{@tree}'),diagnostic_hints=hints,commits=[],git_version='test',mirror_bytes=1)))
     else:
         print(json.dumps(dict(status='ok')))
     """
@@ -115,6 +118,7 @@ defmodule BorsNG.Worker.LocalGitIntegrationTest do
     on_exit(fn ->
       System.put_env("PATH", old_path)
       System.delete_env("BORS_TEST_HELPER_FAILURE")
+      System.delete_env("BORS_TEST_MISSING_IMPORT")
       File.rm_rf!(dir)
     end)
 
@@ -143,6 +147,71 @@ defmodule BorsNG.Worker.LocalGitIntegrationTest do
     assert Enum.any?(events(batch), &(&1.kind == "staging_pushed"))
     refute Map.has_key?(GitHub.ServerMock.get_state()[@conn].branches, "staging.tmp")
     assert Repo.get!(LinkPatchBatch, ctx.link.id).head_sha == @head
+  end
+
+  test "exact inventory partitions a missing import before CI, preserving approvals", ctx do
+    System.put_env("BORS_TEST_MISSING_IMPORT", "true")
+
+    patch =
+      Repo.insert!(%Patch{
+        project_id: ctx.project.id,
+        pr_xref: 2,
+        commit: @head,
+        into_branch: "main",
+        manual_approval: ctx.patch.manual_approval
+      })
+
+    CandidateJournal.insert_member(
+      LinkPatchBatch.changeset(%LinkPatchBatch{}, %{
+        patch_id: patch.id,
+        batch_id: ctx.batch.id,
+        head_sha: @head,
+        reviewer: "human",
+        manual_approval: patch.manual_approval
+      })
+    )
+
+    state = GitHub.ServerMock.get_state()
+
+    state =
+      state
+      |> put_in([@conn, :pulls, 2], %{state[@conn].pulls[1] | number: 2})
+      |> put_in([@conn, :pr_commits, 2], state[@conn].pr_commits[1])
+      |> put_in([@conn, :labels, 2], [])
+      |> put_in([@conn, :comments, 2], [])
+
+    GitHub.ServerMock.put_state(state)
+    Batcher.handle_info({:poll, :once}, ctx.project.id)
+    batch = Repo.get!(Batch, ctx.batch.id)
+    assert batch.state == :error
+    assert batch.commit == nil
+    assert Repo.all(Status.all_for_batch(batch.id)) == []
+    assert GitHub.ServerMock.get_state()[@conn].branches["staging"] == @base
+    assert Enum.any?(events(batch), &(&1.kind == "local_import_failure"))
+
+    refute Enum.any?(
+             events(batch),
+             &(&1.kind in [
+                 "constructed",
+                 "staging_pushed",
+                 "dispatch_requested",
+                 "head_quarantined"
+               ])
+           )
+
+    children = Repo.all(from(b in Batch, where: b.id != ^batch.id, order_by: b.id))
+    assert length(children) == 2
+    assert Enum.all?(children, & &1.sealed)
+
+    for child <- children do
+      [link] = Repo.all(LinkPatchBatch.from_batch(child.id))
+      assert link.manual_approval == ctx.link.manual_approval
+      assert link.head_sha == @head
+      assert link.reviewer == "human"
+      assert CandidateJournal.admission(link.id).snapshot["retry_reason"] == "missing_import"
+    end
+
+    assert Repo.get!(Patch, ctx.patch.id).manual_approval == ctx.patch.manual_approval
   end
 
   test "async local publication retains its immutable recipe across executor restart", ctx do

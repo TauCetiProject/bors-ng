@@ -89,6 +89,169 @@ defmodule BorsNG.Worker.FailureIsolationTest do
 
   defp prs(groups), do: Enum.map(groups, fn g -> Enum.map(g, & &1.patch.pr_xref) end)
 
+  defp terminal(c) do
+    CandidateJournal.bind(
+      c.candidate,
+      "staged",
+      "tree",
+      "base",
+      %BorsToml{status: ["build"]},
+      %{}
+    )
+
+    batch = %{c.batch | commit: "staged", base_sha: "base"}
+
+    evidence = %{
+      run_id: 100,
+      run_attempt: 1,
+      run_created_at: DateTime.utc_now() |> DateTime.add(1, :second) |> DateTime.to_iso8601(),
+      conclusion: "failure",
+      workflow: ".github/workflows/pr-build.yml",
+      identity: "bors branch=main batch=#{batch.id} head=staged base=base",
+      failed_steps: [
+        %{
+          job_id: 200,
+          job_name: "sandboxed-build",
+          name: "Build exact candidate under bwrap with workflow-pinned audits, offline"
+        }
+      ]
+    }
+
+    {batch, evidence}
+  end
+
+  defp log_result(paths, kind \\ "compiler_error") do
+    %{
+      "complete" => true,
+      "jobs" => [%{"job_id" => 200, "observations" => [%{"kind" => kind, "paths" => paths}]}]
+    }
+  end
+
+  test "terminal diagnostics split exact membership with approvals and survive restart", c do
+    alias BorsNG.Worker.FailureDiagnostics
+    {batch, evidence} = terminal(c)
+    collector = fn _, [200] -> log_result(["TauCeti/File3.lean"]) end
+    assert :ok = FailureDiagnostics.observe(batch, evidence, :conn, collector)
+    FailureIsolation.classified(batch, "candidate_failure", evidence)
+    assert :retrying = FailureIsolation.split(Enum.reverse(c.links), batch)
+    children = Repo.all(from(b in Batch, where: b.id != ^batch.id, order_by: b.id))
+    assert prs(Enum.map(children, &stored_links(&1.id))) == [[3], [1, 2, 4]]
+    assert Enum.all?(children, & &1.sealed)
+
+    assert Enum.all?(
+             Repo.all(Patch),
+             &(&1.queue_pending and &1.queue_approval["state"] == "approved")
+           )
+
+    assert :ok =
+             FailureDiagnostics.observe(batch, evidence, :conn, fn _, _ ->
+               flunk("logs re-read")
+             end)
+
+    assert :retrying = FailureIsolation.split(c.links, batch)
+    assert Repo.aggregate(Batch, :count, :id) == 3
+    [event] = Repo.all(from(e in CandidateEvent, where: e.kind == "failure_diagnostics"))
+    assert event.details["binding"]["candidate_id"] == c.candidate.id
+    assert event.details["binding"]["generation"] == c.candidate.generation
+    assert event.details["binding"]["job_ids"] == [200]
+    assert event.details["authority"] == "retry_only"
+    refute event.details["proof_authority"]
+
+    # A newer authoritative observation for a different job cannot replay the
+    # older job's compiler output, and infrastructure cannot consume it at all.
+    other = put_in(evidence, [:failed_steps, Access.at(0), :job_id], 201)
+    FailureIsolation.classified(batch, "candidate_failure", other)
+    assert :unavailable = FailureDiagnostics.suspects(c.candidate, c.hints)
+    FailureIsolation.classified(batch, "infrastructure", evidence)
+    assert :unavailable = FailureDiagnostics.suspects(c.candidate, c.hints)
+  end
+
+  test "unavailable diagnostics are durable and stale runs/heads cannot supply hints", c do
+    alias BorsNG.Worker.FailureDiagnostics
+    {batch, evidence} = terminal(c)
+    reject = fn _, _ -> flunk("stale/infrastructure evidence fetched") end
+    FailureDiagnostics.observe(%{batch | commit: "old"}, evidence, :conn, reject)
+
+    FailureDiagnostics.observe(
+      batch,
+      %{evidence | run_created_at: "2000-01-01T00:00:00Z"},
+      :conn,
+      reject
+    )
+
+    FailureDiagnostics.observe(batch, %{evidence | conclusion: "cancelled"}, :conn, reject)
+    FailureDiagnostics.observe(batch, %{evidence | failed_steps: []}, :conn, reject)
+    # The unavailable observation for no authoritative failed job is durable.
+    assert :unavailable = FailureDiagnostics.suspects(c.candidate, c.hints)
+    evidence = %{evidence | run_attempt: 2}
+    FailureDiagnostics.observe(batch, evidence, :conn, fn _, _ -> %{"complete" => false} end)
+    FailureIsolation.classified(batch, "candidate_failure", evidence)
+
+    FailureDiagnostics.observe(batch, evidence, :conn, fn _, _ ->
+      flunk("unavailable result re-read")
+    end)
+
+    assert :unavailable = FailureDiagnostics.suspects(c.candidate, c.hints)
+    FailureIsolation.classified(batch, "candidate_failure", %{evidence | run_attempt: 3})
+    assert :unavailable = FailureDiagnostics.suspects(c.candidate, c.hints)
+  end
+
+  test "compiler and audit suspects preserve bundles, provider groups and every offender", c do
+    [a, b, d, e] = c.links
+    a = %{a | patch: %{a.patch | bundle_id: 7}}
+    b = %{b | patch: %{b.patch | bundle_id: 7}}
+    hints = c.hints |> Map.put("compiler_suspects", [2]) |> Map.put("import_edges", [[2, 3]])
+
+    assert {:ok, groups, "compiler_diagnostics"} =
+             FailureIsolation.partition([a, b, d, e], hints, nil)
+
+    assert prs(groups) == [[1, 2, 3], [4]]
+    hints = c.hints |> Map.put("compiler_suspects", [1, 3])
+    assert {:ok, groups, "compiler_diagnostics"} = FailureIsolation.partition(c.links, hints, nil)
+    assert prs(groups) == [[1, 3], [2, 4]]
+
+    assert :fallback =
+             FailureIsolation.partition(
+               c.links,
+               Map.put(hints, "compiler_suspects", [1, 2, 3, 4]),
+               nil
+             )
+  end
+
+  test "unchanged dependency errors require attributed imports; audit retains both sides", c do
+    alias BorsNG.Worker.FailureDiagnostics
+
+    assert {:ok, [2, 3]} =
+             FailureDiagnostics.map_paths(
+               c.hints,
+               log_result(["TauCeti/File2.lean", "TauCeti/File3.lean"], "duplicate_declaration")
+             )
+
+    assert {:ok, [2]} =
+             FailureDiagnostics.map_paths(
+               c.hints,
+               log_result(["TauCeti/File2.lean", "TauCeti/Base.lean"], "duplicate_declaration")
+             )
+
+    assert :unavailable = FailureDiagnostics.map_paths(c.hints, log_result(["TauCeti/Base.lean"]))
+
+    assert :unavailable =
+             FailureDiagnostics.map_paths(c.hints, log_result(["TauCeti/Provider.lean"]))
+
+    [first | rest] = c.hints["changed_files"]
+
+    hints =
+      Map.put(c.hints, "changed_files", [
+        Map.put(first, "dependency_paths", ["TauCeti/Provider.lean"]) | rest
+      ])
+
+    assert {:ok, [1]} = FailureDiagnostics.map_paths(hints, log_result(["TauCeti/Provider.lean"]))
+    assert :unavailable = FailureDiagnostics.map_paths(c.hints, %{"complete" => false})
+
+    assert :unavailable =
+             FailureDiagnostics.map_paths(c.hints, %{"complete" => true, "jobs" => []})
+  end
+
   test "a missing provider narrows the importer and leaves all innocent approvals", c do
     hints =
       Map.put(c.hints, "missing_imports", [%{"pr" => 3, "provider_path" => "TauCeti/Absent.lean"}])
@@ -117,6 +280,38 @@ defmodule BorsNG.Worker.FailureIsolationTest do
     # Replay after an executor restart reuses sealed children and snapshots.
     assert :retrying = FailureIsolation.split(c.links, c.batch)
     assert Repo.aggregate(Batch, :count, :id) == 3
+  end
+
+  test "exact assembled missing import skips dispatch only for a strict retry partition", c do
+    hints =
+      Map.put(c.hints, "missing_imports", [
+        %{"pr" => 3, "path" => "TauCeti/File3.lean", "provider_path" => "TauCeti/Absent.lean"}
+      ])
+
+    result = %{commit: "assembled", tree: "tree", evidence: %{"diagnostic_hints" => hints}}
+    CandidateJournal.event(c.candidate, "local_assembled", "bors.local_git", result)
+    assert :partitioned = FailureIsolation.preflight(c.links, c.batch, result)
+    children = Repo.all(from(b in Batch, where: b.id != ^c.batch.id, order_by: b.id))
+    assert prs(Enum.map(children, &stored_links(&1.id))) == [[3], [1, 2, 4]]
+
+    assert Enum.all?(
+             Repo.all(Patch),
+             &(&1.queue_pending and &1.queue_approval["state"] == "approved")
+           )
+
+    assert :partitioned = FailureIsolation.preflight(c.links, c.batch, result)
+    assert Repo.aggregate(Batch, :count, :id) == 3
+    assert :dispatch = FailureIsolation.preflight([Enum.at(c.links, 2)], c.batch, result)
+    assert :dispatch = FailureIsolation.preflight(c.links, c.batch, %{result | evidence: %{}})
+
+    assert :dispatch =
+             FailureIsolation.preflight(
+               c.links,
+               c.batch,
+               put_in(result, [:evidence, "diagnostic_hints", "complete"], false)
+             )
+
+    assert Repo.all(from(e in CandidateEvent, where: e.kind == "head_quarantined")) == []
   end
 
   test "import providers and multiple interacting changes stay together", c do

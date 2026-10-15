@@ -69,8 +69,8 @@ defmodule BorsNG.Worker.StagingFailure do
 
   def classify_run(_, _, _, _, _), do: :unavailable
 
-  # GitHub's job/step conclusions are workflow-owned evidence. No candidate
-  # log text, uploaded telemetry, metrics or artifact is consulted.
+  # Only GitHub's job/step conclusions classify the failure. Optional untrusted
+  # logs can subsequently guide retries, never change this classification.
   @candidate_steps [
     "Preflight exact-candidate import headers",
     "Build exact candidate under bwrap with workflow-pinned audits, offline",
@@ -109,7 +109,8 @@ defmodule BorsNG.Worker.StagingFailure do
       run_url: run["html_url"],
       conclusion: run["conclusion"],
       workflow: run["path"],
-      identity: run["display_title"]
+      identity: run["display_title"],
+      run_created_at: run["created_at"]
     }
   end
 

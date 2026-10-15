@@ -1,0 +1,338 @@
+{
+  "method": "Read-only replay of terminal production job logs against their exact durable local assembly hints and immutable ordered member snapshots. No candidate code executed, production retries created or approvals changed by replay.",
+  "samples": [
+    {
+      "strategy": "compiler_diagnostics",
+      "members": 4,
+      "groups": [
+        [
+          15908
+        ],
+        [
+          15904,
+          15905,
+          15910
+        ]
+      ],
+      "batch": 729,
+      "bytes": 9348984,
+      "job_id": 116075867499,
+      "parse_ms": 101.17,
+      "run_id": 38629119388,
+      "candidate_id": 71,
+      "generation": 1,
+      "base_sha": "5fa17650a559a7bd9764fcc11cb306d8f8edf286",
+      "ordered_heads": [
+        {
+          "pr": 15904,
+          "head_sha": "c8813c928936dd9830a9446d46b8f13707a9d576"
+        },
+        {
+          "pr": 15905,
+          "head_sha": "ec2582c15dc0275be560f7f9e438411dc4c1662c"
+        },
+        {
+          "pr": 15908,
+          "head_sha": "5c6ad5fb00954e0a2e08847431c94af2b4a33071"
+        },
+        {
+          "pr": 15910,
+          "head_sha": "b6fea59e906abe726880c8fd455d12664216047b"
+        }
+      ],
+      "observations": [
+        {
+          "kind": "compiler_error",
+          "paths": [
+            "TauCeti/Analysis/OperatorIdeal/ApproximationNumber/ConverseMinMax.lean"
+          ]
+        }
+      ],
+      "run_url": "https://github.com/TauCetiProject/TauCeti/actions/runs/38629119388",
+      "job_url": "https://github.com/TauCetiProject/TauCeti/actions/runs/38629119388/job/116075867499",
+      "candidate_url": "https://bors.taucetiproject.org/repositories/1/candidates?base=main&batch_id=729",
+      "previous_strategy": "deterministic_bisection"
+    },
+    {
+      "strategy": "compiler_diagnostics",
+      "members": 11,
+      "groups": [
+        [
+          15936
+        ],
+        [
+          15935,
+          15942,
+          15949,
+          15977,
+          16017,
+          16084,
+          16124,
+          16128,
+          16172,
+          16180
+        ]
+      ],
+      "batch": 731,
+      "bytes": 8870979,
+      "job_id": 116097445591,
+      "parse_ms": 95.88,
+      "run_id": 38635487880,
+      "candidate_id": 73,
+      "generation": 1,
+      "base_sha": "720bf8c135bd2c354a15d55a73f2fc2c3d7aa358",
+      "ordered_heads": [
+        {
+          "pr": 15935,
+          "head_sha": "87766e3f6b6218a11c9be666c3ce4a8b7b398c2b"
+        },
+        {
+          "pr": 15936,
+          "head_sha": "07ad779404deb23d79c14e041bb7a24ff392b203"
+        },
+        {
+          "pr": 15942,
+          "head_sha": "233241ec1b2ece23ab8d9687fe192bdf13496208"
+        },
+        {
+          "pr": 15949,
+          "head_sha": "6cf3641962497539bd29d55fa2f51b8f75ca2802"
+        },
+        {
+          "pr": 15977,
+          "head_sha": "ea2d269c192a7aa8d45fb188201daf24674d4351"
+        },
+        {
+          "pr": 16017,
+          "head_sha": "7e8eab9aa49871438609aa79936b4a85c15e397e"
+        },
+        {
+          "pr": 16084,
+          "head_sha": "3f35d24ba29ca85a877be29a2c0500fc3a141fed"
+        },
+        {
+          "pr": 16124,
+          "head_sha": "f7bcad3a56524c1f1fe0f2fa9994b05647f4acaf"
+        },
+        {
+          "pr": 16128,
+          "head_sha": "f9d827ef4aeb5aa31eaec928383e123a7acdb50a"
+        },
+        {
+          "pr": 16172,
+          "head_sha": "f2882019b6f0f9df9b21be1bd954f54019af157e"
+        },
+        {
+          "pr": 16180,
+          "head_sha": "d832ffbacb5d6cc737519ba641fdc7de06b64558"
+        }
+      ],
+      "observations": [
+        {
+          "kind": "compiler_error",
+          "paths": [
+            "TauCeti/Analysis/InnerProductSpace/Harmonic/Reflection.lean"
+          ]
+        }
+      ],
+      "run_url": "https://github.com/TauCetiProject/TauCeti/actions/runs/38635487880",
+      "job_url": "https://github.com/TauCetiProject/TauCeti/actions/runs/38635487880/job/116097445591",
+      "candidate_url": "https://bors.taucetiproject.org/repositories/1/candidates?base=main&batch_id=731",
+      "previous_strategy": "deterministic_bisection"
+    },
+    {
+      "strategy": "compiler_diagnostics",
+      "members": 5,
+      "groups": [
+        [
+          15955
+        ],
+        [
+          15875,
+          15921,
+          15944,
+          15954
+        ]
+      ],
+      "batch": 733,
+      "bytes": 7056186,
+      "job_id": 116108678306,
+      "parse_ms": 60.01,
+      "run_id": 38638781229,
+      "candidate_id": 75,
+      "generation": 1,
+      "base_sha": "720bf8c135bd2c354a15d55a73f2fc2c3d7aa358",
+      "ordered_heads": [
+        {
+          "pr": 15875,
+          "head_sha": "9dd19c341678a071131641e4f9256b97ec45e47c"
+        },
+        {
+          "pr": 15921,
+          "head_sha": "d5bd310bef8f7f7568efb4b88b30b5d6d7ff0892"
+        },
+        {
+          "pr": 15944,
+          "head_sha": "f41ea09777640b39a6d7e5c545d405f1004c766d"
+        },
+        {
+          "pr": 15954,
+          "head_sha": "16fa6687e319fb0a0bff82ad67640a14ab71a356"
+        },
+        {
+          "pr": 15955,
+          "head_sha": "5456e98663f4425e96ff01d932833e6ebb604b3b"
+        }
+      ],
+      "observations": [
+        {
+          "kind": "duplicate_declaration",
+          "paths": [
+            "TauCeti/Analysis/Polynomial/Puiseux/Laurent/Collisions.lean",
+            "TauCeti/Analysis/Polynomial/Puiseux/Nonmonic/Multiplicity.lean"
+          ]
+        }
+      ],
+      "run_url": "https://github.com/TauCetiProject/TauCeti/actions/runs/38638781229",
+      "job_url": "https://github.com/TauCetiProject/TauCeti/actions/runs/38638781229/job/116108678306",
+      "candidate_url": "https://bors.taucetiproject.org/repositories/1/candidates?base=main&batch_id=733",
+      "previous_strategy": "deterministic_bisection"
+    },
+    {
+      "strategy": "missing_import",
+      "members": 18,
+      "groups": [
+        [
+          16175
+        ],
+        [
+          16047,
+          16048,
+          16057,
+          16059,
+          16062,
+          16068,
+          16069,
+          16091,
+          16108,
+          16109,
+          16122,
+          16136,
+          16177,
+          16178,
+          16179,
+          16187,
+          16205
+        ]
+      ],
+      "batch": 727,
+      "bytes": 351677,
+      "job_id": 116071554682,
+      "parse_ms": 3.17,
+      "run_id": 38627869562,
+      "candidate_id": 69,
+      "generation": 1,
+      "base_sha": "5fa17650a559a7bd9764fcc11cb306d8f8edf286",
+      "ordered_heads": [
+        {
+          "pr": 16047,
+          "head_sha": "04910e30b99dedd62aad244af9783686afd15047"
+        },
+        {
+          "pr": 16048,
+          "head_sha": "613bd812ad93576b09bc5c47120d3b5875fb218a"
+        },
+        {
+          "pr": 16057,
+          "head_sha": "e658d75c5fc0944f94f00bd5bdf7ebb467add74e"
+        },
+        {
+          "pr": 16059,
+          "head_sha": "d3c8626fa04802813cc1ec9d8bdcae5f5e28bea8"
+        },
+        {
+          "pr": 16062,
+          "head_sha": "ec157201fad733223e73d070998c10fe1202014c"
+        },
+        {
+          "pr": 16068,
+          "head_sha": "43491200af7490d49e05749b10a45852b31c5ea5"
+        },
+        {
+          "pr": 16069,
+          "head_sha": "e10def3d41dce11627066674cd4e30685ce59ee6"
+        },
+        {
+          "pr": 16091,
+          "head_sha": "69db9720a59bfa3d6080d614f5c7b62710da38f0"
+        },
+        {
+          "pr": 16108,
+          "head_sha": "254d2f4798ba82c52f202c8e859d5b53a2a260bd"
+        },
+        {
+          "pr": 16109,
+          "head_sha": "01085d4e7c3a77346825bce7e3d59522b659056d"
+        },
+        {
+          "pr": 16122,
+          "head_sha": "f3189fd31e3564de963e226e80a591c5006ddff8"
+        },
+        {
+          "pr": 16136,
+          "head_sha": "9c0c2fcbb76f950051a809f1902c6eb12912fc83"
+        },
+        {
+          "pr": 16175,
+          "head_sha": "dedc6f8a9464710a0ab92fa76475942b7eb16d31"
+        },
+        {
+          "pr": 16177,
+          "head_sha": "04f80288f9c4c02082aa3af9cc2e764e4fb9d0f7"
+        },
+        {
+          "pr": 16178,
+          "head_sha": "174934505a9ac2be8135405079678f41e1865f8c"
+        },
+        {
+          "pr": 16179,
+          "head_sha": "09595db6257c52b8c30f5ff7476b7df81007da79"
+        },
+        {
+          "pr": 16187,
+          "head_sha": "1be3d7673885b97baa53736e02e94aebda0b80dd"
+        },
+        {
+          "pr": 16205,
+          "head_sha": "602819b5b0f17a565f456d0968a43e1b95f7775b"
+        }
+      ],
+      "observations": [],
+      "run_url": "https://github.com/TauCetiProject/TauCeti/actions/runs/38627869562",
+      "job_url": "https://github.com/TauCetiProject/TauCeti/actions/runs/38627869562/job/116071554682",
+      "candidate_url": "https://bors.taucetiproject.org/repositories/1/candidates?base=main&batch_id=727",
+      "previous_strategy": "missing_import"
+    }
+  ],
+  "collector_sample": {
+    "complete": true,
+    "jobs": [
+      {
+        "job_id": 116108678306,
+        "bytes": 7056186,
+        "observations": [
+          {
+            "kind": "duplicate_declaration",
+            "paths": [
+              "TauCeti/Analysis/Polynomial/Puiseux/Laurent/Collisions.lean",
+              "TauCeti/Analysis/Polynomial/Puiseux/Nonmonic/Multiplicity.lean"
+            ]
+          }
+        ]
+      }
+    ],
+    "elapsed_ms": 756,
+    "cpu_ms": 76
+  },
+  "limitations": "Local parsing/collection timings only; not a throughput or recoverable wall-clock measurement. Live post-deployment partition and full passing remainder remain rollout gates."
+}

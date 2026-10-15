@@ -22,7 +22,9 @@ permits ordinary failure isolation even if a sibling job is canceled. Terminal
 timeouts retain native failure semantics. Unknown terminal failures retain
 ordinary deterministic bisection, so a renamed step cannot silently cause
 unbounded whole-batch infrastructure retries. Incomplete/mismatched job pages
-retain intent and back off. No candidate-written metrics, telemetry, logs or artifacts are used.
+retain intent and back off. No candidate-written metrics, telemetry, logs or artifacts classify
+the failure. Optional [candidate-bound compiler diagnostics](compiler-diagnostics.md)
+can subsequently guide retry scheduling, with no proof or merge authority.
 A failed offline build includes the required audits; the classification does not
 claim that a particular theorem or proof is wrong.
 

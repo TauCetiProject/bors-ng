@@ -148,6 +148,8 @@ class LocalGitTest(unittest.TestCase):
         self.assertIn([1, 2], hints['import_edges'])
         self.assertEqual(hints['missing_imports'], [])
         self.assertIn('TauCeti/Provider.lean', hints['dependency_paths'])
+        self.assertIn('TauCeti/Provider.lean', hints['changed_files'][0]['dependency_paths'])
+        self.assertEqual(hints['changed_files'][1]['dependency_paths'], [])
         self.assertEqual(hints['changed_files'][0]['head_sha'], importer)
         self.assertEqual(local.local_imports('/- import TauCeti.Fake /- nested -/ -/\nmodule\nimport TauCeti.Real -- comment\ndef x := 1'), ['TauCeti.Real'])
         self.request['members'] = [self.member(1, importer)]
