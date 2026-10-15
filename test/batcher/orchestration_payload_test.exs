@@ -5,7 +5,9 @@ defmodule BorsNG.Worker.Orchestration.PayloadTest do
     payloads = [
       {:recover_queue_slice, 3, [1]},
       {:backend_holds_slice, 2, [1, 2]},
-      %{members_digest: "frozen", kind: :local_git}
+      %{members_digest: "frozen", kind: :local_git},
+      {:close_merged_pr, 1, "tested", nil,
+       %{patch_id: 1, pr: 1, head: "head", token: "generation", body: "merged"}}
     ]
 
     encoded = Enum.map(payloads, &Base.encode64(:erlang.term_to_binary(&1)))

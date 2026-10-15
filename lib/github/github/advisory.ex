@@ -3,7 +3,9 @@ defmodule BorsNG.GitHub.Advisory do
   use GenServer
   alias BorsNG.GitHub
 
-  def start_link(_), do: GenServer.start_link(__MODULE__, %{}, name: __MODULE__)
+  def start_link(opts),
+    do: GenServer.start_link(__MODULE__, %{}, name: Keyword.get(opts, :name, __MODULE__))
+
   def init(state), do: {:ok, state}
 
   def handle_call({:advisory, _, _, _, deadline} = request, from, state) do

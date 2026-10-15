@@ -1,0 +1,183 @@
+{
+  "issue": "https://github.com/TauCetiProject/TauCeti/issues/16811",
+  "captured_at": "2026-10-15T05:13:55.55425+00:00",
+  "production_read_only": true,
+  "prior_deployed_prs": [
+    30,
+    31,
+    34,
+    35
+  ],
+  "successful_promotion": {
+    "batch_id": 775,
+    "candidate_id": 98,
+    "members": 29,
+    "completion_job": 27769,
+    "operation_service_ms": 152729,
+    "journal": [
+      {
+        "id": 1204,
+        "candidate_id": 98,
+        "kind": "promotion_requested",
+        "source": "bors.outbox",
+        "observed_at": 1792038116708058,
+        "commit": "741581e62e0d02c1f25120d15841c12a65f37d09",
+        "run_id": null
+      },
+      {
+        "id": 1205,
+        "candidate_id": 98,
+        "kind": "promoted",
+        "source": "github.base_push_response",
+        "observed_at": 1792038158504383,
+        "commit": "741581e62e0d02c1f25120d15841c12a65f37d09",
+        "run_id": null
+      },
+      {
+        "id": 1206,
+        "candidate_id": 98,
+        "kind": "terminal_observed",
+        "source": "bors.status_summary",
+        "observed_at": 1792038219091380,
+        "commit": "741581e62e0d02c1f25120d15841c12a65f37d09",
+        "run_id": null
+      }
+    ],
+    "post_promoted_service_ms": 60764
+  },
+  "fresh_first_attempt_cohort_since": "2026-10-15T04:40:00Z",
+  "completed_first_attempt_operations": 497,
+  "coalescing_completed_rows": 233,
+  "coalescing_consumed_versions": 318,
+  "pending_jobs": 2,
+  "duplicate_active_heads": [],
+  "fresh_dispatches": [
+    {
+      "job_id": 28344,
+      "kind": "dispatch",
+      "operation": "dispatch",
+      "priority": 1,
+      "ready_wait_ms": 11699,
+      "service_ms": 6065,
+      "preceding_same_lane_completion_gap_ms": 200
+    },
+    {
+      "job_id": 28518,
+      "kind": "dispatch",
+      "operation": "dispatch",
+      "priority": 1,
+      "ready_wait_ms": 9620,
+      "service_ms": 6995,
+      "preceding_same_lane_completion_gap_ms": 231
+    },
+    {
+      "job_id": 28734,
+      "kind": "dispatch",
+      "operation": "dispatch",
+      "priority": 1,
+      "ready_wait_ms": 9204,
+      "service_ms": 8461,
+      "preceding_same_lane_completion_gap_ms": 244
+    }
+  ],
+  "long_operations": [
+    {
+      "job_id": 28363,
+      "kind": "compatibility",
+      "operation": "nil",
+      "priority": 2,
+      "ready_wait_ms": 481955,
+      "service_ms": 32074,
+      "preceding_same_lane_completion_gap_ms": 153
+    },
+    {
+      "job_id": 28488,
+      "kind": "info",
+      "operation": "completion_poll",
+      "priority": 1,
+      "ready_wait_ms": 3502,
+      "service_ms": 91433,
+      "preceding_same_lane_completion_gap_ms": 340
+    },
+    {
+      "job_id": 28554,
+      "kind": "compatibility",
+      "operation": "nil",
+      "priority": 2,
+      "ready_wait_ms": 105341,
+      "service_ms": 31745,
+      "preceding_same_lane_completion_gap_ms": 153
+    },
+    {
+      "job_id": 28645,
+      "kind": "compatibility",
+      "operation": "nil",
+      "priority": 2,
+      "ready_wait_ms": 380,
+      "service_ms": 31924,
+      "preceding_same_lane_completion_gap_ms": 1162
+    },
+    {
+      "job_id": 28681,
+      "kind": "compatibility",
+      "operation": "nil",
+      "priority": 2,
+      "ready_wait_ms": 506,
+      "service_ms": 32606,
+      "preceding_same_lane_completion_gap_ms": 44201
+    },
+    {
+      "job_id": 28712,
+      "kind": "info",
+      "operation": "completion_poll",
+      "priority": 1,
+      "ready_wait_ms": 1198,
+      "service_ms": 111269,
+      "preceding_same_lane_completion_gap_ms": 188
+    },
+    {
+      "job_id": 28715,
+      "kind": "compatibility",
+      "operation": "nil",
+      "priority": 2,
+      "ready_wait_ms": 60811,
+      "service_ms": 31964,
+      "preceding_same_lane_completion_gap_ms": 305
+    },
+    {
+      "job_id": 28767,
+      "kind": "compatibility",
+      "operation": "nil",
+      "priority": 2,
+      "ready_wait_ms": 434,
+      "service_ms": 32579,
+      "preceding_same_lane_completion_gap_ms": 150
+    },
+    {
+      "job_id": 28810,
+      "kind": "compatibility",
+      "operation": "nil",
+      "priority": 2,
+      "ready_wait_ms": 2109,
+      "service_ms": 31898,
+      "preceding_same_lane_completion_gap_ms": 428
+    },
+    {
+      "job_id": 28848,
+      "kind": "compatibility",
+      "operation": "nil",
+      "priority": 2,
+      "ready_wait_ms": 917,
+      "service_ms": 31751,
+      "preceding_same_lane_completion_gap_ms": 1293
+    }
+  ],
+  "limits": [
+    "Snapshot precedes this cleanup change; no cleanup performance improvement claimed yet.",
+    "Wake versions minus completed wake rows measures avoided executor rows, not API or time savings.",
+    "Single current operation still blocks dispatch; preparation/completion/source service remains above10s target.",
+    "Some waits cross a deployment lease fence; running-row age is not operation service.",
+    "No like-for-like accepted-throughput comparison without controlling candidate size and CI duration.",
+    "No production mutation, forced CI cancellation, approval replay or speculative expansion."
+  ]
+}

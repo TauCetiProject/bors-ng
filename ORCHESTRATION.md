@@ -312,3 +312,36 @@ continuation or publisher before its producer has run; safe decoding must not
 mistake that known atom for an untrusted stored symbol. Unknown atoms remain
 rejected and are never interned from queue data. This is module loading only;
 leases, identities, command order and candidate validation still apply normally.
+
+## Post-merge PR bookkeeping
+
+Async successful promotion commits the promoted event, completed batch state,
+approval retirement and an immutable cleanup snapshot in one transaction. This
+also applies when recovery observes the tested commit already on the base.
+The snapshot binds batch, tested commit, candidate, PR head and approval token.
+Native and legacy serial delivery retain their existing behavior.
+
+A background turn expands at most four independent PR-close children and keyed
+historical merge notices. Continuations reference the retained parent snapshot;
+they do not duplicate every remaining member. Each close job reads one live PR,
+checks its head/base/draft, current local approval token and pending candidate
+commands, and patches only its title and state. Already closed PRs need no write;
+an existing title prefix is preserved. A changed head or fresh approval cannot
+be closed by old cleanup. The historical notice identifies the exact merged
+revision and remains deliverable when later PR intent prevents closing it.
+
+Cleanup has its own single API client and token cache, independent of notices.
+A shared eight-second deadline covers the live read and close, with no hidden
+HTTP retry; an expired deadline cannot initiate a late close. Missing legacy
+policy is inferred as non-squash, with bounded root/.github config lookup.
+Retries wait at least five minutes. Permanent 4xx except401/403/429 and invalid
+policy terminate visibly; other failures terminate after six attempts. Terminal
+rows retain their keys and `cleanup_terminal:` error. Each failed child releases
+its siblings and the merge lane. No cleanup job modifies staging or main.
+
+Parent/child/continuation keys remain durable tombstones after completion;
+expansion replay cannot regenerate an already completed child or notice. A
+rollback to code without these handlers must drain `post_merge_cleanup`,
+`expand_post_merge_cleanup` and `close_merged_pr` jobs using forward code first,
+as well as earlier versioned wakeups, projections and service continuations.
+Do not delete queued work or clear keys to manufacture drainage.

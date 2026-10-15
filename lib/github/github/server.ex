@@ -51,7 +51,14 @@ defmodule BorsNG.GitHub.Server do
   end
 
   def handle_call({:advisory, type, {token, repo_xref}, args, deadline}, _from, state)
-      when type in [:post_comment, :notice_comments_since, :post_commit_status] do
+      when type in [
+             :post_comment,
+             :notice_comments_since,
+             :post_commit_status,
+             :get_pr,
+             :close_merged_pr,
+             :cleanup_policy
+           ] do
     # Include time spent behind another API request. Never execute an expired
     # advisory call or hide retries/token refreshes inside its service budget.
     Process.put(:github_advisory_deadline, deadline)
@@ -237,6 +244,23 @@ defmodule BorsNG.GitHub.Server do
 
       %{body: body, status: status} ->
         {:error, :push, status, body}
+    end
+  end
+
+  def do_handle_call(:cleanup_policy, conn, {commit}) do
+    case do_handle_call(:get_file, conn, {commit, "bors.toml"}) do
+      {:ok, nil} -> cleanup_policy_file(conn, commit, ".github/bors.toml")
+      {:ok, content} -> {:ok, content}
+      {:error, _, status, _, _} -> {:error, :cleanup_policy, status}
+      _ -> {:error, :cleanup_policy}
+    end
+  end
+
+  def do_handle_call(:close_merged_pr, conn, {number, title}) do
+    # Update only bookkeeping fields; never replay a previously fetched body.
+    case patch!(conn, "pulls/#{number}", Jason.encode!(%{state: "closed", title: title})) do
+      %{status: 200} -> :ok
+      %{status: status} -> {:error, :close_merged_pr, status}
     end
   end
 
@@ -1815,5 +1839,13 @@ defmodule BorsNG.GitHub.Server do
       middleware,
       {Tesla.Adapter.Hackney, params}
     )
+  end
+
+  defp cleanup_policy_file(conn, commit, path) do
+    case do_handle_call(:get_file, conn, {commit, path}) do
+      {:ok, content} -> {:ok, content}
+      {:error, _, status, _, _} -> {:error, :cleanup_policy, status}
+      _ -> {:error, :cleanup_policy}
+    end
   end
 end

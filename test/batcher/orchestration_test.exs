@@ -695,6 +695,319 @@ defmodule BorsNG.Worker.OrchestrationTest do
     assert get_in(GitHub.ServerMock.get_state(), [ctx.conn, :statuses, "N", "bors"]) == :ok
   end
 
+  for recovery <- [false, true] do
+    test "squash promotion durably defers PR closing (recovery=#{recovery})", ctx do
+      mock = GitHub.ServerMock.get_state()
+
+      mock =
+        put_in(
+          mock,
+          [ctx.conn, :files, "staging.tmp", "bors.toml"],
+          "status = [\"ci\", \"cd\"]\nuse_squash_merge = true"
+        )
+
+      mock =
+        put_in(mock, [ctx.conn, :pulls, 1, Access.key(:user)], %GitHub.User{
+          id: 42,
+          login: "ada",
+          avatar_url: "url"
+        })
+
+      GitHub.ServerMock.put_state(mock)
+      dispatch = construct(ctx)
+      assert :ok == execute(ctx.worker, dispatch)
+      batch = Repo.get!(Batch, ctx.batch.id)
+
+      mock =
+        put_in(GitHub.ServerMock.get_state(), [ctx.conn, :statuses, batch.commit], %{
+          "ci" => :ok,
+          "cd" => :ok
+        })
+
+      mock =
+        if unquote(recovery),
+          do: put_in(mock, [ctx.conn, :branches, "master"], batch.commit),
+          else: mock
+
+      GitHub.ServerMock.put_state(mock)
+
+      assert :ok ==
+               execute(
+                 ctx.worker,
+                 Outbox.enqueue(
+                   ctx.project.id,
+                   "cast",
+                   {:status, {batch.commit, "ci", :ok, "url"}}
+                 )
+               )
+
+      assert Repo.get!(Batch, batch.id).state == :ok
+
+      assert get_in(GitHub.ServerMock.get_state(), [ctx.conn, :branches, "master"]) ==
+               batch.commit
+
+      assert get_in(GitHub.ServerMock.get_state(), [ctx.conn, :pulls, 1, Access.key(:state)]) ==
+               :open
+
+      [source] =
+        Repo.all(
+          from(j in OrchestrationJob,
+            where: j.project_id == ^ctx.project.id and j.kind == "info"
+          )
+        )
+        |> Enum.filter(&match?({:post_merge_cleanup, _, _, _, _, _}, Outbox.payload(&1)))
+
+      assert :ok == execute(ctx.worker, source)
+      [child] = cleanup_children(ctx)
+      assert :ok == execute(ctx.worker, child)
+
+      assert get_in(GitHub.ServerMock.get_state(), [ctx.conn, :pulls, 1, Access.key(:state)]) ==
+               :closed
+    end
+  end
+
+  defp completed_cleanup(ctx, count, squash \\ true) do
+    ctx.batch |> Batch.changeset(%{state: :ok, commit: "completed"}) |> Repo.update!()
+
+    patches = [
+      ctx.patch
+      | for(
+          n <- 2..max(count, 2),
+          count > 1,
+          do:
+            Repo.insert!(%Patch{
+              project_id: ctx.project.id,
+              pr_xref: n,
+              commit: "N#{n}",
+              into_branch: "master"
+            })
+        )
+    ]
+
+    mock = GitHub.ServerMock.get_state()
+    pulls = get_in(mock, [ctx.conn, :pulls])
+
+    pulls =
+      Enum.reduce(patches, pulls, fn p, acc ->
+        Map.put(acc, p.pr_xref, %Pr{
+          number: p.pr_xref,
+          title: "Title",
+          body: "Keep body",
+          state: :open,
+          head_sha: p.commit,
+          base_ref: "master",
+          draft: false
+        })
+      end)
+
+    GitHub.ServerMock.put_state(put_in(mock, [ctx.conn, :pulls], pulls))
+
+    members =
+      Enum.map(patches, fn p ->
+        %{
+          patch_id: p.id,
+          pr: p.pr_xref,
+          head: p.commit,
+          token: p.orchestration_approval_token,
+          body: "Merged exact head #{p.commit}"
+        }
+      end)
+
+    source =
+      Outbox.enqueue(
+        ctx.project.id,
+        "info",
+        {:post_merge_cleanup, ctx.batch.id, "completed", nil, squash, members},
+        "post-merge:#{ctx.batch.id}:completed"
+      )
+
+    assert :ok == execute(ctx.worker, source)
+    {source, patches}
+  end
+
+  defp cleanup_children(ctx) do
+    Repo.all(
+      from(j in OrchestrationJob,
+        where: j.project_id == ^ctx.project.id and j.kind == "info",
+        order_by: j.id
+      )
+    )
+    |> Enum.filter(&match?({:close_merged_pr, _, _, _, _}, Outbox.payload(&1)))
+  end
+
+  test "post-merge bookkeeping expands four rows per turn and closes one exact PR per job", ctx do
+    {source, patches} = completed_cleanup(ctx, 9)
+    assert length(cleanup_children(ctx)) == 4
+
+    for offset <- [4, 8] do
+      [continuation] =
+        Repo.all(
+          from(j in OrchestrationJob,
+            where: j.project_id == ^ctx.project.id and j.state == "pending"
+          )
+        )
+        |> Enum.filter(&(Outbox.payload(&1) == {:expand_post_merge_cleanup, source.id, offset}))
+
+      assert :ok == execute(ctx.worker, continuation)
+    end
+
+    children = cleanup_children(ctx)
+    assert length(children) == 9
+    [first | rest] = children
+    assert :ok == execute(ctx.worker, first)
+    pr = get_in(GitHub.ServerMock.get_state(), [ctx.conn, :pulls, hd(patches).pr_xref])
+    assert pr.state == :closed
+    assert pr.title == "[Merged by Bors] - Title"
+    assert pr.body == "Keep body"
+
+    Enum.each(tl(patches), fn p ->
+      assert get_in(GitHub.ServerMock.get_state(), [
+               ctx.conn,
+               :pulls,
+               p.pr_xref,
+               Access.key(:state)
+             ]) == :open
+    end)
+
+    assert :ok == execute(ctx.worker, first)
+
+    assert get_in(GitHub.ServerMock.get_state(), [ctx.conn, :pulls, 1, Access.key(:title)]) ==
+             "[Merged by Bors] - Title"
+
+    assert get_in(GitHub.ServerMock.get_state(), [ctx.conn, :branches, "master"]) == "ini"
+    assert length(rest) == 8
+    # Completed children retain keys: replay cannot regenerate already done work.
+    duplicate =
+      Outbox.enqueue(
+        ctx.project.id,
+        "info",
+        {:expand_post_merge_cleanup, source.id, 0},
+        "duplicate-expansion"
+      )
+
+    assert :ok == execute(ctx.worker, duplicate)
+    assert length(cleanup_children(ctx)) == 9
+  end
+
+  test "cleanup cannot close a changed head or a new approval generation", ctx do
+    {_source, patches} = completed_cleanup(ctx, 2)
+    [one, two] = cleanup_children(ctx)
+    [p1, p2] = patches
+    p1 |> Patch.changeset(%{commit: "new-head"}) |> Repo.update!()
+
+    p2
+    |> Ecto.Changeset.change(orchestration_approval_token: "fresh-generation")
+    |> Repo.update!()
+
+    assert :ok == execute(ctx.worker, one)
+    assert :ok == execute(ctx.worker, two)
+
+    assert get_in(GitHub.ServerMock.get_state(), [ctx.conn, :pulls, 1, Access.key(:state)]) ==
+             :open
+
+    assert get_in(GitHub.ServerMock.get_state(), [ctx.conn, :pulls, 2, Access.key(:state)]) ==
+             :open
+
+    assert Repo.aggregate(
+             from(j in OrchestrationJob,
+               where: j.project_id == ^ctx.project.id and j.kind == "notice"
+             ),
+             :count
+           ) == 2
+  end
+
+  test "cleanup respects pending candidate commands and retries one PR without blocking its siblings",
+       ctx do
+    {_source, _patches} = completed_cleanup(ctx, 2)
+    [one, two] = cleanup_children(ctx)
+    reconsider = Outbox.enqueue(ctx.project.id, "cast", {:eligibility, 1})
+    assert {:defer, :withdrawal_pending} == execute(ctx.worker, one)
+    assert :ok == execute(ctx.worker, reconsider)
+    GitHub.ServerMock.put_state(Map.put(GitHub.ServerMock.get_state(), :get_pr_error, 1))
+    assert {:error, {:throw, :post_merge_read_unavailable}} == execute(ctx.worker, one)
+    assert Repo.get!(OrchestrationJob, one.id).available_at > Outbox.now()
+    assert :ok == execute(ctx.worker, two)
+
+    assert get_in(GitHub.ServerMock.get_state(), [ctx.conn, :pulls, 2, Access.key(:state)]) ==
+             :closed
+
+    assert get_in(GitHub.ServerMock.get_state(), [ctx.conn, :pulls, 1, Access.key(:state)]) ==
+             :open
+
+    assert :ok == execute(ctx.worker, one)
+
+    assert get_in(GitHub.ServerMock.get_state(), [ctx.conn, :pulls, 1, Access.key(:state)]) ==
+             :closed
+  end
+
+  test "cleanup uses its own client while notifications are occupied", ctx do
+    {_source, _patches} = completed_cleanup(ctx, 1)
+    [child] = cleanup_children(ctx)
+    :sys.suspend(GitHub.Advisory)
+
+    try do
+      assert :ok == execute(ctx.worker, child)
+
+      assert get_in(GitHub.ServerMock.get_state(), [ctx.conn, :pulls, 1, Access.key(:state)]) ==
+               :closed
+    after
+      :sys.resume(GitHub.Advisory)
+    end
+  end
+
+  test "cleanup preserves a prefixed title and independently records a human-closed PR", ctx do
+    {_source, _patches} = completed_cleanup(ctx, 2)
+    [one, two] = cleanup_children(ctx)
+    mock = GitHub.ServerMock.get_state()
+    mock = put_in(mock, [ctx.conn, :pulls, 1, Access.key(:title)], "[Merged by Bors] - Title")
+    mock = put_in(mock, [ctx.conn, :pulls, 2, Access.key(:state)], :closed)
+    GitHub.ServerMock.put_state(mock)
+    assert :ok == execute(ctx.worker, one)
+    assert :ok == execute(ctx.worker, two)
+    mock = GitHub.ServerMock.get_state()
+    assert get_in(mock, [ctx.conn, :pulls, 1, Access.key(:title)]) == "[Merged by Bors] - Title"
+    assert get_in(mock, [ctx.conn, :pulls, 2, Access.key(:title)]) == "Title"
+
+    notices =
+      Repo.all(
+        from(j in OrchestrationJob, where: j.project_id == ^ctx.project.id and j.kind == "notice")
+      )
+
+    assert length(notices) == 2
+    assert Enum.any?(notices, fn j -> match?({_, 1, _, _}, Outbox.payload(j)) end)
+  end
+
+  test "permanent cleanup failures retain a visible tombstone and release siblings", ctx do
+    {_source, _patches} = completed_cleanup(ctx, 2)
+    [one, two] = cleanup_children(ctx)
+    GitHub.ServerMock.put_state(Map.put(GitHub.ServerMock.get_state(), :close_pr_status, 422))
+    assert {:terminal, {:http_status, 422}} == execute(ctx.worker, one)
+    done = Repo.get!(OrchestrationJob, one.id)
+    assert done.state == "done"
+    assert done.dedup_key == one.dedup_key
+    assert String.starts_with?(done.last_error, "cleanup_terminal:")
+    assert :ok == execute(ctx.worker, two)
+  end
+
+  for {content, closes} <- [{nil, false}, {"status = [\"ci\"]\nuse_squash_merge = true", true}] do
+    test "legacy cleanup resolves bounded .github policy (squash=#{closes})", ctx do
+      files = if unquote(content), do: %{".github/bors.toml" => unquote(content)}, else: %{}
+      mock = put_in(GitHub.ServerMock.get_state(), [ctx.conn, :files, "completed"], files)
+      GitHub.ServerMock.put_state(mock)
+      {_source, _patches} = completed_cleanup(ctx, 1, nil)
+      assert length(cleanup_children(ctx)) == if(unquote(closes), do: 1, else: 0)
+    end
+  end
+
+  test "finishing an owned cleanup tombstone does not deserialize its payload", ctx do
+    job = Outbox.enqueue(ctx.project.id, "info", :poll, "post-merge:invalid-fixture")
+    {:ok, claimed} = Outbox.claim(job.id)
+    claimed |> Ecto.Changeset.change(payload: <<0>>) |> Repo.update!()
+    claimed = Repo.get!(OrchestrationJob, claimed.id)
+    assert {1, _} = Outbox.finish(claimed)
+    assert Repo.get!(OrchestrationJob, claimed.id).dedup_key == job.dedup_key
+  end
+
   test "terminal completion yields before preparing the next waiting batch", ctx do
     dispatch = construct(ctx)
     assert :ok == execute(ctx.worker, dispatch)
