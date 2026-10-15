@@ -34,7 +34,7 @@ defmodule BorsNG.Worker.SourceCompatibility do
 
   def wake(_, _), do: :ok
 
-  def chunk(project_id, checker \\ &LocalGit.compatibility(&1, &2, &3, &4, 8)) do
+  def chunk(project_id, checker \\ &LocalGit.compatibility(&1, &2, &3, &4, 8, 30)) do
     project = Repo.get!(Project, project_id)
     conn = Project.installation_connection(project.repo_xref, Repo)
     previous = project.source_compatibility || %{}
@@ -216,7 +216,7 @@ defmodule BorsNG.Worker.SourceCompatibility do
           reason =
             case failure do
               %{"details" => %{"kind" => kind}}
-              when kind in ~w(timeout lock_timeout git_failed mirror_limit output_limit helper_failed helper_or_auth_failed helper_unavailable) ->
+              when kind in ~w(timeout lock_timeout git_failed mirror_limit output_limit helper_failed helper_or_auth_failed helper_unavailable missing_commit cold_mirror_unavailable) ->
                 "source_helper_" <> kind
 
               _ ->
@@ -352,7 +352,10 @@ defmodule BorsNG.Worker.SourceCompatibility do
 
         if result["head_sha"] == link.head_sha and
              result["base_sha"] == candidate.snapshot["base_sha"] and result["policy"] == @policy do
-          Map.take(result, ~w(pr head_sha base_sha policy status reason coverage))
+          Map.take(
+            result,
+            ~w(pr head_sha base_sha policy status reason coverage phase operation base_headers_reason base_headers_operation)
+          )
         else
           %{
             "pr" => patch.pr_xref,

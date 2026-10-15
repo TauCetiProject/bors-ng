@@ -142,22 +142,29 @@ class Mirror:
         objects, _ = self.git('cat-file', '--batch-check', input=''.join(sha + '^{commit}\n' for sha in shas))
         missing = [sha for sha, line in zip(shas, objects.splitlines()) if line.endswith(' missing')]
         if missing:
-            if self.request['operation'] == 'compatibility' and self.request.get('timeout') == 8:
+            if self.request['operation'] == 'compatibility' and self.request.get('bootstrap_timeout', 0) > 0:
                 counts, _ = self.git('count-objects', '-v')
                 counts = dict(line.split(': ', 1) for line in counts.splitlines())
                 bootstrap = self.repo / 'bors-source-bootstrap-v1'
-                if counts.get('count') == '0' and counts.get('in-pack') == '0' and not bootstrap.exists():
+                if counts.get('count') == '0' and counts.get('in-pack') == '0':
+                    if bootstrap.exists():
+                        raise Failure('cold_mirror_unavailable', operation='fetch', phase='fetch')
                     # An empty mirror cannot retain a half-fetched pack after
                     # Git is killed. Allow the existing 30s admission budget
                     # once to seed it, then keep ordinary background work at 8s.
                     # The total includes lock/startup time, not 30s per input.
                     bootstrap.touch(exist_ok=False)
-                    self.deadline = self.started + 30
+                    self.deadline = self.started + min(self.request['bootstrap_timeout'], 30)
             self.git('fetch', '--quiet', '--no-tags', '--no-write-fetch-head', '--no-auto-gc',
                      self.url, *dict.fromkeys(missing))
         verified, _ = self.git('cat-file', '--batch-check', input=''.join(sha + '^{commit}\n' for sha in shas))
-        if len(verified.splitlines()) != len(shas) or any(not re.fullmatch(r'[0-9a-f]{40} commit [0-9]+', line) for line in verified.splitlines()):
+        lines = verified.splitlines()
+        if len(lines) != len(shas) or any(not re.fullmatch(re.escape(sha) + r' commit [0-9]+', line)
+                                        for sha, line in zip(shas, lines)):
             raise Failure('missing_commit')
+        # A completed fetch starts a warm object generation. If ordinary GC
+        # later empties it, that new cold generation may bootstrap once again.
+        (self.repo / 'bors-source-bootstrap-v1').unlink(missing_ok=True)
         # Pin all exact inputs in one atomic transaction. Checking each SHA and
         # deleting/updating each ref in a separate process dominates tiny turns
         # on the production container. The batch check above rejects missing/non-commit inputs.
@@ -302,13 +309,15 @@ class Mirror:
         self.phase = 'fetch'
         self.fetch([base] + [m['head_sha'] for m in members])
         results, headers = [], {}
+        base_error = None
         try:
             self.phase = 'base_headers'
             baseline = self.source_inventory(base, headers)
             baseline_missing = {(path, module) for path, modules in baseline.items() for module in modules
                                 if module.replace('.', '/') + '.lean' not in baseline}
-        except (Failure, UnicodeError):
+        except (Failure, UnicodeError) as error:
             baseline_missing = None
+            base_error = error.details if isinstance(error, Failure) else dict(kind='non_text_source')
         for member in members:
             identity = dict(pr=member['pr'], head_sha=member['head_sha'], base_sha=base,
                             policy='local-source-v2')
@@ -340,8 +349,12 @@ class Mirror:
                                                 coverage='all_project_local_headers'))
             except (Failure, UnicodeError) as error:
                 reason = error.details['kind'] if isinstance(error, Failure) else 'non_text_source'
-                results.append(identity | dict(status='unknown', reason=reason, phase=self.phase,
-                                               operation=error.details.get('operation') if isinstance(error, Failure) else None))
+                unknown = identity | dict(status='unknown', reason=reason, phase=self.phase,
+                                           operation=error.details.get('operation') if isinstance(error, Failure) else None)
+                if base_error:
+                    unknown['base_headers_reason'] = base_error['kind']
+                    unknown['base_headers_operation'] = base_error.get('operation')
+                results.append(unknown)
         return dict(status='ok', results=results)
 
     def source_inventory(self, tree, headers):
@@ -441,6 +454,7 @@ class Mirror:
                         raise Failure('lock_timeout', phase='lock')
                     time.sleep(0.05)
             try:
+                self.phase = self.request['operation']
                 return getattr(self, self.request['operation'])()
             except Failure as error:
                 error.details.setdefault('phase', self.phase)

@@ -122,22 +122,31 @@ class LocalGitTest(unittest.TestCase):
         self.assertEqual(len(json.loads(cache.read_text())), 15)
 
     def test_only_empty_background_mirror_gets_existing_thirty_second_bootstrap(self):
-        request = self.request | dict(operation='compatibility', timeout=8, base_sha=self.base,
+        request = self.request | dict(operation='compatibility', timeout=8, bootstrap_timeout=30, base_sha=self.base,
                                       members=[dict(pr=1, head_sha=self.base)])
         first = TestMirror(request, self.upstream)
         self.assertEqual(first.run()['results'][0]['status'], 'pass')
         self.assertEqual(first.deadline - first.started, 30)
-        self.assertTrue((first.repo / 'bors-source-bootstrap-v1').exists())
+        self.assertFalse((first.repo / 'bors-source-bootstrap-v1').exists())
         next_head = self.commit(self.base, {'TauCeti/New.lean': 'def newValue := 1'})
         warm = TestMirror(request | dict(members=[dict(pr=1, head_sha=next_head)]), self.upstream)
         self.assertEqual(warm.run()['results'][0]['status'], 'pass')
         self.assertEqual(warm.deadline - warm.started, 8)
-        foreground = TestMirror(request | dict(timeout=5, root=str(self.root / 'other')), self.upstream)
+        foreground = TestMirror(request | dict(timeout=5, bootstrap_timeout=0, root=str(self.root / 'other')), self.upstream)
         self.assertEqual(foreground.run()['results'][0]['status'], 'pass')
         self.assertEqual(foreground.deadline - foreground.started, 5)
 
+    def test_exact_commit_inputs_do_not_accept_an_annotated_tag_object(self):
+        git(self.upstream, 'tag', '-a', 'tagged', '-m', 'not the requested commit', self.base)
+        tag = git(self.upstream, 'rev-parse', 'tagged')
+        request = self.request | dict(operation='compatibility', base_sha=self.base,
+                                      members=[dict(pr=1, head_sha=tag)])
+        with self.assertRaises(local.Failure) as error:
+            TestMirror(request, self.upstream).run()
+        self.assertEqual(error.exception.details['kind'], 'missing_commit')
+
     def test_failed_bootstrap_is_not_repeated_for_another_pr_on_the_same_empty_mirror(self):
-        request = self.request | dict(operation='compatibility', timeout=8, base_sha=self.base,
+        request = self.request | dict(operation='compatibility', timeout=8, bootstrap_timeout=30, base_sha=self.base,
                                       members=[dict(pr=1, head_sha=self.base)])
 
         class FailedFetch(TestMirror):
@@ -151,8 +160,9 @@ class LocalGitTest(unittest.TestCase):
             first.run()
         self.assertEqual(first.deadline - first.started, 30)
         again = FailedFetch(request | dict(members=[dict(pr=2, head_sha=self.base)]), self.upstream)
-        with self.assertRaises(local.Failure):
+        with self.assertRaises(local.Failure) as error:
             again.run()
+        self.assertEqual(error.exception.details['kind'], 'cold_mirror_unavailable')
         self.assertEqual(again.deadline - again.started, 8)
 
     def test_header_batches_bound_bytes_without_one_process_per_twelve_files(self):

@@ -94,12 +94,13 @@ defmodule BorsNG.Worker.LocalGit do
     end
   end
 
-  def compatibility(project, conn, base, members, timeout \\ 30) do
+  def compatibility(project, conn, base, members, timeout \\ 30, bootstrap_timeout \\ 0) do
     run(%{repository: project.name, conn: conn}, %{
       operation: "compatibility",
       base_sha: base,
       members: members,
-      timeout: timeout
+      timeout: timeout,
+      bootstrap_timeout: bootstrap_timeout
     })
   end
 
