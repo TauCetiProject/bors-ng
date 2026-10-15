@@ -58,6 +58,13 @@ indivisible/non-narrowing groups, unavailable hints and candidates with
 speculative reservations retain dispatch. No workflow pin or workflow file
 changes are required.
 
+The shortcut commits evidence, all retry children and the parent's terminal
+state in one database transaction. A crash after that commit cannot reconstruct
+the waiting parent against an advanced main beside its live children. Failure to
+create any child rolls back the evidence and every new child, retaining the
+waiting parent for ordinary recovery. Compiler-log retries retain their existing
+running-CI binding and native replay path.
+
 [Historical production replay](compiler-diagnostics-evidence.json) shows batch
 729 selecting #15908 versus three other heads, 731 selecting #15936 versus ten,
 and the joint audit failure in 733 selecting #15955 versus four. Batch 727 retains

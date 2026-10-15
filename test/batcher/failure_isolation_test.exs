@@ -7,6 +7,7 @@ defmodule BorsNG.Worker.FailureIsolationTest do
     Installation,
     LinkPatchBatch,
     Patch,
+    PatchBundle,
     Project,
     Repo
   }
@@ -291,6 +292,9 @@ defmodule BorsNG.Worker.FailureIsolationTest do
     result = %{commit: "assembled", tree: "tree", evidence: %{"diagnostic_hints" => hints}}
     CandidateJournal.event(c.candidate, "local_assembled", "bors.local_git", result)
     assert :partitioned = FailureIsolation.preflight(c.links, c.batch, result)
+    # A crash in the caller after this return must not leave a waiting parent
+    # that can reconstruct against a changed main beside its live retry children.
+    assert Repo.get!(Batch, c.batch.id).state == :error
     children = Repo.all(from(b in Batch, where: b.id != ^c.batch.id, order_by: b.id))
     assert prs(Enum.map(children, &stored_links(&1.id))) == [[3], [1, 2, 4]]
 
@@ -312,6 +316,52 @@ defmodule BorsNG.Worker.FailureIsolationTest do
              )
 
     assert Repo.all(from(e in CandidateEvent, where: e.kind == "head_quarantined")) == []
+  end
+
+  test "missing-import evidence, all retry children and parent retirement commit together", c do
+    [first, second | _] = c.links
+    bundle = Repo.insert!(PatchBundle.new(c.project.id))
+
+    for link <- [first, second] do
+      link.patch |> Patch.changeset(%{bundle_id: bundle.id}) |> Repo.update!()
+    end
+
+    links = stored_links(c.batch.id)
+
+    # An existing partial bundle makes the second partition unavailable. The
+    # first suspect child must roll back with its evidence, preserving the
+    # waiting parent and the pre-existing membership for ordinary recovery.
+    existing =
+      BorsNG.Worker.Batcher.Divider.clone_batch(
+        [hd(links)],
+        c.project.id,
+        "main",
+        "existing_partial_bundle"
+      )
+
+    hints = Map.put(c.hints, "missing_imports", [%{"pr" => 3}])
+    result = %{commit: "assembled", tree: "tree", evidence: %{"diagnostic_hints" => hints}}
+    CandidateJournal.event(c.candidate, "local_assembled", "bors.local_git", result)
+    before_admissions = Repo.aggregate(BorsNG.Database.CandidateAdmission, :count, :id)
+
+    assert catch_throw(FailureIsolation.preflight(links, c.batch, result)) ==
+             :retry_membership_unavailable
+
+    assert Repo.get!(Batch, c.batch.id).state == :waiting
+    assert Repo.aggregate(Batch, :count, :id) == 2
+    assert Enum.map(stored_links(existing.id), & &1.patch.pr_xref) == [1]
+    assert Repo.aggregate(BorsNG.Database.CandidateAdmission, :count, :id) == before_admissions
+
+    assert Repo.all(
+             from(e in CandidateEvent,
+               where: e.kind in ["local_import_failure", "failure_partition", "head_quarantined"]
+             )
+           ) == []
+
+    assert Enum.all?(
+             Repo.all(Patch),
+             &(&1.queue_pending and &1.queue_approval["state"] == "approved")
+           )
   end
 
   test "import providers and multiple interacting changes stay together", c do
