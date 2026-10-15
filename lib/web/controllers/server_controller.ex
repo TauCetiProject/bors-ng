@@ -6,7 +6,12 @@ defmodule BorsNG.ServerController do
   use BorsNG.Web, :controller
 
   def health(conn, _params) do
-    conn |> send_resp(200, "healthy")
+    conn
+    |> put_resp_header(
+      "x-bors-speculative-trains",
+      to_string(System.get_env("BORS_SPECULATIVE_TRAINS", "false") == "true")
+    )
+    |> send_resp(200, "healthy")
   end
 
   def merge_reconcile(conn, _params) do

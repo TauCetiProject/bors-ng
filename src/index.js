@@ -60,9 +60,12 @@ export class BorsContainer extends Container {
     // Conservative rollout: one executing operation, serialized per repository.
     BORS_ASYNC_ORCHESTRATION: "true",
     BORS_ASYNC_WORKERS: "1",
-    // N is deployed dark; B/E/F verification and a separate canary activation
-    // are mandatory before changing this flag or supplying gate evidence.
-    BORS_SPECULATIVE_TRAINS: "false",
+    // B/E/F are rollout-verified. Bound this canary to one lifetime successor.
+    BORS_SPECULATIVE_TRAINS: "true",
+    BORS_SPECULATION_CANARY_SUCCESSORS: "1",
+    BORS_SPECULATION_GATE_16231: "https://github.com/TauCetiProject/TauCeti/issues/16231#issuecomment-6179935551",
+    BORS_SPECULATION_GATE_16232: "https://github.com/TauCetiProject/TauCeti/issues/16232#issuecomment-6163837222",
+    BORS_SPECULATION_GATE_16234: "https://github.com/TauCetiProject/TauCeti/issues/16234#issuecomment-6167663957",
     TAUCETI_REVIEW_APP_ID: REVIEW_APP_ID,
   };
 }
