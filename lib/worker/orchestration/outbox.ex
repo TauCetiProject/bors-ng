@@ -5,7 +5,7 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
   Repository lanes serialize staging and main promotion, including all branches.
   """
   import Ecto.Query
-  alias BorsNG.Database.{OrchestrationJob, Project, Repo}
+  alias BorsNG.Database.{Batch, LinkPatchBatch, OrchestrationJob, Patch, Project, Repo}
 
   def enabled?, do: System.get_env("BORS_ASYNC_ORCHESTRATION", "false") == "true"
   def now, do: System.system_time(:second)
@@ -21,6 +21,8 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
         _ -> {kind, nil}
       end
 
+    attributes = schedule_attributes(project_id, kind, payload)
+
     key =
       if is_nil(key) and kind == "cast" and match?({:status, _}, payload),
         do:
@@ -33,7 +35,8 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
         %OrchestrationJob{
           project_id: project_id,
           kind: kind,
-          subject_id: subject,
+          subject_id: subject || attributes.subject_id,
+          priority: attributes.priority,
           payload: :erlang.term_to_binary(payload),
           dedup_key: key,
           available_at: available_at
@@ -48,6 +51,74 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
   end
 
   def payload(job), do: :erlang.binary_to_term(job.payload, [:safe])
+
+  # All observations of a running candidate share one FIFO class, including
+  # pending/red observations. Never move an old green ahead of a newer red.
+  def schedule_attributes(project_id, kind, payload, database \\ Repo) do
+    subject =
+      case payload do
+        {:eligibility, pr} ->
+          database.one(
+            from(p in Patch,
+              where: p.project_id == ^project_id and p.pr_xref == ^pr,
+              select: p.id
+            )
+          )
+
+        command when kind == "cast" and is_tuple(command) and tuple_size(command) >= 2 ->
+          if is_integer(elem(command, 1)), do: elem(command, 1)
+
+        _ ->
+          nil
+      end
+
+    priority =
+      case {kind, payload} do
+        {"dispatch", _} ->
+          1
+
+        {kind, _} when kind in ["cancel", "cancel_all"] ->
+          0
+
+        {"cast", {:status, {commit, _, _, _}}} ->
+          if database.exists?(
+               from(b in Batch,
+                 where:
+                   b.project_id == ^project_id and b.commit == ^commit and b.state == :running
+               )
+             ),
+             do: 1,
+             else: 2
+
+        {"cast", _} ->
+          if subject &&
+               database.exists?(
+                 from(l in LinkPatchBatch,
+                   join: b in Batch,
+                   on: b.id == l.batch_id,
+                   where:
+                     b.project_id == ^project_id and b.state == :running and
+                       l.patch_id == ^subject
+                 )
+               ),
+             do: 0,
+             else: 2
+
+        {"info", {:poll, _}} ->
+          1
+
+        {"info", {:retry_promotion, _, _}} ->
+          1
+
+        {"info", :restore_rechecks} ->
+          1
+
+        _ ->
+          2
+      end
+
+    %{priority: priority, subject_id: subject}
+  end
 
   def claim(id) do
     Repo.transaction(fn ->
@@ -80,8 +151,36 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
         if job.state == "pending" and job.available_at <= now() and is_nil(busy) do
           token = Base.encode16(:crypto.strong_rand_bytes(16))
 
+          # A command received before construction can become relevant while
+          # queued. Upgrade it under the same lane lock before accounting fairness.
+          priority =
+            if job.kind == "cast" and job.subject_id &&
+                 not is_nil(
+                   Repo.one(
+                     from(l in LinkPatchBatch,
+                       join: b in Batch,
+                       on: b.id == l.batch_id,
+                       where:
+                         b.project_id == ^job.project_id and b.state == :running and
+                           l.patch_id == ^job.subject_id,
+                       select: l.id,
+                       limit: 1,
+                       lock: "FOR UPDATE"
+                     )
+                   )
+                 ),
+               do: 0,
+               else: job.priority
+
+          # Fairness survives dispatcher/executor restarts and retries. One
+          # background operation gets a turn after at most eight critical claims.
+          streak = if priority < 2, do: min(project.orchestration_streak + 1, 8), else: 0
+          project |> Ecto.Changeset.change(orchestration_streak: streak) |> Repo.update!()
+
           job
           |> Ecto.Changeset.change(
+            priority: priority,
+            claimed_at: now(),
             state: "running",
             token: token,
             lease_until: now() + 300,
@@ -100,6 +199,7 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
     |> Repo.update_all(
       set: [
         state: "done",
+        completed_at: now(),
         dedup_key: if(job.kind in ["notice", "dispatch"], do: job.dedup_key, else: nil),
         token: nil,
         lease_until: 0,
@@ -116,6 +216,7 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
     |> Repo.update_all(
       set: [
         state: "pending",
+        completed_at: now(),
         available_at: now() + delay,
         token: nil,
         lease_until: 0,
@@ -129,7 +230,8 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
       from(j in OrchestrationJob,
         where:
           j.project_id == ^project_id and j.state == "pending" and
-            (j.kind == "cancel_all" or (j.kind == "cancel" and j.subject_id in ^patch_ids))
+            (j.kind == "cancel_all" or
+               (j.kind in ["cancel", "cast"] and j.subject_id in ^patch_ids))
       )
     )
   end
@@ -144,6 +246,16 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
     )
   end
 
+  defp active_members do
+    from(l in LinkPatchBatch,
+      join: b in Batch,
+      on: b.id == l.batch_id,
+      where: b.state == :running,
+      distinct: true,
+      select: %{project_id: b.project_id, patch_id: l.patch_id}
+    )
+  end
+
   def due(limit) do
     busy =
       from(j in OrchestrationJob,
@@ -153,9 +265,24 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
 
     Repo.all(
       from(j in OrchestrationJob,
+        left_join: p in Project,
+        on: p.id == j.project_id,
+        left_join: a in subquery(active_members()),
+        on: a.project_id == j.project_id and a.patch_id == j.subject_id and j.kind == "cast",
         where:
           j.state == "pending" and j.available_at <= ^now() and j.project_id not in subquery(busy),
-        order_by: j.id,
+        order_by: [
+          asc:
+            fragment(
+              "CASE WHEN ? >= 8 AND ? = 2 AND ? IS NULL THEN -1 WHEN ? IS NOT NULL THEN 0 ELSE ? END",
+              p.orchestration_streak,
+              j.priority,
+              a.patch_id,
+              a.patch_id,
+              j.priority
+            ),
+          asc: j.id
+        ],
         limit: ^limit
       )
     )

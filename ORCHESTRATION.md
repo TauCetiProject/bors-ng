@@ -117,3 +117,54 @@ repository lane. Production still sets `BORS_SPECULATIVE_TRAINS=false`; deployme
 alone grants no extra staging capacity. B/E/F evidence and the trusted workflow
 change must be verified before a separate small canary activation. See
 [depth-two scheduling, exact promotion, caps and rollback](deploy/speculative-trains.md).
+
+## Dispatch priority and latency
+
+The mailbox has three stable FIFO classes: candidate commands (0), lane progress
+(1), and background work (2). Dispatch, poll/recheck restoration, promotion retries
+and every status observation of a currently running candidate use class 1. Both
+red and green observations share the class; priority does not select verdicts.
+Cancellation uses class 0. Other commands use class 0 only for a running member;
+ordinary PR status, unrelated eligibility/admission/recovery and notices use class
+2. Classification is recorded at receipt; pending commands are also upgraded when
+their subject becomes a running member, with a current recheck under the claim
+lock. The additive migration classifies
+existing pending/running rows in bounded pages. A late observation after a
+candidate becomes terminal cannot grant it new authority. No observations are
+coalesced or removed by this policy.
+
+After eight critical claims in a repository, its oldest due background operation
+gets one turn. The project row stores this counter under the existing claim lock,
+so restarts, retries and multiple dispatcher claimers retain fairness. Backoff
+still determines eligibility. FIFO within each class and the configured global
+worker cap remain in force. A running repository is excluded before the bounded
+32-row selection, so its backlog cannot hide another free repository.
+
+Pending candidate commands, including policy eligibility, fence dispatch and
+promotion even during retry backoff. Receipt-time approval tokens still fence
+r+/r-/cancel-all generations. Dispatch now also reads every exact live PR head,
+open/draft/base identity before publication; promotion uses the same check.
+The pending-command/lease fence is repeated immediately before external mutation.
+Unavailable identity reads defer with ordinary durable retry semantics. No
+staging/main lock or train reservation is bypassed.
+
+For each attempt, `claimed_at` and `completed_at` retain wall-clock seconds;
+`outbox_start`/`outbox_finish` log job/project/kind/priority/attempt, ready queue wait
+and monotonic operation service milliseconds. The `[:bors, :outbox, :operation]`
+telemetry event carries both durations separately. Ready wait starts at the later
+of insertion and `available_at`; intentional infrastructure backoff is excluded.
+An operation exceeding the **10-second service target** emits
+`outbox_service_budget_exceeded`. These measurements never decide correctness.
+A pending dispatch is queued work, not running CI; its existing publication
+acknowledgement still starts the CI deadline.
+
+The operational target is **claim within two seconds after repository/global
+capacity is free and input fences are clear**, independent of ordinary backlog
+length, allowing one background fairness turn (target at most ten seconds) when
+the eight-claim burst has been consumed. Existing non-preemptible operations and
+candidate commands can still add service time. The existing **1,100-second hard
+watchdog** remains the upper operation limit; a ten-second warning is not a forced
+cancellation. Large preparation, recovery and live-read operations remain service
+bottlenecks to measure and split at durable boundaries within #16811. This first
+increment establishes queue priority and observable service budgets; it does not
+claim an achieved production latency or throughput gain before rollout evidence.

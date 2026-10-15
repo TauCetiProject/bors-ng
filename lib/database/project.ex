@@ -39,6 +39,7 @@ defmodule BorsNG.Database.Project do
       on_replace: :delete
     )
 
+    field(:orchestration_streak, :integer, default: 0)
     field(:staging_branch, :string, default: "staging")
     field(:trying_branch, :string, default: "trying")
     field(:batch_poll_period_sec, :integer, default: 60 * 30)

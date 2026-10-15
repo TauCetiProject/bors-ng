@@ -1,6 +1,7 @@
 defmodule BorsNG.Worker.Orchestration.Worker do
   @moduledoc "Repository executor retaining legacy timer/approval state between durable operations."
   use GenServer, restart: :temporary
+  require Logger
   alias BorsNG.Worker.Orchestration.Outbox
   alias BorsNG.Worker.Batcher
 
@@ -32,6 +33,16 @@ defmodule BorsNG.Worker.Orchestration.Worker do
 
   def handle_info({:execute, dispatcher, job}, project_id) do
     Process.put(:orchestration_job, job)
+    started = System.monotonic_time(:millisecond)
+    inserted = job.inserted_at |> DateTime.from_naive!("Etc/UTC") |> DateTime.to_unix()
+
+    ready_wait_ms =
+      max((job.claimed_at || Outbox.now()) - max(inserted, job.available_at), 0) * 1000
+
+    Logger.info(
+      "outbox_start job=#{job.id} project=#{project_id} kind=#{job.kind} priority=#{job.priority} attempt=#{job.attempts} ready_wait_ms=#{ready_wait_ms}"
+    )
+
     # An executing job may not outlive its durable lease. Killing this process
     # cancels its local work; replay reconciles an already accepted API mutation.
     executor = self()
@@ -72,6 +83,29 @@ defmodule BorsNG.Worker.Orchestration.Worker do
       catch
         kind, _reason -> {:error, kind}
       end
+
+    service_ms = System.monotonic_time(:millisecond) - started
+    measurements = %{ready_wait_ms: ready_wait_ms, service_ms: service_ms}
+
+    metadata = %{
+      job_id: job.id,
+      project_id: project_id,
+      kind: job.kind,
+      priority: job.priority,
+      result: result
+    }
+
+    :telemetry.execute([:bors, :outbox, :operation], measurements, metadata)
+
+    Logger.info(
+      "outbox_finish job=#{job.id} project=#{project_id} kind=#{job.kind} priority=#{job.priority} ready_wait_ms=#{ready_wait_ms} service_ms=#{service_ms} result=#{inspect(result)}"
+    )
+
+    if service_ms > 10_000,
+      do:
+        Logger.warning(
+          "outbox_service_budget_exceeded job=#{job.id} kind=#{job.kind} service_ms=#{service_ms} budget_ms=10000"
+        )
 
     send(killer, :done)
     Process.delete(:orchestration_job)
