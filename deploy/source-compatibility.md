@@ -39,10 +39,10 @@ main reconciliation; bounded backlog chunks progress approximately once/minute).
 Four queued/ready heads per chunk use a durable rotating project cursor. Repeated
 notifications coalesce; latest actual main is read by the executor. Main moving
 mid-check discards results while retaining cursor progress and a follow-up.
-Dispatch and withdrawals precede this background operation. New background chunks
-start below ordinary work; five-minute aging joins the ordinary FIFO to prevent
-starvation under a continuous webhook stream. Promotion retains its normal serial
-poll path. Selected heads
+Background chunks use the existing ordinary priority class; dispatch/promotion
+and withdrawals retain priority. The existing durable eight-critical-claim fairness
+rule guarantees bounded background progress without changing scheduler priority.
+Selected heads
 get a bounded just-in-time check against the frozen actual base before candidate
 construction/reservation; they do not wait for the backlog sweep. Speculative
 successor bases, explicit bundles and excess/unknown coverage retain existing full
