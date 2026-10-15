@@ -216,7 +216,12 @@ In async mode, webhook ingress avoids durable stage-status jobs for SHAs that
 match no recorded batch, outside an assembling candidate's conservative fallback.
 Trying receipts still go directly to their independent serialized actor. Async dispatch binds its commit before publication. An unbound candidate
 on a waiting batch retains unmatched observations to cover temporary-ref assembly
-races; a database/read failure fails the webhook for its ordinary durable retry.
+races only for the latest generation while construction can still publish before
+binding. Stopped/bound/superseded generations cannot keep that fallback alive.
+An append-only `local_assembly_selected` fact disables the fallback for async
+local assembly, whose remote publication follows binding. Unknown and shadow
+assemblers remain conservative; native mode always retains publication races.
+A database/read failure fails the webhook for its ordinary durable retry.
 Legacy mode still forwards every status because its publication can precede its
 record write. Trying delivery remains unconditional in the controller. Candidate
 check receipts are journaled and ordinary PR eligibility notifications are queued

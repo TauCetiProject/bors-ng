@@ -1778,6 +1778,11 @@ defmodule BorsNG.Worker.Batcher do
 
       mode = BorsNG.Worker.LocalGit.mode(project, batch.into_branch, repo_conn)
 
+      # Async local assembly cannot publish a remote ref before durable binding.
+      # Native publication-before-binding retains conservative status routing.
+      if mode == "local" and Process.get(:orchestration_executor, false),
+        do: CandidateJournal.event(candidate, "local_assembly_selected", "bors.assembly")
+
       # A rollback may disable local assembly as well as speculation. Retire
       # completed external reservations before deciding whether legacy serial
       # construction may resume; never free slots merely from batch state.

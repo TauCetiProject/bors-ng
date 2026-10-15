@@ -37,6 +37,31 @@ defmodule BorsNG.Worker.StatusRoutingTest do
     assert StatusRouting.batch?(p.id, "not-yet-bound")
   end
 
+  test "stopped and superseded preparations do not retain irrelevant traffic forever", %{
+    project: p
+  } do
+    batch = Repo.insert!(Batch.new(p.id, "master"))
+    old = BorsNG.Worker.CandidateJournal.begin(batch, [], "base")
+    current = BorsNG.Worker.CandidateJournal.begin(batch, [], "base")
+    BorsNG.Worker.CandidateJournal.event(current, "construction_stopped", "test")
+    # The earlier unfinished generation cannot keep the fallback alive.
+    refute StatusRouting.batch?(p.id, "ordinary-pr")
+    refute old.id == current.id
+    Repo.update!(Ecto.Changeset.change(batch, commit: "recorded-head"))
+    assert StatusRouting.batch?(p.id, "recorded-head")
+  end
+
+  test "local preparation needs no pre-binding remote-ref race fallback", %{project: p} do
+    batch = Repo.insert!(Batch.new(p.id, "master"))
+    c = BorsNG.Worker.CandidateJournal.begin(batch, [], "base")
+    assert StatusRouting.batch?(p.id, "unknown-head")
+    BorsNG.Worker.CandidateJournal.event(c, "local_assembly_selected", "bors.assembly")
+    refute StatusRouting.batch?(p.id, "unknown-head")
+    # A new unknown/legacy assembler is conservatively retained.
+    BorsNG.Worker.CandidateJournal.begin(batch, [], "base")
+    assert StatusRouting.batch?(p.id, "unknown-head")
+  end
+
   test "trying identities do not require a redundant stage-status job", %{project: p} do
     patch = Repo.insert!(%Patch{project_id: p.id, commit: "pr", pr_xref: 1})
     Repo.insert!(%Attempt{patch_id: patch.id, state: 1, commit: "try-head"})
