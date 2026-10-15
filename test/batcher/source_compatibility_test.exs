@@ -424,6 +424,53 @@ defmodule BorsNG.Worker.SourceCompatibilityTest do
     )
   end
 
+  test "the bounded background cursor retries a transient once after a new Git hint", c do
+    [first, second] = c.patches
+    second |> Ecto.Changeset.change(open: false) |> Repo.update!()
+
+    expire = fn ->
+      project = Repo.get!(Project, c.project.id)
+      state = Map.put(project.source_compatibility || %{}, "checked_at", 0)
+      project |> Ecto.Changeset.change(source_compatibility: state) |> Repo.update!()
+    end
+
+    fail = fn _, _, _, _ ->
+      %{"status" => "error", "details" => %{"kind" => "timeout"}}
+    end
+
+    SourceCompatibility.chunk(c.project.id, fail)
+    old = Repo.get!(Patch, first.id)
+    assert old.source_compatibility["status"] == "unknown"
+    # Legacy records are also bounded, rather than retried on every restart.
+    old
+    |> Ecto.Changeset.change(
+      source_compatibility: Map.delete(old.source_compatibility, "source_retry_epoch")
+    )
+    |> Repo.update!()
+
+    expire.()
+    SourceCompatibility.chunk(c.project.id, fn _, _, _, _ -> flunk("no new Git hint") end)
+
+    links =
+      Repo.all(LinkPatchBatch.from_batch(c.batch.id)) |> Enum.filter(&(&1.patch_id == first.id))
+
+    candidate = CandidateJournal.begin(c.batch, links, @base)
+    CandidateJournal.event(candidate, "staging_pushed", "bors.local_git", %{commit: @head})
+    expire.()
+
+    SourceCompatibility.chunk(c.project.id, fn _, _, base, members ->
+      assert base == @base
+      assert Enum.map(members, &{&1.pr, &1.head_sha}) == [{1, @head}]
+      send(self(), :background_retry)
+      fail.(nil, nil, nil, nil)
+    end)
+
+    assert_received :background_retry
+    expire.()
+    SourceCompatibility.chunk(c.project.id, fn _, _, _, _ -> flunk("old consumed hint") end)
+    assert Repo.get!(Patch, first.id).source_compatibility["status"] == "unknown"
+  end
+
   test "helper failure cannot overwrite a result after main moves", c do
     SourceCompatibility.check(c.project, @conn, @base, c.patches, fn _, _, _, _ ->
       update_mock(:branches, %{"main" => String.duplicate("d", 40)})
