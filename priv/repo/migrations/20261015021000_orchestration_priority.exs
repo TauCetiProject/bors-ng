@@ -3,20 +3,54 @@ defmodule BorsNG.Repo.Migrations.OrchestrationPriority do
   import Ecto.Query
 
   def up do
-    alter table(:orchestration_jobs) do
-      add_if_not_exists(:priority, :integer, null: false, default: 2)
-      add_if_not_exists(:enqueued_at_ms, :bigint)
-      add_if_not_exists(:claimed_at_ms, :bigint)
-      add_if_not_exists(:completed_at_ms, :bigint)
-    end
+    ensure_columns("orchestration_jobs", [
+      {:priority, :integer, [null: false, default: 2]},
+      {:enqueued_at_ms, :bigint, []},
+      {:claimed_at_ms, :bigint, []},
+      {:completed_at_ms, :bigint, []}
+    ])
 
-    alter table(:projects) do
-      add_if_not_exists(:orchestration_streak, :integer, null: false, default: 0)
-    end
+    ensure_columns("projects", [{:orchestration_streak, :integer, [null: false, default: 0]}])
 
-    create_if_not_exists(index(:orchestration_jobs, [:state, :priority, :available_at, :id]))
+    ensure_index()
     flush()
     backfill(0)
+  end
+
+  defp ensure_index do
+    index_name = "orchestration_jobs_state_priority_available_at_id_index"
+
+    {sql, arguments} =
+      if repo().__adapter__() == Ecto.Adapters.MyXQL do
+        {"SELECT index_name FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ? LIMIT 1",
+         ["orchestration_jobs", index_name]}
+      else
+        {"SELECT indexname FROM pg_indexes WHERE schemaname = current_schema() AND tablename = $1 AND indexname = $2",
+         ["orchestration_jobs", index_name]}
+      end
+
+    if Ecto.Adapters.SQL.query!(repo(), sql, arguments).rows == [],
+      do: create(index(:orchestration_jobs, [:state, :priority, :available_at, :id]))
+  end
+
+  defp ensure_columns(table_name, columns) do
+    {sql, arguments} =
+      if repo().__adapter__() == Ecto.Adapters.MyXQL do
+        {"SELECT column_name FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ?",
+         [table_name]}
+      else
+        {"SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = $1",
+         [table_name]}
+      end
+
+    existing =
+      Ecto.Adapters.SQL.query!(repo(), sql, arguments).rows |> List.flatten() |> MapSet.new()
+
+    for {name, type, options} <- columns, not MapSet.member?(existing, Atom.to_string(name)) do
+      alter table(table_name) do
+        add(name, type, options)
+      end
+    end
   end
 
   defp backfill(cursor) do
