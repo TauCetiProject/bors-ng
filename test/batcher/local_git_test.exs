@@ -10,6 +10,13 @@ defmodule BorsNG.Worker.LocalGitTest do
     assert output =~ ~r/Ran [1-9][0-9]* tests/
   end
 
+  test "bounded terminal log parser and credential-isolated retrieval" do
+    {output, status} =
+      System.cmd("python3", ["test/failure_diagnostics_test.py"], stderr_to_stdout: true)
+
+    assert status == 0, output
+  end
+
   test "only the scoped main project can select local assembly" do
     conn = {{:installation, 91}, 14}
     ServerMock.put_state(%{conn => %{local_git_mode: "local"}})

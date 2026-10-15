@@ -224,6 +224,7 @@ class Mirror:
             edges, missing, dependencies = [], [], set()
             reads = 0
             for member, change in zip(members, changed):
+                member_dependencies = set()
                 pending = [p for p in change['paths'] if p.endswith('.lean')]
                 seen = set()
                 while pending:
@@ -243,6 +244,7 @@ class Mirror:
                     for module in imports:
                         provider = module.replace('.', '/') + '.lean'
                         dependencies.add(provider)
+                        member_dependencies.add(provider)
                         for owner in owners.get(provider, []):
                             if owner != member['pr']:
                                 edges.append([member['pr'], owner])
@@ -254,6 +256,7 @@ class Mirror:
                         # Direct imports only. Whole-project/transitive walks
                         # can exhaust the budget on ordinary large batches;
                         # unobserved dependencies remain unknown, not absent.
+                change['dependency_paths'] = sorted(member_dependencies)
             hints = dict(complete=True, changed_files=changed, import_edges=edges,
                          missing_imports=missing, dependency_paths=sorted(dependencies))
             if len(json.dumps(hints)) > 256 * 1024:
