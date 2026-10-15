@@ -110,6 +110,15 @@ defmodule BorsNG.Worker.SourceCompatibilityTest do
        c do
     [bad, healthy] = c.patches
 
+    update_mock(:files, %{
+      "main" => %{
+        "bors.toml" =>
+          "status = [\"build\"]\n[labels]\non_queue = \"ready-to-merge\"\nbuilding = \"bors-staging\"\n"
+      }
+    })
+
+    update_mock(:labels, %{1 => ["ready-to-merge"], 2 => ["ready-to-merge"]})
+
     SourceCompatibility.apply_results(c.project, @conn, @base, c.patches, [
       result(1),
       result(2, "pass")
