@@ -479,6 +479,10 @@ defmodule BorsNG.GitHub do
     call_with_retry(:post_comment, repo_conn, {number, body}, 500, 4_000)
   end
 
+  def resolve_source_request(conn, pr, head, base) do
+    safe_genserver_call(:resolve_source_request, conn, {pr, head, base}, 15_000)
+  end
+
   def post_comment_once(conn, number, body) do
     GenServer.call(
       BorsNG.GitHub,

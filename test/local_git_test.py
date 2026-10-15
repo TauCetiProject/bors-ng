@@ -52,6 +52,55 @@ class LocalGitTest(unittest.TestCase):
                                           members_digest='immutable'),
                             date='2026-10-14T00:00:00Z', members=[])
 
+    def compatibility(self, base, *heads):
+        request = self.request | dict(operation='compatibility', base_sha=base,
+            members=[dict(pr=n + 1, head_sha=head) for n, head in enumerate(heads)])
+        local.validate(request)
+        return TestMirror(request, self.upstream).run()['results']
+
+    def test_compatibility_deleted_source_and_unchanged_importer(self):
+        fork = self.commit(self.base, {'TauCeti/Old.lean': 'def old := 1',
+            'TauCeti/Dependency.lean': 'import TauCeti.Old\ndef dependency := 1'})
+        main = self.commit(fork, {'TauCeti/Old.lean': None})
+        head = self.commit(fork, {'TauCeti/Consumer.lean': 'import TauCeti.Dependency\ndef consumer := 1'})
+        # Main's pre-existing missing import is not attributed to this PR.
+        result = self.compatibility(main, head)[0]
+        self.assertEqual(result['status'], 'pass')
+        # Main deletes the provider AND fixes its own importer; head reintroduces
+        # the unchanged dependency through an otherwise clean textual merge.
+        main = self.commit(fork, {'TauCeti/Old.lean': None, 'TauCeti/Dependency.lean': None})
+        head = self.commit(fork, {'TauCeti/Consumer.lean': 'import TauCeti.Old\ndef consumer := 1'})
+        result = self.compatibility(main, head)[0]
+        self.assertEqual(result['status'], 'missing_source')
+        self.assertEqual(result['missing_imports'][0]['module'], 'TauCeti.Old')
+        self.assertEqual(result['base_sha'], main)
+
+    def test_compatibility_pr_added_sources_and_multiline(self):
+        head = self.commit(self.base, {'TauCeti/Added.lean': 'def added := 1',
+            'TauCeti/Consumer.lean': 'module\n/- outer /- inner -/ -/\npublic import\n TauCeti.Added\n-- comment\npublic import Mathlib\nnamespace TauCeti\n'})
+        result = self.compatibility(self.base, head)[0]
+        self.assertEqual(result['status'], 'pass')
+        self.assertEqual(result['coverage'], 'all_project_local_headers')
+
+    def test_header_body_commands_cannot_become_imports(self):
+        self.assertEqual(local.compatibility_imports(
+            'module\nimport Mathlib\nassert_not_exists TauCeti.NotAModule\n'), [])
+        self.assertEqual(local.compatibility_imports(
+            'module\npublic import\n TauCeti.Real\nprivate def localName := 1\n'), ['TauCeti.Real'])
+        for header in ['private import TauCeti.Missing', 'import «TauCeti.Hidden»',
+                       'importFoo TauCeti.Hidden', 'import', 'module module import TauCeti.X', 'import TauCeti.' + 'x' * 513, 'import\u00a0TauCeti.Hidden']:
+            with self.assertRaises(local.Failure, msg=header):
+                local.compatibility_imports(header)
+
+    def test_compatibility_individual_conflicts_and_unknown(self):
+        main = self.commit(self.base, {'file': 'main\n'})
+        conflict = self.commit(self.base, {'file': 'head\n'})
+        malformed = self.commit(self.base, {'TauCeti/Bad.lean': 'import «unusual.module»\n'})
+        results = self.compatibility(main, conflict, malformed)
+        self.assertEqual(results[0]['status'], 'conflict')
+        self.assertEqual(results[1]['status'], 'unknown')
+        self.assertEqual(results[0]['paths'], ['file'])
+
     def tearDown(self):
         self.tmp.cleanup()
 

@@ -920,6 +920,50 @@ defmodule BorsNG.GitHub.Server do
     end
   end
 
+  def do_handle_call(:resolve_source_request, conn, {pr, head, base}) do
+    marker = "<!--tauceti-rebase:v1 #{head}-->"
+    # Bound history coverage. An incomplete read cannot cancel someone else's
+    # request or authorize staging; ordinary reconciliation can retry it.
+    with %{status: 200, body: raw} <- get!(conn, "issues/#{pr}/comments?per_page=100"),
+         comments when is_list(comments) and length(comments) < 100 <- Jason.decode!(raw) do
+      requests =
+        Enum.filter(comments, fn c ->
+          body = c["body"] || ""
+
+          get_in(c, ["user", "login"]) in ["tau-ceti-bors[bot]", "tauceti-review-bot[bot]"] and
+            String.starts_with?(body, "Merge-queue recovery for head `") and
+            String.contains?(body, marker)
+        end)
+
+      own =
+        Enum.filter(
+          requests,
+          &(get_in(&1, ["user", "login"]) == "tau-ceti-bors[bot]" and
+              String.contains?(&1["body"], "Checker policy: `local-source-v2`"))
+        )
+
+      if length(own) == length(requests) and length(own) <= 4 do
+        Enum.reduce_while(own, :ok, fn comment, _ ->
+          body =
+            String.replace(
+              comment["body"],
+              marker,
+              "Source evidence superseded: exact local-source check passes against main `#{base}`. No branch was mutated."
+            )
+
+          case patch!(conn, "issues/comments/#{comment["id"]}", Jason.encode!(%{body: body})) do
+            %{status: 200} -> {:cont, :ok}
+            _ -> {:halt, {:error, :comment_resolution_failed}}
+          end
+        end)
+      else
+        {:error, :other_recovery_request}
+      end
+    else
+      _ -> {:error, :incomplete_request_history}
+    end
+  end
+
   def do_handle_call(:get_pr_comments, repo_conn, {number}) do
     case get!(repo_conn, "issues/#{number}/comments?per_page=100") do
       %{body: raw, status: 200} ->

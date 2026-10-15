@@ -74,6 +74,9 @@ defmodule BorsNG.Worker.Orchestration.Worker do
             {"dispatch", batch_id} ->
               Batcher.resume_dispatch(batch_id)
 
+            {"compatibility", _} ->
+              BorsNG.Worker.SourceCompatibility.chunk(project_id)
+
             {"notice", {conn, pr, body, marker}} ->
               deliver_notice(job, conn, pr, body, marker)
           end

@@ -56,6 +56,7 @@ defmodule BorsNG.Worker.MergeReconciler do
   def wake_idle_queue(_pid, _snapshot, _batches), do: :idle
 
   defp observe(project, state) do
+    BorsNG.Worker.SourceCompatibility.wake(project)
     send(Batcher.Registry.get(project.id), :recover_queue)
     conn = Project.installation_connection(project.repo_xref, Repo)
     {bump, state} = offer_bump(project, state)

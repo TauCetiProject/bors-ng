@@ -24,8 +24,24 @@ defmodule BorsNG.Worker.TestCase do
   # Otherwise a final asynchronous webhook cast can outlive its test process
   # and take the application down through repeated sandbox ownership exits.
   def stop_actors do
-    for supervisor <- [BorsNG.Worker.Batcher.Supervisor, BorsNG.Worker.Attemptor.Supervisor] do
-      if Process.whereis(supervisor), do: supervisor.terminate_all()
+    for supervisor <- [
+          BorsNG.Worker.Batcher.Supervisor,
+          BorsNG.Worker.Attemptor.Supervisor,
+          BorsNG.Worker.Orchestration.Workers
+        ] do
+      if Process.whereis(supervisor) do
+        for {_, pid, _, _} <- DynamicSupervisor.which_children(supervisor), is_pid(pid) do
+          DynamicSupervisor.terminate_child(supervisor, pid)
+        end
+      end
+    end
+
+    for registry <- [BorsNG.Worker.Batcher.Registry, BorsNG.Worker.Attemptor.Registry] do
+      try do
+        :sys.get_state(registry, 1_000)
+      catch
+        :exit, _ -> :ok
+      end
     end
   end
 
