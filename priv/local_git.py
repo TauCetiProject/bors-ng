@@ -338,24 +338,27 @@ class Mirror:
         headers.update({oid: modules for oid, modules in stored.items()
                         if isinstance(modules, list) and all(isinstance(m, str) for m in modules)})
         needed = list(dict.fromkeys(oid for oid in files.values() if oid not in headers))
-        for offset in range(0, len(needed), 12):
-            oids = needed[offset:offset + 12]
-            data = self.git('cat-file', '--batch', input='\n'.join(oids) + '\n', binary=True, output_limit=4 * 1024 * 1024)[0]
-            for oid in oids:
-                header, data = data.split(b'\n', 1)
-                actual, kind, length = header.decode('ascii').split()
-                length = int(length)
-                if actual != oid or kind != 'blob' or len(data) < length + 1:
-                    raise Failure('incomplete_source')
-                content, data = data[:length], data[length + 1:]
-                headers[oid] = compatibility_imports(content.decode('utf-8'))
-        # Cache only parsed immutable blobs; this never stores a passing PR result.
-        retained = {oid: headers[oid] for oid in set(files.values()) if oid in headers}
-        encoded = json.dumps(retained)
-        if len(encoded) <= 4 * 1024 * 1024:
-            temp = cache.with_suffix('.tmp')
-            temp.write_text(encoded)
-            temp.replace(cache)
+        try:
+            for offset in range(0, len(needed), 12):
+                oids = needed[offset:offset + 12]
+                data = self.git('cat-file', '--batch', input='\n'.join(oids) + '\n', binary=True, output_limit=4 * 1024 * 1024)[0]
+                for oid in oids:
+                    header, data = data.split(b'\n', 1)
+                    actual, kind, length = header.decode('ascii').split()
+                    length = int(length)
+                    if actual != oid or kind != 'blob' or len(data) < length + 1:
+                        raise Failure('incomplete_source')
+                    content, data = data[:length], data[length + 1:]
+                    headers[oid] = compatibility_imports(content.decode('utf-8'))
+        finally:
+            # Retain validated immutable headers even after bounded partial work.
+            # Completeness is still required below; this never caches a PR pass.
+            retained = {oid: headers[oid] for oid in set(files.values()) if oid in headers}
+            encoded = json.dumps(retained)
+            if len(encoded) <= 4 * 1024 * 1024:
+                temp = cache.with_suffix('.tmp')
+                temp.write_text(encoded)
+                temp.replace(cache)
         return {path: headers[oid] for path, oid in files.items()}
 
     def promote(self):

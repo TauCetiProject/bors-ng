@@ -92,6 +92,35 @@ class LocalGitTest(unittest.TestCase):
             with self.assertRaises(local.Failure, msg=header):
                 local.compatibility_imports(header)
 
+    def test_partial_inventory_caches_only_parsed_blobs_without_passing(self):
+        from unittest.mock import patch
+        head = self.commit(self.base, {f'TauCeti/F{i}.lean': f'def value{i} := {i}\n'
+                                      for i in range(15)})
+        request = self.request | dict(operation='compatibility', base_sha=head,
+                                      members=[dict(pr=1, head_sha=head)])
+
+        class Interrupted(TestMirror):
+            batches = 0
+
+            def git(self, *args, **kwargs):
+                if args[:2] == ('cat-file', '--batch'):
+                    self.batches += 1
+                    if self.batches == 2:
+                        raise local.Failure('timeout')
+                return super().git(*args, **kwargs)
+
+        interrupted = Interrupted(request, self.upstream)
+        result = interrupted.run()['results'][0]
+        self.assertEqual(result['status'], 'unknown')
+        cache = interrupted.repo / 'bors-headers-local-source-v2.json'
+        self.assertEqual(len(json.loads(cache.read_text())), 12)
+
+        with patch.object(local, 'compatibility_imports', wraps=local.compatibility_imports) as parse:
+            complete = TestMirror(request, self.upstream).run()['results'][0]
+            self.assertEqual(complete['status'], 'pass')
+            self.assertEqual(parse.call_count, 3)
+        self.assertEqual(len(json.loads(cache.read_text())), 15)
+
     def test_compatibility_individual_conflicts_and_unknown(self):
         main = self.commit(self.base, {'file': 'main\n'})
         conflict = self.commit(self.base, {'file': 'head\n'})
