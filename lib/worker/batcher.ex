@@ -1697,6 +1697,17 @@ defmodule BorsNG.Worker.Batcher do
     # contiguous units.
     patch_links = Bundles.sort_links_for_merge(patch_links)
 
+    base =
+      if predecessor,
+        do: %{
+          commit: CandidateJournal.commit_binding(predecessor)["commit"],
+          tree: CandidateJournal.commit_binding(predecessor)["tree"]
+        },
+        else: get_base(repo_conn, batch.into_branch)
+
+    patch_links =
+      BorsNG.Worker.SourceCompatibility.admit(project, repo_conn, batch, patch_links, base.commit)
+
     # If all patches were closed and removed, cancel the batch early
     if Enum.empty?(patch_links) do
       now = DateTime.to_unix(DateTime.utc_now(), :second)
@@ -1710,14 +1721,6 @@ defmodule BorsNG.Worker.Batcher do
       Project.ping!(project.id)
       :canceled
     else
-      base =
-        if predecessor,
-          do: %{
-            commit: CandidateJournal.commit_binding(predecessor)["commit"],
-            tree: CandidateJournal.commit_binding(predecessor)["tree"]
-          },
-          else: get_base(repo_conn, batch.into_branch)
-
       candidate =
         CandidateJournal.begin(
           batch,
@@ -1726,6 +1729,7 @@ defmodule BorsNG.Worker.Batcher do
           if(predecessor, do: predecessor.id)
         )
 
+      BorsNG.Worker.SourceCompatibility.journal(candidate, patch_links)
       batch = %{batch | candidate_id: candidate.id}
 
       mode = BorsNG.Worker.LocalGit.mode(project, batch.into_branch, repo_conn)
@@ -3420,6 +3424,7 @@ defmodule BorsNG.Worker.Batcher do
       # Record confirmed failure. Dependency recovery decides between a retry
       # and an exclusive proof-repair handoff on the next eligibility heartbeat.
       QueueApproval.fail(patches, batch, :build)
+      BorsNG.Worker.SourceCompatibility.proven_failure(batch, patch_links, repo_conn)
       # The queue labels are taken off once the batch state is committed to :error.
       Labeler.mark_awaiting_requeue(repo_conn, batch.into_branch, patches)
 
@@ -3663,6 +3668,9 @@ defmodule BorsNG.Worker.Batcher do
               QueueApproval.stop(patches, :merged)
             end
           end)
+
+        if batch.into_branch == "main",
+          do: BorsNG.Worker.SourceCompatibility.wake(batch.project, batch.commit)
 
         Process.delete({:push_failure_reported, batch.id})
         Process.delete({:promotion_retry, batch.id})

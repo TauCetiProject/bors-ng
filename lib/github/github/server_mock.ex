@@ -970,6 +970,13 @@ defmodule BorsNG.GitHub.ServerMock do
   def do_handle_call(:notice_comments_since, conn, {number, _since}, state),
     do: do_handle_call(:get_pr_comments, conn, {number}, state)
 
+  def do_handle_call(:resolve_source_request, conn, {pr, head, base}, state) do
+    marker = "<!--tauceti-rebase:v1 #{head}-->"
+    comments = get_in(state, [conn, :comments, pr]) || []
+    updated = Enum.map(comments, &String.replace(&1, marker, "Superseded against main #{base}"))
+    {:ok, put_in(state, [conn, :comments, pr], updated)}
+  end
+
   def do_handle_call(:get_pr_comments, repo_conn, {number}, state) do
     with {:ok, repo} <- Map.fetch(state, repo_conn),
          {:ok, comments} <- Map.fetch(repo, :comments),

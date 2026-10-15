@@ -56,7 +56,7 @@ class Mirror:
                             ('x-access-token:' + os.environ.get('BORS_GIT_TOKEN', '')).encode()).decode())
         self.url = 'https://github.com/' + request['repository'] + '.git'
 
-    def git(self, *args, input=None, extra_env=None, check=True, binary=False):
+    def git(self, *args, input=None, extra_env=None, check=True, binary=False, output_limit=OUTPUT_LIMIT):
         # No inherited configuration, hooks, credentials, replacement objects,
         # alternates, checkout, submodules, filters or external merge drivers.
         argv = ['git', '--git-dir=' + str(self.repo), '-c', 'core.hooksPath=/dev/null',
@@ -85,7 +85,7 @@ class Mirror:
                         sent = True
                         if time.monotonic() >= until:
                             raise Failure('timeout', operation=args[0])
-                        if os.fstat(out.fileno()).st_size > OUTPUT_LIMIT or os.fstat(err.fileno()).st_size > OUTPUT_LIMIT:
+                        if os.fstat(out.fileno()).st_size > output_limit or os.fstat(err.fileno()).st_size > output_limit:
                             raise Failure('output_limit', operation=args[0])
                         if size(self.root) > self.budget:
                             raise Failure('mirror_limit', max_bytes=self.budget)
@@ -94,8 +94,8 @@ class Mirror:
                 proc.wait()
                 raise
             out.seek(0)
-            result = out.read(OUTPUT_LIMIT + 1)
-            if len(result) > OUTPUT_LIMIT:
+            result = out.read(output_limit + 1)
+            if len(result) > output_limit:
                 raise Failure('output_limit', operation=args[0])
             if check and proc.returncode:
                 # Never emit stderr: Git/HTTP diagnostics may contain credentials.
@@ -270,6 +270,94 @@ class Mirror:
         finally:
             self.deadline = previous_deadline
 
+    def compatibility(self):
+        """Exact singleton trees, source data only; unknown coverage never holds a PR."""
+        base = self.request['base_sha']
+        members = self.request['members']
+        self.initialize()
+        self.fetch([base] + [m['head_sha'] for m in members])
+        results, headers = [], {}
+        try:
+            baseline = self.source_inventory(base, headers)
+            baseline_missing = {(path, module) for path, modules in baseline.items() for module in modules
+                                if module.replace('.', '/') + '.lean' not in baseline}
+        except (Failure, UnicodeError):
+            baseline_missing = None
+        for member in members:
+            identity = dict(pr=member['pr'], head_sha=member['head_sha'], base_sha=base,
+                            policy='local-source-v2')
+            try:
+                output, status = self.git('merge-tree', '--write-tree', '--name-only', '-z',
+                                          base, member['head_sha'], check=False)
+                fields = output.split('\0')
+                if status == 1:
+                    paths = fields[1:fields.index('', 1)] if '' in fields[1:] else fields[1:]
+                    if any(not re.fullmatch(r'[A-Za-z0-9_./-]{1,512}', path) for path in paths):
+                        raise Failure('unsupported_path')
+                    results.append(identity | dict(status='conflict', paths=paths[:64]))
+                    continue
+                if status:
+                    raise Failure('merge_unavailable')
+                tree = fields[0].strip()
+                if baseline_missing is None:
+                    raise Failure('unknown_base_headers')
+                inventory = self.source_inventory(tree, headers)
+                missing = [dict(path=path, module=module,
+                                provider_path=module.replace('.', '/') + '.lean')
+                           for path, modules in inventory.items() for module in modules
+                           if module.replace('.', '/') + '.lean' not in inventory
+                           and (path, module) not in baseline_missing]
+                results.append(identity | dict(status='missing_source' if missing else 'pass',
+                                                tree=tree, missing_imports=missing[:64],
+                                                coverage='all_project_local_headers'))
+            except (Failure, UnicodeError) as error:
+                reason = error.details['kind'] if isinstance(error, Failure) else 'non_text_source'
+                results.append(identity | dict(status='unknown', reason=reason))
+        return dict(status='ok', results=results)
+
+    def source_inventory(self, tree, headers):
+        # Cache parsed headers by immutable blob, not main identity. Every pass
+        # still inventories the exact prospective tree (including PR additions).
+        listing = self.git('ls-tree', '-r', '-l', '-z', tree, output_limit=4 * 1024 * 1024)[0]
+        files = {}
+        for entry in listing.split('\0'):
+            if not entry:
+                continue
+            meta, path = entry.split('\t', 1)
+            mode, kind, oid, length = meta.split()
+            if path == 'TauCeti.lean' or (path.startswith('TauCeti/') and path.endswith('.lean')):
+                if (kind != 'blob' or mode != '100644' or int(length) > 256 * 1024
+                        or not re.fullmatch(r'[A-Za-z0-9_./]{1,512}', path)):
+                    raise Failure('unsupported_source')
+                files[path] = oid
+        cache = self.repo / 'bors-headers-local-source-v2.json'
+        try:
+            stored = json.loads(cache.read_text())
+        except (OSError, ValueError):
+            stored = {}
+        headers.update({oid: modules for oid, modules in stored.items()
+                        if isinstance(modules, list) and all(isinstance(m, str) for m in modules)})
+        needed = list(dict.fromkeys(oid for oid in files.values() if oid not in headers))
+        for offset in range(0, len(needed), 12):
+            oids = needed[offset:offset + 12]
+            data = self.git('cat-file', '--batch', input='\n'.join(oids) + '\n', binary=True, output_limit=4 * 1024 * 1024)[0]
+            for oid in oids:
+                header, data = data.split(b'\n', 1)
+                actual, kind, length = header.decode('ascii').split()
+                length = int(length)
+                if actual != oid or kind != 'blob' or len(data) < length + 1:
+                    raise Failure('incomplete_source')
+                content, data = data[:length], data[length + 1:]
+                headers[oid] = compatibility_imports(content.decode('utf-8'))
+        # Cache only parsed immutable blobs; this never stores a passing PR result.
+        retained = {oid: headers[oid] for oid in set(files.values()) if oid in headers}
+        encoded = json.dumps(retained)
+        if len(encoded) <= 4 * 1024 * 1024:
+            temp = cache.with_suffix('.tmp')
+            temp.write_text(encoded)
+            temp.replace(cache)
+        return {path: headers[oid] for path, oid in files.items()}
+
     def promote(self):
         self.initialize()
         self.fetch([self.request['expected'], self.request['commit']])
@@ -316,6 +404,81 @@ class Mirror:
                     shutil.rmtree(mirror)
 
 
+def compatibility_imports(content):
+    """Conservative subset of Lean.Parser.Module.Syntax, never body commands.
+
+    Lean has ONE module identifier per import command; whitespace/comments may
+    span lines. Unsupported/escaped names or header prefixes mean unknown.
+    """
+    if content.startswith('\ufeff'):
+        raise Failure('ambiguous_header')
+    i, imports = 0, []
+
+    def skip(index):
+        while index < len(content):
+            if content[index] in ' \t\r\n':
+                index += 1
+            elif content.startswith('--', index):
+                end = content.find('\n', index)
+                index = len(content) if end < 0 else end
+            elif content.startswith('/-', index):
+                index, depth = index + 2, 1
+                while depth and index < len(content):
+                    if content.startswith('/-', index):
+                        index, depth = index + 2, depth + 1
+                    elif content.startswith('-/', index):
+                        index, depth = index + 2, depth - 1
+                    else:
+                        index += 1
+                if depth:
+                    raise Failure('ambiguous_header')
+            else:
+                break
+        return index
+
+    def word(index):
+        match = re.match(r'[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*', content[index:])
+        return match[0] if match else None
+
+    i = skip(i)
+    if word(i) == 'module':
+        i = skip(i + len('module'))
+    if word(i) == 'prelude':
+        i = skip(i + len('prelude'))
+    while True:
+        start = i
+        token = word(i)
+        if token == 'public':
+            i = skip(i + len(token))
+            token = word(i)
+        if token == 'meta':
+            i = skip(i + len(token))
+            token = word(i)
+        if token != 'import':
+            # private import / malformed keyword prefixes are outside this
+            # subset. Body macros (including namespace-like arguments) cannot
+            # become alleged imports. The trusted CI parser remains authority.
+            first = word(start)
+            if (first in ['module', 'prelude'] or token in ['public', 'meta']
+                    or first == 'private' and word(skip(start + len('private'))) == 'import'
+                    or first and any(first.startswith(k) and first != k
+                                     for k in ['import', 'module', 'prelude', 'public', 'private', 'meta'])):
+                raise Failure('ambiguous_header')
+            return imports
+        i = skip(i + len('import'))
+        if word(i) == 'all':
+            i = skip(i + len('all'))
+        module = word(i)
+        if module is None or len(module) > 512 or module[0].islower() or module in ['import', 'public', 'meta', 'private', 'module', 'prelude']:
+            raise Failure('ambiguous_header')
+        i += len(module)
+        if i < len(content) and content[i] not in ' \t\r\n' and not content.startswith('/-', i) and not content.startswith('--', i):
+            raise Failure('ambiguous_header')
+        if module == 'TauCeti' or module.startswith('TauCeti.'):
+            imports.append(module)
+        i = skip(i)
+
+
 def local_imports(content):
     # A deliberately small subset; the pinned Lean preflight remains authority.
     clean, index, depth = [], 0, 0
@@ -360,12 +523,15 @@ def local_imports(content):
 def validate(request):
     if not REPO.fullmatch(request['repository']) or '..' in request['repository']:
         raise Failure('invalid_repository')
-    if request['operation'] not in ['assemble', 'publish', 'promote']:
+    if request['operation'] not in ['assemble', 'publish', 'promote', 'compatibility']:
         raise Failure('invalid_operation')
-    if request['operation'] == 'assemble':
+    if request['operation'] in ['assemble', 'compatibility']:
         if not request['members']:
             raise Failure('empty_members')
-        shas = [request['identity']['base_sha']] + [m['head_sha'] for m in request['members']]
+        if len(request['members']) > 32:
+            raise Failure('member_limit')
+        base = request['base_sha'] if request['operation'] == 'compatibility' else request['identity']['base_sha']
+        shas = [base] + [m['head_sha'] for m in request['members']]
     else:
         shas = [request['commit'], request['expected']]
         if request['operation'] == 'promote':
