@@ -1,0 +1,12 @@
+{
+  "base": "4f1a681d10b8371c56bc49158b0481d18bd949f5",
+  "diagnostic": "85196af63ce22d1d0b8140634a1c1000c6f595ed\n100644 36aab7af413a72efba519aa3e05aec3881260bb5 1\tTauCeti/AlgebraicGeometry/EllipticCurve/Scheme/Geom/BaseChange/Points.lean\n100644 d5ab531ef50e9d1484d9ff5c175298514d5bf330 2\tTauCeti/AlgebraicGeometry/EllipticCurve/Scheme/Geom/BaseChange/Points.lean\n100644 6752fc5ef4b7604489a14a085b5e53db434f7789 3\tTauCeti/AlgebraicGeometry/EllipticCurve/Scheme/Geom/BaseChange/Points.lean\n100644 975e43ad10e907e00e10b580c41212be84a0457e 1\tTauCeti/AlgebraicGeometry/EllipticCurve/Scheme/Geom/Basic.lean\n100644 6590283857fb865bcba619b693610a9b3c0f4102 2\tTauCeti/AlgebraicGeometry/EllipticCurve/Scheme/Geom/Basic.lean\n100644 b1a043c79693a004b5d8454a3f0b26b56c07afa3 3\tTauCeti/AlgebraicGeometry/EllipticCurve/Scheme/Geom/Basic.lean\n100644 fde891a1653347e07b55444dc0ffd1bf5436d4d1 1\tTauCeti/AlgebraicGeometry/ModularCurve/NaiveLevel.lean\n100644 6f6fb5d351b21a1eb507da4dc9ed32d70a28c21f 2\tTauCeti/AlgebraicGeometry/ModularCurve/NaiveLevel.lean\n100644 f85888ca8672f814848781ad61c04c7775cc6594 3\tTauCeti/AlgebraicGeometry/ModularCurve/NaiveLevel.lean\n\nAuto-merging TauCeti/AlgebraicGeometry/EllipticCurve/Scheme/Geom/BaseChange/Points.lean\nCONFLICT (content): Merge conflict in TauCeti/AlgebraicGeometry/EllipticCurve/Scheme/Geom/BaseChange/Points.lean\nAuto-merging TauCeti/AlgebraicGeometry/EllipticCurve/Scheme/Geom/Basic.lean\nCONFLICT (content): Merge conflict in TauCeti/AlgebraicGeometry/EllipticCurve/Scheme/Geom/Basic.lean\nAuto-merging TauCeti/AlgebraicGeometry/ModularCurve/NaiveLevel.lean\nCONFLICT (content): Merge conflict in TauCeti/AlgebraicGeometry/ModularCurve/NaiveLevel.lean\n",
+  "earlier_head": "af6446b5cc924497adda5b107e12c39745359b7b",
+  "individual_merges": [
+    0,
+    0
+  ],
+  "later_head": "4cb41effd279d6774e2b4ae43d4bea96f496edc7",
+  "pair_exit": 1,
+  "scope": "Only this base and these heads. Separating the heads does not repair incompatibility after either lands."
+}
