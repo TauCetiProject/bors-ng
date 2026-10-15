@@ -157,6 +157,51 @@ defmodule BorsNG.Worker.SourceCompatibilityTest do
            |> length() == 2
   end
 
+  test "a helper timeout persists exact unknown coverage without a hold or repeated source work",
+       c do
+    SourceCompatibility.check(c.project, @conn, @base, c.patches, fn _, _, _, _ ->
+      %{"status" => "error", "details" => %{"kind" => "timeout", "operation" => "fetch"}}
+    end)
+
+    current = Enum.map(c.patches, &Repo.get!(Patch, &1.id))
+
+    Enum.each(current, fn patch ->
+      assert %{
+               "status" => "unknown",
+               "reason" => "source_helper_timeout",
+               "base_sha" => @base,
+               "head_sha" => @head
+             } = patch.source_compatibility
+
+      refute SourceCompatibility.requested?(patch, @head)
+    end)
+
+    SourceCompatibility.check(c.project, @conn, @base, current, fn _, _, _, _ ->
+      flunk("unknown coverage must fall back to authoritative staging rather than spin")
+    end)
+
+    assert Repo.aggregate(OrchestrationJob, :count, :id) == 0
+
+    assert SourceCompatibility.admit(
+             c.project,
+             @conn,
+             c.batch,
+             Repo.all(LinkPatchBatch.from_batch(c.batch.id)),
+             @base
+           )
+           |> length() == 2
+  end
+
+  test "helper failure cannot overwrite a result after main moves", c do
+    SourceCompatibility.check(c.project, @conn, @base, c.patches, fn _, _, _, _ ->
+      update_mock(:branches, %{"main" => String.duplicate("d", 40)})
+      %{"status" => "error", "details" => %{"kind" => "helper_unavailable"}}
+    end)
+
+    assert Enum.all?(c.patches, &(Repo.get!(Patch, &1.id).source_compatibility == nil))
+    assert Repo.aggregate(OrchestrationJob, :count, :id) == 0
+  end
+
   test "new head and new main cannot accept an old result", c do
     [patch | _] = c.patches
     update_mock(:branches, %{"main" => String.duplicate("c", 40)})

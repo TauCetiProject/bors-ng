@@ -100,6 +100,14 @@ and handoffs while retaining authoritative staging validation and existing valid
 repair requests. Git/header caches are disposable and contain no compiled PR
 artifacts. Roll back code without dropping historical evidence columns.
 
+Whole-helper failures (including bounded fetch/lock timeouts) are persisted as
+explicit exact-main/head/policy unknown results, with an allowlisted reason.
+They never create a request/hold or turn into a passing result. Authoritative
+staging remains available; the same inputs do not trigger an unbounded retry
+loop. Later main/head identities are checked normally. The first production
+chunks advanced their cursor without storing these failures; this observability
+gap was caught during rollout rather than reported as a successful source pass.
+
 Acceptance is still pending: genuine deployed request, actual tending-worker
 pickup and validated changed-head outcome, normal new-head CI/review/re-admission,
 production latency/cost and exact innocent membership comparison. Do not claim

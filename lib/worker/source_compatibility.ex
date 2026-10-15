@@ -187,8 +187,33 @@ defmodule BorsNG.Worker.SourceCompatibility do
         %{"status" => "ok", "results" => results} ->
           apply_results(project, conn, base, pending, results)
 
-        _ ->
-          :ok
+        failure ->
+          # A bounded fetch/lock/auth failure is unknown coverage, not a pass
+          # and not an invisible completed sweep. Keep it exact-head/base bound
+          # and leave authoritative staging available without repeated scans.
+          reason =
+            case failure do
+              %{"details" => %{"kind" => kind}}
+              when kind in ~w(timeout lock_timeout git_failed mirror_limit output_limit helper_failed helper_or_auth_failed helper_unavailable) ->
+                "source_helper_" <> kind
+
+              _ ->
+                "source_helper_unavailable"
+            end
+
+          results =
+            Enum.map(members, fn member ->
+              %{
+                "pr" => member.pr,
+                "head_sha" => member.head_sha,
+                "base_sha" => base,
+                "policy" => @policy,
+                "status" => "unknown",
+                "reason" => reason
+              }
+            end)
+
+          apply_results(project, conn, base, pending, results)
       end
     end
   end
