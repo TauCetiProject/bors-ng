@@ -87,7 +87,7 @@ defmodule BorsNG.Worker.SourceCompatibilityTest do
       "pr" => pr,
       "head_sha" => @head,
       "base_sha" => @base,
-      "policy" => "local-source-v1",
+      "policy" => "local-source-v2",
       "status" => status,
       "coverage" => "all_project_local_headers",
       "missing_imports" => [

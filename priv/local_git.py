@@ -285,7 +285,7 @@ class Mirror:
             baseline_missing = None
         for member in members:
             identity = dict(pr=member['pr'], head_sha=member['head_sha'], base_sha=base,
-                            policy='local-source-v1')
+                            policy='local-source-v2')
             try:
                 output, status = self.git('merge-tree', '--write-tree', '--name-only', '-z',
                                           base, member['head_sha'], check=False)
@@ -330,7 +330,7 @@ class Mirror:
                         or not re.fullmatch(r'[A-Za-z0-9_./]{1,512}', path)):
                     raise Failure('unsupported_source')
                 files[path] = oid
-        cache = self.repo / 'bors-headers-local-source-v1.json'
+        cache = self.repo / 'bors-headers-local-source-v2.json'
         try:
             stored = json.loads(cache.read_text())
         except (OSError, ValueError):
@@ -405,13 +405,12 @@ class Mirror:
 
 
 def compatibility_imports(content):
-    """Conservative header subset. Unsupported syntax means unknown coverage."""
+    """Conservative subset of Lean.Parser.Module.Syntax, never body commands.
+
+    Lean has ONE module identifier per import command; whitespace/comments may
+    span lines. Unsupported/escaped names or header prefixes mean unknown.
+    """
     i, imports = 0, []
-    commands = {'namespace', 'section', 'end', 'open', 'export', 'def', 'theorem', 'lemma',
-                'example', 'instance', 'class', 'structure', 'inductive', 'abbrev', 'opaque',
-                'axiom', 'constant', 'variable', 'variables', 'universe', 'universes',
-                'noncomputable', 'set_option', 'attribute', 'notation', 'infix', 'infixl',
-                'infixr', 'prefix', 'postfix', 'syntax', 'macro', 'elab', 'initialize'}
 
     def skip(index):
         while index < len(content):
@@ -439,39 +438,43 @@ def compatibility_imports(content):
         match = re.match(r'[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*', content[index:])
         return match[0] if match else None
 
+    i = skip(i)
+    if word(i) == 'module':
+        i = skip(i + len('module'))
+    if word(i) == 'prelude':
+        i = skip(i + len('prelude'))
     while True:
-        i = skip(i)
+        start = i
         token = word(i)
-        if token in ['module', 'prelude']:
-            i += len(token)
-            continue
-        modifiers = False
-        while token in ['public', 'private', 'meta']:
-            modifiers = True
+        if token == 'public':
+            i = skip(i + len(token))
+            token = word(i)
+        if token == 'meta':
             i = skip(i + len(token))
             token = word(i)
         if token != 'import':
-            # A modifier can also begin a declaration; it is not an import.
-            if token in commands or i == len(content) and not modifiers or content[i:i+1] in ['@', '#']:
-                return imports
+            # private import / malformed keyword prefixes are outside this
+            # subset. Body macros (including namespace-like arguments) cannot
+            # become alleged imports. The trusted CI parser remains authority.
+            first = word(start)
+            if (first in ['module', 'prelude'] or token in ['public', 'meta']
+                    or first == 'private' and word(skip(start + len('private'))) == 'import'
+                    or first and any(first.startswith(k) and first != k
+                                     for k in ['import', 'module', 'prelude', 'public', 'private', 'meta'])):
+                raise Failure('ambiguous_header')
+            return imports
+        i = skip(i + len('import'))
+        if word(i) == 'all':
+            i = skip(i + len('all'))
+        module = word(i)
+        if module is None or module[0].islower() or module in ['import', 'public', 'meta', 'private', 'module', 'prelude']:
             raise Failure('ambiguous_header')
-        i += len(token)
-        count = 0
-        while True:
-            i = skip(i)
-            token = word(i)
-            if token in commands or token in ['import', 'public', 'private', 'meta'] or i == len(content) or content[i:i+1] in ['@', '#']:
-                if not count:
-                    raise Failure('ambiguous_header')
-                break
-            if token is None:
-                raise Failure('ambiguous_header')
-            i += len(token)
-            if i < len(content) and not content[i].isspace() and not content.startswith('/-', i) and not content.startswith('--', i):
-                raise Failure('ambiguous_header')
-            if token == 'TauCeti' or token.startswith('TauCeti.'):
-                imports.append(token)
-            count += 1
+        i += len(module)
+        if i < len(content) and not content[i].isspace() and not content.startswith('/-', i) and not content.startswith('--', i):
+            raise Failure('ambiguous_header')
+        if module == 'TauCeti' or module.startswith('TauCeti.'):
+            imports.append(module)
+        i = skip(i)
 
 
 def local_imports(content):

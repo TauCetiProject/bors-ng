@@ -939,7 +939,7 @@ defmodule BorsNG.GitHub.Server do
         Enum.filter(
           requests,
           &(get_in(&1, ["user", "login"]) == "tau-ceti-bors[bot]" and
-              String.contains?(&1["body"], "Checker policy: `local-source-v1`"))
+              String.contains?(&1["body"], "Checker policy: `local-source-v2`"))
         )
 
       if length(own) == length(requests) and length(own) <= 4 do

@@ -3,7 +3,7 @@ defmodule BorsNG.SourceRequestHttpTest do
   @head String.duplicate("a", 40)
   @base String.duplicate("b", 40)
 
-  defp request(author, policy \\ "local-source-v1") do
+  defp request(author, policy \\ "local-source-v2") do
     %{
       id: 23,
       user: %{login: author},
@@ -75,7 +75,7 @@ defmodule BorsNG.SourceRequestHttpTest do
   end
 
   for {name, comments, status, expected} <- [
-        {"Review App request", [make_request.("tauceti-review-bot[bot]", "local-source-v1")], 200,
+        {"Review App request", [make_request.("tauceti-review-bot[bot]", "local-source-v2")], 200,
          :other_recovery_request},
         {"authoritative individual failure",
          [make_request.("tau-ceti-bors[bot]", "authoritative-individual-v1")], 200,

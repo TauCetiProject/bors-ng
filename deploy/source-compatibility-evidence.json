@@ -2,8 +2,8 @@
   "schema": "source-compatibility-readonly-fixture/v1",
   "historical_run": "https://github.com/TauCetiProject/TauCeti/actions/runs/38627869562",
   "cold": {
-    "seconds": 7.678513282007771,
-    "cpu_seconds": 4.225978801,
+    "seconds": 7.276921147975372,
+    "cpu_seconds": 4.105495533999999,
     "result": {
       "status": "ok",
       "results": [
@@ -11,7 +11,7 @@
           "pr": 16175,
           "head_sha": "dedc6f8a9464710a0ab92fa76475942b7eb16d31",
           "base_sha": "5fa17650a559a7bd9764fcc11cb306d8f8edf286",
-          "policy": "local-source-v1",
+          "policy": "local-source-v2",
           "status": "missing_source",
           "tree": "c826572bb1220f234465b3de5fa299b708f72afd",
           "missing_imports": [
@@ -27,8 +27,8 @@
     }
   },
   "warm": {
-    "seconds": 0.23122604298987426,
-    "cpu_seconds": 0.102120495,
+    "seconds": 0.20359231400652789,
+    "cpu_seconds": 0.111226936,
     "result": {
       "status": "ok",
       "results": [
@@ -36,7 +36,7 @@
           "pr": 16175,
           "head_sha": "dedc6f8a9464710a0ab92fa76475942b7eb16d31",
           "base_sha": "5fa17650a559a7bd9764fcc11cb306d8f8edf286",
-          "policy": "local-source-v1",
+          "policy": "local-source-v2",
           "status": "missing_source",
           "tree": "c826572bb1220f234465b3de5fa299b708f72afd",
           "missing_imports": [

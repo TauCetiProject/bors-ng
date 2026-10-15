@@ -77,10 +77,20 @@ class LocalGitTest(unittest.TestCase):
 
     def test_compatibility_pr_added_sources_and_multiline(self):
         head = self.commit(self.base, {'TauCeti/Added.lean': 'def added := 1',
-            'TauCeti/Consumer.lean': 'module\n/- outer /- inner -/ -/\nprivate import\n TauCeti.Added\n-- comment\npublic import Mathlib\nnamespace TauCeti\n'})
+            'TauCeti/Consumer.lean': 'module\n/- outer /- inner -/ -/\npublic import\n TauCeti.Added\n-- comment\npublic import Mathlib\nnamespace TauCeti\n'})
         result = self.compatibility(self.base, head)[0]
         self.assertEqual(result['status'], 'pass')
         self.assertEqual(result['coverage'], 'all_project_local_headers')
+
+    def test_header_body_commands_cannot_become_imports(self):
+        self.assertEqual(local.compatibility_imports(
+            'module\nimport Mathlib\nassert_not_exists TauCeti.NotAModule\n'), [])
+        self.assertEqual(local.compatibility_imports(
+            'module\npublic import\n TauCeti.Real\nprivate def localName := 1\n'), ['TauCeti.Real'])
+        for header in ['private import TauCeti.Missing', 'import «TauCeti.Hidden»',
+                       'importFoo TauCeti.Hidden', 'import', 'module module import TauCeti.X']:
+            with self.assertRaises(local.Failure, msg=header):
+                local.compatibility_imports(header)
 
     def test_compatibility_individual_conflicts_and_unknown(self):
         main = self.commit(self.base, {'file': 'main\n'})

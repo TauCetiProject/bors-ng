@@ -17,15 +17,17 @@ claimed, budgeted task. Rebase alone is sufficient only when validation passes.
 prospective merge tree contains main plus that PR, including PR-added modules.
 It checks textual conflicts and every project-local source header, including
 unchanged dependencies. Missing-import pairs already present on main are not
-attributed to a PR. A conservative parser supports module/private/public headers,
-multiline imports and nested/line comments. Unknown syntax, non-text, unsupported
+attributed to a PR. A conservative parser follows Lean's one-module-per-import header grammar,
+including module/public/meta prefixes, multiline whitespace and nested/line
+comments. Private declarations are body commands; private imports and escaped
+names retain unknown coverage. Body macros cannot become alleged imports. Unknown syntax, non-text, unsupported
 paths, symlinks, limits or incomplete objects yield explicit unknown coverage and
 retain authoritative validation. This is a local-source scheduling check, not
 Lean proof or general header validity authority. The trusted Lean-header CI and
 all build/audit/policy/pin/size guards remain mandatory. External Mathlib inventory,
 import cycles and declaration-name grep conviction are out of scope.
 
-Parsed headers are reused only by immutable Git blob plus `local-source-v1`
+Parsed headers are reused only by immutable Git blob plus `local-source-v2`
 checker policy. Each new base still inventories the exact main and prospective
 trees; passing results are keyed to full main/head/policy identity and never
 relabelled fresh across main commits. Bump the policy/cache version when changing
@@ -84,8 +86,8 @@ bounded reconciliation, requiring maintainer attention if coverage stays unknown
 `source-compatibility-evidence.json` is read-only historical batch727 evidence:
 exact head dedc6f8a9464710a0ab92fa76475942b7eb16d31 on main
 5fa17650a559a7bd9764fcc11cb306d8f8edf286 finds NonsplitReduction importing deleted
-VariableChange. Cold pass: 7.68 s wall / 4.23 s helper CPU. Parsed-inventory reuse:
-0.23 s / 0.10 s. These local measurements do not claim production latency or
+VariableChange. Cold pass: 7.28 s wall / 4.11 s helper CPU. Parsed-inventory reuse:
+0.20 s / 0.11 s. These local measurements do not claim production latency or
 throughput improvement and involve no build, push, status or PR mutation.
 
 Deploy Worker#266/shared facts, Review#176 and its trusted TauCeti#16818 pin;
