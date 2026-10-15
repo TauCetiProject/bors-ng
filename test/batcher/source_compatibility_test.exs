@@ -208,7 +208,10 @@ defmodule BorsNG.Worker.SourceCompatibilityTest do
   test "a helper timeout persists exact unknown coverage without a hold or repeated source work",
        c do
     SourceCompatibility.check(c.project, @conn, @base, c.patches, fn _, _, _, _ ->
-      %{"status" => "error", "details" => %{"kind" => "timeout", "operation" => "fetch"}}
+      %{
+        "status" => "error",
+        "details" => %{"kind" => "timeout", "operation" => "fetch", "phase" => "fetch"}
+      }
     end)
 
     current = Enum.map(c.patches, &Repo.get!(Patch, &1.id))
@@ -217,6 +220,8 @@ defmodule BorsNG.Worker.SourceCompatibilityTest do
       assert %{
                "status" => "unknown",
                "reason" => "source_helper_timeout",
+               "operation" => "fetch",
+               "phase" => "fetch",
                "base_sha" => @base,
                "head_sha" => @head
              } = patch.source_compatibility

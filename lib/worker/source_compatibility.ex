@@ -235,6 +235,27 @@ defmodule BorsNG.Worker.SourceCompatibility do
               }
             end)
 
+          details =
+            case failure do
+              %{"details" => details} when is_map(details) -> details
+              _ -> %{}
+            end
+
+          phase = details["phase"]
+          operation = details["operation"]
+
+          results =
+            Enum.map(results, fn result ->
+              result =
+                if phase in ~w(lock initialize fetch base_headers merge_tree candidate_headers),
+                  do: Map.put(result, "phase", phase),
+                  else: result
+
+              if operation in ~w(init for-each-ref update-ref gc cat-file count-objects fetch ls-tree merge-tree),
+                do: Map.put(result, "operation", operation),
+                else: result
+            end)
+
           apply_results(project, conn, base, pending, results)
       end
     end)

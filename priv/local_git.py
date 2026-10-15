@@ -46,7 +46,9 @@ class Mirror:
         self.request = request
         self.root = Path(request['root'])
         self.repo = self.root / (request['repository'].replace('/', '--') + '.git')
-        self.deadline = time.monotonic() + min(request.get('timeout', 600), 600)
+        self.started = time.monotonic()
+        self.deadline = self.started + min(request.get('timeout', 600), 600)
+        self.phase = 'lock'
         self.budget = request.get('max_bytes', 2 * 1024 ** 3)
         self.env = {k: v for k, v in os.environ.items()
                     if k in ['PATH', 'LANG', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'TMPDIR']}
@@ -68,7 +70,7 @@ class Mirror:
                 '-c', 'pack.windowMemory=32m', *args]
         remaining = min(120, self.deadline - time.monotonic())
         if remaining <= 0:
-            raise Failure('timeout')
+            raise Failure('timeout', operation=args[0], phase=self.phase)
         with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
             owner = os.getpid()
             proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=out, stderr=err,
@@ -86,7 +88,7 @@ class Mirror:
                     except subprocess.TimeoutExpired:
                         sent = True
                         if time.monotonic() >= until:
-                            raise Failure('timeout', operation=args[0])
+                            raise Failure('timeout', operation=args[0], phase=self.phase)
                         if os.fstat(out.fileno()).st_size > output_limit or os.fstat(err.fileno()).st_size > output_limit:
                             raise Failure('output_limit', operation=args[0])
                         if size(self.root) > self.budget:
@@ -128,21 +130,38 @@ class Mirror:
         # Pin only the current inputs/result. Earlier attempt refs are disposable
         # and no remote-tracking branches or reflogs accumulate.
         refs, _ = self.git('for-each-ref', '--format=%(refname)', 'refs/bors/')
-        for ref in refs.splitlines():
-            self.git('update-ref', '-d', ref)
+        if refs:
+            self.git('update-ref', '--stdin',
+                     input=''.join('delete ' + ref + '\n' for ref in refs.splitlines()))
         # Synchronous GC under the same lock, never a detached background writer.
         if size(self.repo) > self.budget // 2:
             self.git('gc', '--prune=now')
         self.enforce_budget()
 
     def fetch(self, shas):
-        missing = [sha for sha in shas if self.git('cat-file', '-e', sha + '^{commit}', check=False)[1]]
+        objects, _ = self.git('cat-file', '--batch-check', input=''.join(sha + '^{commit}\n' for sha in shas))
+        missing = [sha for sha, line in zip(shas, objects.splitlines()) if line.endswith(' missing')]
         if missing:
+            if self.request['operation'] == 'compatibility' and self.request.get('timeout') == 8:
+                counts, _ = self.git('count-objects', '-v')
+                counts = dict(line.split(': ', 1) for line in counts.splitlines())
+                if counts.get('count') == '0' and counts.get('in-pack') == '0':
+                    # An empty mirror cannot retain a half-fetched pack after
+                    # Git is killed. Allow the existing 30s admission budget
+                    # once to seed it, then keep ordinary background work at 8s.
+                    # The total includes lock/startup time, not 30s per input.
+                    self.deadline = self.started + 30
             self.git('fetch', '--quiet', '--no-tags', '--no-write-fetch-head', '--no-auto-gc',
                      self.url, *dict.fromkeys(missing))
-        for index, sha in enumerate(shas):
-            self.git('cat-file', '-e', sha + '^{commit}')
-            self.git('update-ref', 'refs/bors/input/' + str(index), sha)
+        verified, _ = self.git('cat-file', '--batch-check', input=''.join(sha + '^{commit}\n' for sha in shas))
+        if len(verified.splitlines()) != len(shas) or any(not re.fullmatch(r'[0-9a-f]{40} commit [0-9]+', line) for line in verified.splitlines()):
+            raise Failure('missing_commit')
+        # Pin all exact inputs in one atomic transaction. Checking each SHA and
+        # deleting/updating each ref in a separate process dominates tiny turns
+        # on the production container. The batch check above rejects missing/non-commit inputs.
+        self.git('update-ref', '--stdin',
+                 input=''.join('update refs/bors/input/' + str(index) + ' ' + sha + '\n'
+                               for index, sha in enumerate(shas)))
         self.enforce_budget()
 
     def assemble(self):
@@ -276,10 +295,13 @@ class Mirror:
         """Exact singleton trees, source data only; unknown coverage never holds a PR."""
         base = self.request['base_sha']
         members = self.request['members']
+        self.phase = 'initialize'
         self.initialize()
+        self.phase = 'fetch'
         self.fetch([base] + [m['head_sha'] for m in members])
         results, headers = [], {}
         try:
+            self.phase = 'base_headers'
             baseline = self.source_inventory(base, headers)
             baseline_missing = {(path, module) for path, modules in baseline.items() for module in modules
                                 if module.replace('.', '/') + '.lean' not in baseline}
@@ -289,6 +311,7 @@ class Mirror:
             identity = dict(pr=member['pr'], head_sha=member['head_sha'], base_sha=base,
                             policy='local-source-v2')
             try:
+                self.phase = 'merge_tree'
                 output, status = self.git('merge-tree', '--write-tree', '--name-only', '-z',
                                           base, member['head_sha'], check=False)
                 fields = output.split('\0')
@@ -303,6 +326,7 @@ class Mirror:
                 tree = fields[0].strip()
                 if baseline_missing is None:
                     raise Failure('unknown_base_headers')
+                self.phase = 'candidate_headers'
                 inventory = self.source_inventory(tree, headers)
                 missing = [dict(path=path, module=module,
                                 provider_path=module.replace('.', '/') + '.lean')
@@ -314,14 +338,15 @@ class Mirror:
                                                 coverage='all_project_local_headers'))
             except (Failure, UnicodeError) as error:
                 reason = error.details['kind'] if isinstance(error, Failure) else 'non_text_source'
-                results.append(identity | dict(status='unknown', reason=reason))
+                results.append(identity | dict(status='unknown', reason=reason, phase=self.phase,
+                                               operation=error.details.get('operation') if isinstance(error, Failure) else None))
         return dict(status='ok', results=results)
 
     def source_inventory(self, tree, headers):
         # Cache parsed headers by immutable blob, not main identity. Every pass
         # still inventories the exact prospective tree (including PR additions).
         listing = self.git('ls-tree', '-r', '-l', '-z', tree, output_limit=4 * 1024 * 1024)[0]
-        files = {}
+        files, lengths = {}, {}
         for entry in listing.split('\0'):
             if not entry:
                 continue
@@ -332,6 +357,7 @@ class Mirror:
                         or not re.fullmatch(r'[A-Za-z0-9_./]{1,512}', path)):
                     raise Failure('unsupported_source')
                 files[path] = oid
+                lengths[oid] = int(length)
         cache = self.repo / 'bors-headers-local-source-v2.json'
         try:
             stored = json.loads(cache.read_text())
@@ -341,17 +367,34 @@ class Mirror:
                         if isinstance(modules, list) and all(isinstance(m, str) for m in modules)})
         needed = list(dict.fromkeys(oid for oid in files.values() if oid not in headers))
         try:
-            for offset in range(0, len(needed), 12):
-                oids = needed[offset:offset + 12]
+            # Bound by actual ls-tree byte lengths, rather than launching one
+            # Git process per twelve tiny files (~1,230 for current TauCeti).
+            # Keep each output below 1 MiB plus framing, and <=512 objects.
+            batches, oids, total = [], [], 0
+            for oid in needed:
+                if oids and (total + lengths[oid] > 1024 * 1024 or len(oids) >= 512):
+                    batches.append(oids)
+                    oids, total = [], 0
+                oids.append(oid)
+                total += lengths[oid]
+            if oids:
+                batches.append(oids)
+            for oids in batches:
                 data = self.git('cat-file', '--batch', input='\n'.join(oids) + '\n', binary=True, output_limit=4 * 1024 * 1024)[0]
+                position = 0
                 for oid in oids:
-                    header, data = data.split(b'\n', 1)
-                    actual, kind, length = header.decode('ascii').split()
+                    end = data.index(b'\n', position)
+                    actual, kind, length = data[position:end].decode('ascii').split()
                     length = int(length)
-                    if actual != oid or kind != 'blob' or len(data) < length + 1:
+                    position = end + 1
+                    if (actual != oid or kind != 'blob' or length != lengths[oid]
+                            or len(data) < position + length + 1 or data[position + length] != 10):
                         raise Failure('incomplete_source')
-                    content, data = data[:length], data[length + 1:]
+                    content = data[position:position + length]
+                    position += length + 1
                     headers[oid] = compatibility_imports(content.decode('utf-8'))
+                if position != len(data):
+                    raise Failure('incomplete_source')
         finally:
             # Retain validated immutable headers even after bounded partial work.
             # Completeness is still required below; this never caches a PR pass.
@@ -393,10 +436,13 @@ class Mirror:
                     break
                 except BlockingIOError:
                     if time.monotonic() >= self.deadline:
-                        raise Failure('lock_timeout')
+                        raise Failure('lock_timeout', phase='lock')
                     time.sleep(0.05)
             try:
                 return getattr(self, self.request['operation'])()
+            except Failure as error:
+                error.details.setdefault('phase', self.phase)
+                raise
             finally:
                 # Failed fetches/assembly may leave unreachable objects; bound
                 # retained bytes on both success and failure, under the lock.
