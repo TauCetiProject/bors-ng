@@ -1,7 +1,7 @@
 defmodule BorsNG.Worker.SourceCompatibility do
   @moduledoc "Bounded immutable source checks feeding the existing head-bound rebase handoff."
   import Ecto.Query
-  alias BorsNG.Database.{Batch, CandidateEvent, LinkPatchBatch, Patch, Project, Repo}
+  alias BorsNG.Database.{Batch, Candidate, CandidateEvent, LinkPatchBatch, Patch, Project, Repo}
   alias BorsNG.GitHub
   alias BorsNG.Worker.{Batcher, LocalGit}
   alias BorsNG.Worker.Orchestration.Outbox
@@ -84,12 +84,13 @@ defmodule BorsNG.Worker.SourceCompatibility do
               )
             )
 
-        next = Enum.find(page, &stale?(&1, base))
+        epoch = latest_warm_epoch(project_id)
+        next = Enum.find(page, &stale?(&1, base, epoch))
         selected = if next, do: [Repo.get!(Patch, next.id)], else: []
         visited = if next, do: next.id, else: if(page == [], do: cursor, else: List.last(page).id)
         more = if next, do: Enum.any?(newer, &(&1.id == next.id)), else: length(newer) == 16
 
-        check(project, conn, base, selected, checker)
+        check_with_epoch(project, conn, base, selected, checker, epoch)
 
         Enum.each(selected, fn patch ->
           current = Repo.get!(Patch, patch.id)
@@ -148,14 +149,54 @@ defmodule BorsNG.Worker.SourceCompatibility do
 
   def admit(_, _, _, links, _), do: links
 
-  defp stale?(patch, base) do
+  defp stale?(patch, base, epoch) do
     r = patch.source_compatibility || %{}
 
     r["projection_pending"] == true or r["base_sha"] != base or
       r["head_sha"] != patch.commit or r["policy"] != @policy or
       (r["status"] in ["conflict", "missing_source"] and is_nil(r["repair_head"]) and
          r["hold_head"] != patch.commit) or
-      (r["status"] == "pass" and not is_nil(r["repair_head"]) and r["repair_base"] != base)
+      (r["status"] == "pass" and not is_nil(r["repair_head"]) and r["repair_base"] != base) or
+      transient_retry?(r, epoch)
+  end
+
+  # Existing successful Git work is a retry hint, never validation authority.
+  # This includes reconstruction publication; ordinary source checks and API
+  # assembly events cannot repeatedly manufacture readiness hints.
+  defp latest_warm_epoch(project_id) do
+    Repo.one(
+      from(e in CandidateEvent,
+        join: c in Candidate,
+        on: c.id == e.candidate_id,
+        where:
+          c.project_id == ^project_id and c.into_branch == "main" and
+            e.source == "bors.local_git" and
+            e.kind in ["local_assembled", "local_conflict", "staging_pushed"],
+        order_by: [desc: e.id],
+        limit: 1,
+        select: e.id
+      )
+    ) || 0
+  end
+
+  defp transient_retry?(r, epoch) do
+    previous = if is_integer(r["source_retry_epoch"]), do: r["source_retry_epoch"], else: 0
+
+    transient =
+      r["reason"] in ~w(source_helper_timeout source_helper_lock_timeout source_helper_cold_mirror_unavailable timeout lock_timeout) or
+        (r["reason"] == "unknown_base_headers" and
+           r["base_headers_reason"] in ~w(timeout lock_timeout))
+
+    r["status"] == "unknown" and transient and epoch > previous and
+      r["repair_head"] != r["head_sha"] and r["hold_head"] != r["head_sha"]
+  end
+
+  defp retry_context(results, epoch) do
+    Enum.map(results, fn result ->
+      if result["status"] == "unknown",
+        do: Map.put(result, "source_retry_epoch", epoch),
+        else: result
+    end)
   end
 
   def requested?(patch, head),
@@ -168,7 +209,12 @@ defmodule BorsNG.Worker.SourceCompatibility do
   def check(project, conn, base, patches, checker \\ &LocalGit.compatibility/4)
   def check(_, _, _, [], _), do: :ok
 
-  def check(project, conn, base, patches, checker) do
+  def check(project, conn, base, patches, checker),
+    do: check_with_epoch(project, conn, base, patches, checker, latest_warm_epoch(project.id))
+
+  defp check_with_epoch(_, _, _, [], _, _), do: :ok
+
+  defp check_with_epoch(project, conn, base, patches, checker, epoch) do
     Enum.each(patches, fn patch ->
       if requested?(patch, patch.commit) and
            patch.source_compatibility["projection_pending"] == true,
@@ -197,7 +243,8 @@ defmodule BorsNG.Worker.SourceCompatibility do
 
         BorsNG.Worker.BumpRecovery.automatic?(patch) or
           (r["base_sha"] == base and r["head_sha"] == patch.commit and r["policy"] == @policy and
-             (r["status"] not in ["conflict", "missing_source"] or blocked?(patch, patch.commit)))
+             ((r["status"] not in ["conflict", "missing_source"] and
+                 not transient_retry?(r, epoch)) or blocked?(patch, patch.commit)))
       end)
 
     # Independent helper requests keep inventory work bounded even when a
@@ -207,7 +254,7 @@ defmodule BorsNG.Worker.SourceCompatibility do
 
       case checker.(project, conn, base, members) do
         %{"status" => "ok", "results" => results} ->
-          apply_results(project, conn, base, pending, results)
+          apply_results(project, conn, base, pending, retry_context(results, epoch))
 
         failure ->
           # A bounded fetch/lock/auth failure is unknown coverage, not a pass
@@ -256,7 +303,7 @@ defmodule BorsNG.Worker.SourceCompatibility do
                 else: result
             end)
 
-          apply_results(project, conn, base, pending, results)
+          apply_results(project, conn, base, pending, retry_context(results, epoch))
       end
     end)
   end
@@ -354,7 +401,7 @@ defmodule BorsNG.Worker.SourceCompatibility do
              result["base_sha"] == candidate.snapshot["base_sha"] and result["policy"] == @policy do
           Map.take(
             result,
-            ~w(pr head_sha base_sha policy status reason coverage phase operation base_headers_reason base_headers_operation)
+            ~w(pr head_sha base_sha policy status reason coverage phase operation base_headers_reason base_headers_operation source_retry_epoch)
           )
         else
           %{
