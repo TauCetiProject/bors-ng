@@ -711,6 +711,36 @@ defmodule BorsNG.Worker.Batcher do
 
   def handle_info(:wake_backend_holds, project_id), do: recover_backend_holds(project_id)
 
+  def handle_info({:post_merge_cleanup, id, commit, candidate_id, squash, _members}, project_id) do
+    if batch = cleanup_batch(project_id, id, commit, candidate_id) do
+      squash = if is_nil(squash), do: legacy_cleanup_squash(batch), else: squash
+
+      if squash do
+        source = Process.get(:orchestration_job)
+        expand_cleanup(source, 0, project_id)
+      end
+    end
+
+    {:noreply, project_id}
+  end
+
+  def handle_info({:expand_post_merge_cleanup, source_id, offset}, project_id) do
+    case Repo.get(BorsNG.Database.OrchestrationJob, source_id) do
+      %{project_id: ^project_id, kind: "info"} = source ->
+        expand_cleanup(source, offset, project_id)
+
+      _ ->
+        {:noreply, project_id}
+    end
+  end
+
+  def handle_info({:close_merged_pr, id, commit, candidate_id, member}, project_id) do
+    if batch = cleanup_batch(project_id, id, commit, candidate_id),
+      do: close_merged_pr(batch, member)
+
+    {:noreply, project_id}
+  end
+
   def handle_info({:completion_poll, _batch_id}, project_id),
     do: handle_info({:poll, :once}, project_id)
 
@@ -3320,6 +3350,9 @@ defmodule BorsNG.Worker.Batcher do
 
   defp complete_verified_batch(batch, statuses, conn) do
     if Process.get(:orchestration_executor, false) and promotion_already_visible?(batch, conn) do
+      squash = cleanup_squash(CandidateJournal.current(batch))
+      members = cleanup_members(batch, squash)
+
       {:ok, _} =
         Repo.transaction(fn ->
           CandidateJournal.event(
@@ -3331,11 +3364,217 @@ defmodule BorsNG.Worker.Batcher do
 
           batch |> Batch.changeset(%{state: :ok}) |> Repo.update!()
           QueueApproval.stop(Repo.all(Patch.all_for_batch(batch.id)), :merged)
+          enqueue_cleanup(batch, members, squash, statuses)
         end)
 
       :ok
     else
       complete_green_batch(batch, statuses, conn)
+    end
+  end
+
+  defp cleanup_members(_batch, false), do: []
+
+  defp cleanup_members(batch, _squash) do
+    Repo.all(LinkPatchBatch.from_batch(batch.id))
+    |> Enum.map(fn link ->
+      patch = link.patch
+
+      %{
+        patch_id: patch.id,
+        pr: patch.pr_xref,
+        head: link.head_sha || patch.commit,
+        token: patch.orchestration_approval_token,
+        bundle_id: patch.bundle_id
+      }
+    end)
+  end
+
+  defp merged_notice_body(batch, member, statuses) do
+    body =
+      Batcher.Message.generate_message(
+        {:merged, :squashed, batch.into_branch, statuses},
+        bundle_page_url([%Patch{bundle_id: member.bundle_id}])
+      )
+
+    (body || "Merged into #{batch.into_branch}.") <>
+      "\n\nMerged revision: `#{member.head}`."
+  rescue
+    _ -> "Revision `#{member.head}` merged into `#{batch.into_branch}` as `#{batch.commit}`."
+  end
+
+  defp legacy_cleanup_squash(batch) do
+    deadline = System.monotonic_time(:millisecond) + 8_000
+
+    case GitHub.cleanup_policy_bounded(get_repo_conn(batch.project), batch.commit, deadline) do
+      # Inferred legacy configurations never enable squash.
+      {:ok, nil} ->
+        false
+
+      {:ok, content} ->
+        case Batcher.BorsToml.new(content) do
+          {:ok, toml} -> toml.use_squash_merge
+          _ -> throw({:cleanup_terminal, :invalid_policy})
+        end
+
+      {:error, _, status} when status in 400..499 and status not in [401, 403, 429] ->
+        throw({:cleanup_terminal, {:http_status, status}})
+
+      _ ->
+        throw(:cleanup_policy_unavailable)
+    end
+  end
+
+  defp cleanup_squash(candidate) do
+    if candidate,
+      do:
+        get_in(CandidateJournal.commit_binding(candidate), [
+          "policy",
+          "effective",
+          "use_squash_merge"
+        ])
+  end
+
+  defp enqueue_cleanup(batch, members, squash, statuses) do
+    if BorsNG.Worker.Orchestration.Projections.enabled?() and squash != false and members != [] do
+      candidate = CandidateJournal.current(batch)
+      members = Enum.map(members, &Map.put(&1, :body, merged_notice_body(batch, &1, statuses)))
+
+      Outbox.enqueue(
+        batch.project_id,
+        "info",
+        {:post_merge_cleanup, batch.id, batch.commit, candidate && candidate.id, squash, members},
+        "post-merge:#{batch.id}:#{batch.commit}"
+      )
+    end
+  end
+
+  defp cleanup_batch(project_id, id, commit, candidate_id) do
+    case Repo.get(Batch, id) do
+      %Batch{project_id: ^project_id, state: :ok, commit: ^commit} = batch ->
+        candidate = CandidateJournal.current(batch)
+
+        if (candidate && candidate.id) == candidate_id,
+          do: Repo.preload(batch, :project)
+
+      _ ->
+        nil
+    end
+  end
+
+  defp expand_cleanup(source, offset, project_id) do
+    case Outbox.payload(source) do
+      {:post_merge_cleanup, id, commit, candidate_id, _squash, members} ->
+        if batch = cleanup_batch(project_id, id, commit, candidate_id) do
+          conn = get_repo_conn(batch.project)
+          # Four independent children per turn; source data is retained once.
+          {:ok, _} =
+            Repo.transaction(fn ->
+              Repo.one!(from(p in Project, where: p.id == ^project_id, lock: "FOR UPDATE"))
+
+              members
+              |> Enum.slice(offset, 4)
+              |> Enum.each(fn member ->
+                Outbox.enqueue(
+                  project_id,
+                  "info",
+                  {:close_merged_pr, id, commit, candidate_id, member},
+                  "post-merge-member:#{source.id}:#{member.patch_id}"
+                )
+
+                # The historical merged-revision receipt survives later PR intent.
+                key = "post-merge-notice:#{source.id}:#{member.patch_id}"
+                marker = "<!-- bors-outbox #{key} -->"
+
+                Outbox.enqueue(
+                  project_id,
+                  "notice",
+                  {conn, member.pr, member.body <> "\n\n" <> marker, marker},
+                  key
+                )
+              end)
+
+              if offset + 4 < length(members) do
+                Outbox.enqueue(
+                  project_id,
+                  "info",
+                  {:expand_post_merge_cleanup, source.id, offset + 4},
+                  "post-merge-expand:#{source.id}:#{offset + 4}"
+                )
+              end
+            end)
+        end
+
+      _ ->
+        :ok
+    end
+
+    {:noreply, project_id}
+  end
+
+  defp close_merged_pr(batch, member) do
+    deadline = System.monotonic_time(:millisecond) + 8_000
+    conn = get_repo_conn(batch.project)
+
+    if cleanup_member_current?(batch, member) do
+      ensure_no_withdrawal!(batch, [member.patch_id])
+
+      case GitHub.get_pr_bounded(conn, member.pr, deadline) do
+        {:ok, pr} ->
+          cond do
+            pr.head_sha != member.head or pr.base_ref != batch.into_branch or pr.draft ->
+              # Reconsider a missed push/retarget through ordinary admission.
+              Outbox.enqueue(batch.project_id, "cast", {:eligibility, member.pr})
+
+            pr.state == :closed ->
+              :ok
+
+            cleanup_member_current?(batch, member) ->
+              ensure_no_withdrawal!(batch, [member.patch_id])
+
+              if cleanup_member_current?(batch, member) do
+                prefix = "[Merged by Bors] - "
+
+                title =
+                  if String.starts_with?(pr.title, prefix), do: pr.title, else: prefix <> pr.title
+
+                case GitHub.close_pr_bounded(conn, member.pr, title, deadline) do
+                  :ok ->
+                    :ok
+
+                  {:error, _, status} when status in 400..499 and status not in [401, 403, 429] ->
+                    throw({:cleanup_terminal, {:http_status, status}})
+
+                  _ ->
+                    throw(:post_merge_close_unavailable)
+                end
+              end
+
+            true ->
+              :ok
+          end
+
+        {:error, :get_pr, 404, _} ->
+          :ok
+
+        {:error, :get_pr, 404} ->
+          :ok
+
+        _ ->
+          throw(:post_merge_read_unavailable)
+      end
+    end
+
+    :ok
+  end
+
+  defp cleanup_member_current?(batch, member) do
+    case Repo.get(Patch, member.patch_id) do
+      %Patch{project_id: id, commit: head, orchestration_approval_token: token} ->
+        id == batch.project_id and head == member.head and token == member.token
+
+      _ ->
+        false
     end
   end
 
@@ -3720,12 +3959,15 @@ defmodule BorsNG.Worker.Batcher do
         throw(:train_predecessor_pending)
     end
 
-    if Process.get(:orchestration_executor, false),
-      do:
-        ensure_no_withdrawal!(
-          batch,
-          Repo.all(LinkPatchBatch.from_batch(batch.id)) |> Enum.map(& &1.patch_id)
-        )
+    members =
+      if Process.get(:orchestration_executor, false) do
+        links = Repo.all(LinkPatchBatch.from_batch(batch.id))
+        ensure_no_withdrawal!(batch, Enum.map(links, & &1.patch_id))
+        members = cleanup_members(batch, toml.use_squash_merge)
+        members
+      else
+        []
+      end
 
     push_result =
       if Train.tracked?(CandidateJournal.current(batch)) do
@@ -3771,6 +4013,7 @@ defmodule BorsNG.Worker.Batcher do
             if Process.get(:orchestration_executor, false) do
               batch |> Batch.changeset(%{state: :ok}) |> Repo.update!()
               QueueApproval.stop(patches, :merged)
+              enqueue_cleanup(batch, members, toml.use_squash_merge, statuses)
             end
           end)
 
@@ -3789,15 +4032,19 @@ defmodule BorsNG.Worker.Batcher do
         Bundles.drop_held_approvals(patches)
         Bundles.forget_retargeting(patches)
 
-        if toml.use_squash_merge do
-          Enum.each(patches, fn patch ->
-            send_message(repo_conn, [patch], {:merged, :squashed, batch.into_branch, statuses})
-            pr = GitHub.get_pr!(repo_conn, patch.pr_xref)
-            pr = %BorsNG.GitHub.Pr{pr | state: :closed, title: "[Merged by Bors] - #{pr.title}"}
-            GitHub.update_pr!(repo_conn, pr)
-          end)
+        if toml.use_squash_merge && BorsNG.Worker.Orchestration.Projections.enabled?() do
+          :ok
         else
-          send_message(repo_conn, patches, {:succeeded, statuses})
+          if toml.use_squash_merge do
+            Enum.each(patches, fn patch ->
+              send_message(repo_conn, [patch], {:merged, :squashed, batch.into_branch, statuses})
+              pr = GitHub.get_pr!(repo_conn, patch.pr_xref)
+              pr = %BorsNG.GitHub.Pr{pr | state: :closed, title: "[Merged by Bors] - #{pr.title}"}
+              GitHub.update_pr!(repo_conn, pr)
+            end)
+          else
+            send_message(repo_conn, patches, {:succeeded, statuses})
+          end
         end
 
         :ok

@@ -507,6 +507,33 @@ defmodule BorsNG.GitHub do
     call_with_retry(:post_commit_status, repo_conn, {sha, status, msg, url}, 500, 4_000)
   end
 
+  def get_pr_bounded(conn, number, deadline),
+    do: bounded_cleanup_call(:get_pr, conn, {number}, deadline)
+
+  def close_pr_bounded(conn, number, title, deadline),
+    do: bounded_cleanup_call(:close_merged_pr, conn, {number, title}, deadline)
+
+  def cleanup_policy_bounded(conn, commit, deadline),
+    do: bounded_cleanup_call(:cleanup_policy, conn, {commit}, deadline)
+
+  defp bounded_cleanup_call(type, conn, data, deadline) do
+    now = System.monotonic_time(:millisecond)
+    deadline = min(deadline, now + Confex.fetch_env!(:bors, :api_github_timeout))
+    remaining = deadline - now
+
+    if remaining <= 0 do
+      {:error, :cleanup_deadline}
+    else
+      GenServer.call(
+        BorsNG.GitHub.Cleanup,
+        {:advisory, type, conn, data, deadline},
+        remaining + 2_000
+      )
+    end
+  catch
+    :exit, _ -> {:error, :cleanup_unavailable}
+  end
+
   defp advisory_call(type, conn, data) do
     timeout = Confex.fetch_env!(:bors, :api_github_timeout)
 

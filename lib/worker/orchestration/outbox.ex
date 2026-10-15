@@ -389,8 +389,7 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
           set: [
             state: "done",
             completed_at_ms: System.system_time(:millisecond),
-            dedup_key:
-              if(job.kind in ["notice", "projection", "dispatch"], do: job.dedup_key, else: nil),
+            dedup_key: if(permanent_key?(job), do: job.dedup_key, else: nil),
             token: nil,
             lease_until: 0,
             updated_at: NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)
@@ -403,6 +402,18 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
 
     result
   end
+
+  defp cleanup?(job),
+    do:
+      job.kind == "info" and is_binary(job.dedup_key) and
+        String.starts_with?(job.dedup_key, [
+          "post-merge:",
+          "post-merge-expand:",
+          "post-merge-member:"
+        ])
+
+  defp permanent_key?(job),
+    do: job.kind in ["notice", "projection", "dispatch"] or cleanup?(job)
 
   defp wake_deferred(project_id) do
     with_project(project_id, fn ->
@@ -445,10 +456,15 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
   end
 
   def fail(job, reason) do
-    if notification?(job) and (job.attempts >= 6 or match?({:terminal, _}, reason)) do
+    if (notification?(job) or cleanup?(job)) and
+         (job.attempts >= 6 or match?({:terminal, _}, reason)) do
+      category = if cleanup?(job), do: "cleanup", else: "notification"
+
       Logger.warning(
-        "outbox_notification_terminal job=#{job.id} project=#{job.project_id} attempts=#{job.attempts} reason=#{inspect(reason, limit: 8)}"
+        "outbox_#{category}_terminal job=#{job.id} project=#{job.project_id} attempts=#{job.attempts} reason=#{inspect(reason, limit: 8)}"
       )
+
+      prefix = if cleanup?(job), do: "cleanup_terminal:", else: "notification_terminal:"
 
       with_project(job.project_id, fn ->
         owned(job)
@@ -458,8 +474,7 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
             token: nil,
             lease_until: 0,
             completed_at_ms: System.system_time(:millisecond),
-            last_error:
-              "notification_terminal:" <> inspect(reason, limit: 8, printable_limit: 160)
+            last_error: prefix <> inspect(reason, limit: 8, printable_limit: 160)
           ]
         )
       end)
@@ -478,7 +493,7 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
     delay = min(60 * Integer.pow(2, min(job.attempts - 1, 6)), 3600)
 
     delay =
-      if match?({:worker_exit, _}, reason) or job.kind in ["notice", "projection"],
+      if match?({:worker_exit, _}, reason) or notification?(job) or cleanup?(job),
         do: max(delay, 300),
         else: delay
 

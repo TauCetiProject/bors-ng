@@ -308,6 +308,29 @@ defmodule BorsNG.GitHub.ServerMock do
     end
   end
 
+  def do_handle_call(:cleanup_policy, conn, {commit}, state) do
+    case do_handle_call(:get_file, conn, {commit, "bors.toml"}, state) do
+      {{:ok, nil}, state} -> do_handle_call(:get_file, conn, {commit, ".github/bors.toml"}, state)
+      result -> result
+    end
+  end
+
+  def do_handle_call(:close_merged_pr, _conn, _params, %{close_pr_status: status} = state),
+    do: {{:error, :close_merged_pr, status}, Map.delete(state, :close_pr_status)}
+
+  def do_handle_call(:close_merged_pr, conn, {number, title}, state) do
+    case do_handle_call(:get_pr, conn, {number}, state) do
+      {{:ok, pr}, state} ->
+        case do_handle_call(:update_pr, conn, %{pr | state: :closed, title: title}, state) do
+          {{:ok, _}, state} -> {:ok, state}
+          other -> other
+        end
+
+      {error, state} ->
+        {error, state}
+    end
+  end
+
   def do_handle_call(:update_pr, repo_conn, pr, state) do
     with {:ok, repo} <- Map.fetch(state, repo_conn),
          {:ok, pulls} <- Map.fetch(repo, :pulls) do

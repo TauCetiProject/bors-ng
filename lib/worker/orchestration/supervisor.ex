@@ -6,6 +6,10 @@ defmodule BorsNG.Worker.Orchestration.Supervisor do
     Supervisor.init(
       [
         {BorsNG.GitHub.Advisory, []},
+        Supervisor.child_spec(
+          {BorsNG.GitHub.Advisory, [name: BorsNG.GitHub.Cleanup]},
+          id: BorsNG.GitHub.Cleanup
+        ),
         {Registry, keys: :unique, name: BorsNG.Worker.Orchestration.Registry},
         {DynamicSupervisor, strategy: :one_for_one, name: BorsNG.Worker.Orchestration.Workers},
         {BorsNG.Worker.Orchestration.Dispatcher, []}

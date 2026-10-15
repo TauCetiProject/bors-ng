@@ -107,6 +107,7 @@ defmodule BorsNG.Worker.Orchestration.Worker do
       catch
         :throw, :withdrawal_pending -> {:defer, :withdrawal_pending}
         :throw, {:notification_terminal, status} -> {:terminal, {:http_status, status}}
+        :throw, {:cleanup_terminal, reason} -> {:terminal, reason}
         :throw, :comment_lookup_truncated -> {:terminal, :comment_lookup_truncated}
         kind, reason when is_atom(reason) -> {:error, {kind, reason}}
         kind, _reason -> {:error, kind}

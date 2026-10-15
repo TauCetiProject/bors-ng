@@ -296,4 +296,25 @@ defmodule BorsNG.OrchestrationHttpTest do
 
     assert System.monotonic_time(:millisecond) - started < 800
   end
+
+  test "bounded post-merge close changes only title and state" do
+    assert {:reply, :ok, %{}} =
+             response(200, %{}, fn ->
+               advisory(:close_merged_pr, {1, "[Merged by Bors] - Title"})
+             end)
+
+    assert_receive {:request, request}
+    assert request =~ "PATCH /repositories/14/pulls/1 "
+    [_headers, body] = String.split(request, "\r\n\r\n", parts: 2)
+    assert Jason.decode!(body) == %{"state" => "closed", "title" => "[Merged by Bors] - Title"}
+  end
+
+  test "expired shared cleanup deadline cannot start a late close" do
+    deadline = System.monotonic_time(:millisecond) - 1
+    conn = {{:raw, "test-token"}, 14}
+    assert {:error, :cleanup_deadline} == BorsNG.GitHub.get_pr_bounded(conn, 1, deadline)
+
+    assert {:error, :cleanup_deadline} ==
+             BorsNG.GitHub.close_pr_bounded(conn, 1, "Title", deadline)
+  end
 end
