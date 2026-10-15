@@ -36,7 +36,10 @@ relabelled fresh across main commits. Bump the policy/cache version when changin
 the parser semantics. Helper limits: 8 seconds for ordinary background turns, 30 seconds
 for selected-head admission, 32 selected heads, 4 MiB
 per inventory/batch read, 256 KiB per source, existing 2 GiB mirror budget and
-root flock. An empty mirror may use the existing 30-second allowance once per
+root flock. Previous exact Git pins remain until the next fetch succeeds, so
+Git can reuse the downloaded history during negotiation. Only then are the old
+pins atomically replaced with the verified new inputs; a failed fetch preserves
+them. An empty mirror may use the existing 30-second allowance once per
 object generation to complete its initial fetch; a consumed marker prevents a
 failed download from claiming it again for another PR/main revision. Later
 background checks stay at eight seconds. If that bootstrap fails, background

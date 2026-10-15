@@ -72,5 +72,40 @@
         ]
       }
     }
+  },
+  "warm_mirror_new_head": {
+    "pr": 16964,
+    "head_sha": "de02ef79d49f8a63b82ecf6a583769197e33f773",
+    "before": {
+      "wall": 8.001978643005714,
+      "result": {
+        "status": "error",
+        "details": {
+          "kind": "timeout",
+          "operation": "fetch",
+          "phase": "fetch"
+        }
+      }
+    },
+    "after": {
+      "wall": 1.1944737710000481,
+      "result": {
+        "status": "ok",
+        "results": [
+          {
+            "pr": 16964,
+            "head_sha": "de02ef79d49f8a63b82ecf6a583769197e33f773",
+            "base_sha": "31cef0a59993a80eaa430d219c38f4907746cd1e",
+            "policy": "local-source-v3",
+            "status": "pass",
+            "tree": "84593c7499e9ac0c5df95abff19930d0918ea0f8",
+            "missing_imports": [],
+            "coverage": "all_project_local_headers"
+          }
+        ]
+      }
+    },
+    "before_fetch_seconds": 7.9838,
+    "after_fetch_seconds": 0.3941
   }
 }

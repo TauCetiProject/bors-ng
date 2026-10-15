@@ -136,6 +136,39 @@ class LocalGitTest(unittest.TestCase):
         self.assertEqual(foreground.run()['results'][0]['status'], 'pass')
         self.assertAlmostEqual(foreground.deadline - foreground.started, 5, places=6)
 
+    def test_fetch_keeps_negotiation_tips_and_failure_preserves_previous_pins(self):
+        one = self.commit(self.base, {'TauCeti/One.lean': 'def one := 1'})
+        two = self.commit(self.base, {'TauCeti/Two.lean': 'def two := 2'})
+        self.compatibility(self.base, one)
+        request = self.request | dict(operation='compatibility', base_sha=self.base,
+                                      members=[dict(pr=2, head_sha=two)])
+        observed = []
+
+        class ObserveFetch(TestMirror):
+            fail = True
+            def git(self, *args, **kwargs):
+                if args[0] == 'fetch':
+                    refs = super().git('for-each-ref', '--format=%(objectname)', 'refs/bors/')[0]
+                    observed.append(set(refs.splitlines()))
+                    if self.fail:
+                        raise local.Failure('timeout', operation='fetch')
+                return super().git(*args, **kwargs)
+
+        failed = ObserveFetch(request, self.upstream)
+        with self.assertRaises(local.Failure):
+            failed.run()
+        self.assertEqual(observed, [{self.base, one}])
+        retained = subprocess.check_output(['git', '--git-dir=' + str(failed.repo),
+            'for-each-ref', '--format=%(objectname)', 'refs/bors/'], text=True)
+        self.assertEqual(set(retained.splitlines()), {self.base, one})
+        good = ObserveFetch(request, self.upstream)
+        good.fail = False
+        self.assertEqual(good.run()['results'][0]['status'], 'pass')
+        self.assertEqual(observed[-1], {self.base, one})
+        refs = subprocess.check_output(['git', '--git-dir=' + str(good.repo),
+            'for-each-ref', '--format=%(objectname)', 'refs/bors/'], text=True)
+        self.assertEqual(set(refs.splitlines()), {self.base, two})
+
     def test_exact_commit_inputs_do_not_accept_an_annotated_tag_object(self):
         git(self.upstream, 'tag', '-a', 'tagged', '-m', 'not the requested commit', self.base)
         tag = git(self.upstream, 'rev-parse', 'tagged')

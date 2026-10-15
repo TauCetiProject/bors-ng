@@ -127,12 +127,12 @@ class Mirror:
             (self.repo / 'gc.pid').unlink(missing_ok=True)
         if not self.repo.exists():
             self.git('init', '--bare', '--template=')
-        # Pin only the current inputs/result. Earlier attempt refs are disposable
-        # and no remote-tracking branches or reflogs accumulate.
+        # Keep the previous exact pins until the next fetch completes. Git
+        # advertises these commits as HAVE tips; deleting them before fetch
+        # makes a warm mirror download the entire reachable history again.
+        # fetch() atomically replaces them only after verifying all new inputs.
         refs, _ = self.git('for-each-ref', '--format=%(refname)', 'refs/bors/')
-        if refs:
-            self.git('update-ref', '--stdin',
-                     input=''.join('delete ' + ref + '\n' for ref in refs.splitlines()))
+        self.previous_refs = refs.splitlines()
         # Synchronous GC under the same lock, never a detached background writer.
         if size(self.repo) > self.budget // 2:
             self.git('gc', '--prune=now')
@@ -168,9 +168,10 @@ class Mirror:
         # Pin all exact inputs in one atomic transaction. Checking each SHA and
         # deleting/updating each ref in a separate process dominates tiny turns
         # on the production container. The batch check above rejects missing/non-commit inputs.
+        targets = {'refs/bors/input/' + str(index): sha for index, sha in enumerate(shas)}
         self.git('update-ref', '--stdin',
-                 input=''.join('update refs/bors/input/' + str(index) + ' ' + sha + '\n'
-                               for index, sha in enumerate(shas)))
+                 input=''.join('delete ' + ref + '\n' for ref in self.previous_refs if ref not in targets)
+                       + ''.join('update ' + ref + ' ' + sha + '\n' for ref, sha in targets.items()))
         self.enforce_budget()
 
     def assemble(self):
