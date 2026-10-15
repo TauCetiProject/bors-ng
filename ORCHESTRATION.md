@@ -305,3 +305,10 @@ validation and publication. Metadata includes job/project/batch IDs and a fixed
 phase name, with monotonic service time; it carries no tokens or status payloads.
 Statistics never decide candidate validity. Separate notification kinds when
 comparing merge-lane ready wait and service distributions.
+
+Durable payload decoding preloads the trusted Batcher and CandidateAssembler
+module literals before `binary_to_term(..., [:safe])`. A cold VM can claim a
+continuation or publisher before its producer has run; safe decoding must not
+mistake that known atom for an untrusted stored symbol. Unknown atoms remain
+rejected and are never interned from queue data. This is module loading only;
+leases, identities, command order and candidate validation still apply normally.
