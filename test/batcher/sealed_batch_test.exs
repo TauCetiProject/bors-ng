@@ -71,7 +71,10 @@ defmodule BorsNG.Worker.SealedBatchTest do
     )
 
     Batcher.handle_cast({:reviewed, patch(project, 3).id, "r3"}, project.id)
-    assert Enum.map(Repo.all(LinkPatchBatch.from_batch(normal.id)), & &1.patch.pr_xref) == [2, 3]
+
+    assert Enum.sort(Enum.map(Repo.all(LinkPatchBatch.from_batch(normal.id)), & &1.patch.pr_xref)) ==
+             [2, 3]
+
     [retained] = Repo.all(LinkPatchBatch.from_batch(retry.id))
     assert retained.head_sha == "h1"
     assert retained.manual_approval == p.manual_approval
@@ -102,7 +105,7 @@ defmodule BorsNG.Worker.SealedBatchTest do
     [normal] = Repo.all(Batch.all_for_patch(p2.id, :incomplete))
     refute normal.sealed
 
-    assert Enum.map(Repo.all(LinkPatchBatch.from_batch(normal.id)), & &1.patch_id) == [
+    assert Enum.sort(Enum.map(Repo.all(LinkPatchBatch.from_batch(normal.id)), & &1.patch_id)) == [
              p2.id,
              p3.id
            ]
