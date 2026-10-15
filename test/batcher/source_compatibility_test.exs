@@ -310,16 +310,16 @@ defmodule BorsNG.Worker.SourceCompatibilityTest do
     end
 
     SourceCompatibility.chunk(c.project.id, checker)
-    assert_receive {:checked, [1, 2, 3, 4]}
+    assert_receive {:checked, [1]}
     cursor = Repo.get!(Project, c.project.id).source_compatibility["cursor"]
-    assert cursor == Repo.get_by!(Patch, project_id: c.project.id, pr_xref: 4).id
+    assert cursor == Repo.get_by!(Patch, project_id: c.project.id, pr_xref: 1).id
     new_main = String.duplicate("c", 40)
     update_mock(:branches, %{"main" => new_main})
     SourceCompatibility.wake(c.project, new_main)
     SourceCompatibility.chunk(c.project.id, checker)
-    assert_receive {:checked, [5, 6, 1, 2]}
+    assert_receive {:checked, [2]}
 
-    assert Repo.get_by!(Patch, project_id: c.project.id, pr_xref: 5).source_compatibility[
+    assert Repo.get_by!(Patch, project_id: c.project.id, pr_xref: 2).source_compatibility[
              "base_sha"
            ] == new_main
 
@@ -340,11 +340,59 @@ defmodule BorsNG.Worker.SourceCompatibilityTest do
     SourceCompatibility.chunk(c.project.id, checker)
     assert Repo.aggregate(OrchestrationJob |> where([j], j.kind == "notice"), :count, :id) == 0
 
-    assert Repo.get_by!(Patch, project_id: c.project.id, pr_xref: 3).source_compatibility[
-             "base_sha"
-           ] == @base
+    assert Repo.get_by!(Patch, project_id: c.project.id, pr_xref: 3).source_compatibility == nil
 
     assert Repo.get!(Project, c.project.id).source_compatibility["cursor"] != cursor
+  end
+
+  test "exact decoded identities skip fresh rows and bound metadata traversal", c do
+    for n <- 3..20 do
+      Repo.insert!(%Patch{
+        project_id: c.project.id,
+        pr_xref: n,
+        commit: @head,
+        into_branch: "main",
+        queue_pending: true
+      })
+    end
+
+    for patch <- Repo.all(from(p in Patch, where: p.project_id == ^c.project.id)) do
+      if patch.pr_xref != 17,
+        do:
+          patch
+          |> Ecto.Changeset.change(source_compatibility: result(patch.pr_xref, "pass"))
+          |> Repo.update!()
+    end
+
+    SourceCompatibility.chunk(c.project.id, fn _, _, _, _ ->
+      flunk("the first 16 metadata rows all have exact cached coverage")
+    end)
+
+    project = Repo.get!(Project, c.project.id)
+
+    assert project.source_compatibility["cursor"] ==
+             Repo.get_by!(Patch, project_id: c.project.id, pr_xref: 16).id
+
+    project
+    |> Ecto.Changeset.change(
+      source_compatibility: Map.put(project.source_compatibility, "checked_at", 0)
+    )
+    |> Repo.update!()
+
+    update_mock(:pulls, %{
+      17 => %GitHub.Pr{number: 17, state: :open, base_ref: "main", head_sha: @head}
+    })
+
+    SourceCompatibility.chunk(c.project.id, fn _, _, _, members ->
+      assert [%{pr: 17}] = members
+      %{"status" => "ok", "results" => [result(17, "pass")]}
+    end)
+
+    assert Repo.get_by!(Patch, project_id: c.project.id, pr_xref: 17).source_compatibility[
+             "status"
+           ] == "pass"
+
+    assert Repo.aggregate(OrchestrationJob, :count, :id) == 0
   end
 
   test "restored source on a new main retires only the local-source request without a push", c do

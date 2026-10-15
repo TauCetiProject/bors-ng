@@ -38,7 +38,10 @@ root flock. It executes no candidate code and writes no remote refs.
 Successful promotion wakes one deduplicated existing project Outbox operation.
 The existing heartbeat recovers missed/out-of-band main advances (five-minute
 main reconciliation; bounded backlog chunks progress approximately once/minute).
-Four queued/ready heads per chunk use a durable rotating project cursor. Repeated
+One queued/ready head per turn uses a durable rotating project cursor, inspecting
+at most 16 lightweight metadata rows before yielding. Stored identities are
+compared as decoded values, avoiding JSON string quoting/collation differences
+between PostgreSQL and MySQL 8.4. Repeated
 notifications coalesce; latest actual main is read by the executor. Main moving
 mid-check discards results while retaining cursor progress and a follow-up.
 Background chunks use the existing ordinary priority class; dispatch/promotion
