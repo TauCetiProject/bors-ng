@@ -126,15 +126,15 @@ class LocalGitTest(unittest.TestCase):
                                       members=[dict(pr=1, head_sha=self.base)])
         first = TestMirror(request, self.upstream)
         self.assertEqual(first.run()['results'][0]['status'], 'pass')
-        self.assertEqual(first.deadline - first.started, 30)
+        self.assertAlmostEqual(first.deadline - first.started, 30, places=6)
         self.assertFalse((first.repo / 'bors-source-bootstrap-v1').exists())
         next_head = self.commit(self.base, {'TauCeti/New.lean': 'def newValue := 1'})
         warm = TestMirror(request | dict(members=[dict(pr=1, head_sha=next_head)]), self.upstream)
         self.assertEqual(warm.run()['results'][0]['status'], 'pass')
-        self.assertEqual(warm.deadline - warm.started, 8)
+        self.assertAlmostEqual(warm.deadline - warm.started, 8, places=6)
         foreground = TestMirror(request | dict(timeout=5, bootstrap_timeout=0, root=str(self.root / 'other')), self.upstream)
         self.assertEqual(foreground.run()['results'][0]['status'], 'pass')
-        self.assertEqual(foreground.deadline - foreground.started, 5)
+        self.assertAlmostEqual(foreground.deadline - foreground.started, 5, places=6)
 
     def test_exact_commit_inputs_do_not_accept_an_annotated_tag_object(self):
         git(self.upstream, 'tag', '-a', 'tagged', '-m', 'not the requested commit', self.base)
@@ -158,12 +158,12 @@ class LocalGitTest(unittest.TestCase):
         first = FailedFetch(request, self.upstream)
         with self.assertRaises(local.Failure):
             first.run()
-        self.assertEqual(first.deadline - first.started, 30)
+        self.assertAlmostEqual(first.deadline - first.started, 30, places=6)
         again = FailedFetch(request | dict(members=[dict(pr=2, head_sha=self.base)]), self.upstream)
         with self.assertRaises(local.Failure) as error:
             again.run()
         self.assertEqual(error.exception.details['kind'], 'cold_mirror_unavailable')
-        self.assertEqual(again.deadline - again.started, 8)
+        self.assertAlmostEqual(again.deadline - again.started, 8, places=6)
 
     def test_header_batches_bound_bytes_without_one_process_per_twelve_files(self):
         from unittest.mock import patch
