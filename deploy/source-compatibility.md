@@ -28,13 +28,29 @@ all build/audit/policy/pin/size guards remain mandatory. External Mathlib invent
 import cycles and declaration-name grep conviction are out of scope.
 
 Parsed headers are reused only by immutable Git blob plus `local-source-v2`
-checker policy. Each new base still inventories the exact main and prospective
+header-parser policy. Scheduling results use `local-source-v3`, so old timeout
+results are revisited lazily with the existing fair cursor after this rollout.
+The parser/cache itself is unchanged. Each new base still inventories the exact main and prospective
 trees; passing results are keyed to full main/head/policy identity and never
 relabelled fresh across main commits. Bump the policy/cache version when changing
-the parser semantics. Helper limits: 8 seconds for background turns, 30 seconds
+the parser semantics. Helper limits: 8 seconds for ordinary background turns, 30 seconds
 for selected-head admission, 32 selected heads, 4 MiB
 per inventory/batch read, 256 KiB per source, existing 2 GiB mirror budget and
-root flock. It executes no candidate code and writes no remote refs.
+root flock. Previous exact Git pins remain until the next fetch succeeds, so
+Git can reuse the downloaded history during negotiation. Only then are the old
+pins atomically replaced with the verified new inputs; a failed fetch preserves
+them. An empty mirror may use the existing 30-second allowance once per
+object generation to complete its initial fetch; a consumed marker prevents a
+failed download from claiming it again for another PR/main revision. Later
+background checks stay at eight seconds. If that bootstrap fails, background
+reports explicit unknown without repeating the cold fetch until ordinary
+admission/assembly seeds the mirror or the mirror is recreated. A successful
+fetch resets the marker for a future object generation emptied by GC/eviction.
+The deadline starts at helper construction; Python startup and final cleanup add
+overhead. Git-header reads are bounded by listed source byte lengths (1 MiB/512
+objects per batch). Timeout evidence retains phase/operation and a preceding
+base-header failure, without raw Git diagnostics. It executes no candidate code
+and writes no remote refs.
 
 Successful promotion wakes one deduplicated existing project Outbox operation.
 The existing heartbeat recovers missed/out-of-band main advances (five-minute

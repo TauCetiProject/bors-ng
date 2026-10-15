@@ -94,7 +94,7 @@ class LocalGitTest(unittest.TestCase):
 
     def test_partial_inventory_caches_only_parsed_blobs_without_passing(self):
         from unittest.mock import patch
-        head = self.commit(self.base, {f'TauCeti/F{i}.lean': f'def value{i} := {i}\n'
+        head = self.commit(self.base, {f'TauCeti/F{i}.lean': f'def value{i} := {i}\n' + ' ' * (96 * 1024)
                                       for i in range(15)})
         request = self.request | dict(operation='compatibility', base_sha=head,
                                       members=[dict(pr=1, head_sha=head)])
@@ -113,13 +113,112 @@ class LocalGitTest(unittest.TestCase):
         result = interrupted.run()['results'][0]
         self.assertEqual(result['status'], 'unknown')
         cache = interrupted.repo / 'bors-headers-local-source-v2.json'
-        self.assertEqual(len(json.loads(cache.read_text())), 12)
+        self.assertEqual(len(json.loads(cache.read_text())), 10)
 
         with patch.object(local, 'compatibility_imports', wraps=local.compatibility_imports) as parse:
             complete = TestMirror(request, self.upstream).run()['results'][0]
             self.assertEqual(complete['status'], 'pass')
-            self.assertEqual(parse.call_count, 3)
+            self.assertEqual(parse.call_count, 5)
         self.assertEqual(len(json.loads(cache.read_text())), 15)
+
+    def test_only_empty_background_mirror_gets_existing_thirty_second_bootstrap(self):
+        request = self.request | dict(operation='compatibility', timeout=8, bootstrap_timeout=30, base_sha=self.base,
+                                      members=[dict(pr=1, head_sha=self.base)])
+        first = TestMirror(request, self.upstream)
+        self.assertEqual(first.run()['results'][0]['status'], 'pass')
+        self.assertAlmostEqual(first.deadline - first.started, 30, places=6)
+        self.assertFalse((first.repo / 'bors-source-bootstrap-v1').exists())
+        next_head = self.commit(self.base, {'TauCeti/New.lean': 'def newValue := 1'})
+        warm = TestMirror(request | dict(members=[dict(pr=1, head_sha=next_head)]), self.upstream)
+        self.assertEqual(warm.run()['results'][0]['status'], 'pass')
+        self.assertAlmostEqual(warm.deadline - warm.started, 8, places=6)
+        foreground = TestMirror(request | dict(timeout=5, bootstrap_timeout=0, root=str(self.root / 'other')), self.upstream)
+        self.assertEqual(foreground.run()['results'][0]['status'], 'pass')
+        self.assertAlmostEqual(foreground.deadline - foreground.started, 5, places=6)
+
+    def test_fetch_keeps_negotiation_tips_and_failure_preserves_previous_pins(self):
+        one = self.commit(self.base, {'TauCeti/One.lean': 'def one := 1'})
+        two = self.commit(self.base, {'TauCeti/Two.lean': 'def two := 2'})
+        self.compatibility(self.base, one)
+        request = self.request | dict(operation='compatibility', base_sha=self.base,
+                                      members=[dict(pr=2, head_sha=two)])
+        observed = []
+
+        class ObserveFetch(TestMirror):
+            fail = True
+            def git(self, *args, **kwargs):
+                if args[0] == 'fetch':
+                    refs = super().git('for-each-ref', '--format=%(objectname)', 'refs/bors/')[0]
+                    observed.append(set(refs.splitlines()))
+                    if self.fail:
+                        raise local.Failure('timeout', operation='fetch')
+                return super().git(*args, **kwargs)
+
+        failed = ObserveFetch(request, self.upstream)
+        with self.assertRaises(local.Failure):
+            failed.run()
+        self.assertEqual(observed, [{self.base, one}])
+        retained = subprocess.check_output(['git', '--git-dir=' + str(failed.repo),
+            'for-each-ref', '--format=%(objectname)', 'refs/bors/'], text=True)
+        self.assertEqual(set(retained.splitlines()), {self.base, one})
+        good = ObserveFetch(request, self.upstream)
+        good.fail = False
+        self.assertEqual(good.run()['results'][0]['status'], 'pass')
+        self.assertEqual(observed[-1], {self.base, one})
+        refs = subprocess.check_output(['git', '--git-dir=' + str(good.repo),
+            'for-each-ref', '--format=%(objectname)', 'refs/bors/'], text=True)
+        self.assertEqual(set(refs.splitlines()), {self.base, two})
+
+    def test_exact_commit_inputs_do_not_accept_an_annotated_tag_object(self):
+        git(self.upstream, 'tag', '-a', 'tagged', '-m', 'not the requested commit', self.base)
+        tag = git(self.upstream, 'rev-parse', 'tagged')
+        request = self.request | dict(operation='compatibility', base_sha=self.base,
+                                      members=[dict(pr=1, head_sha=tag)])
+        with self.assertRaises(local.Failure) as error:
+            TestMirror(request, self.upstream).run()
+        self.assertEqual(error.exception.details['kind'], 'missing_commit')
+
+    def test_failed_bootstrap_is_not_repeated_for_another_pr_on_the_same_empty_mirror(self):
+        request = self.request | dict(operation='compatibility', timeout=8, bootstrap_timeout=30, base_sha=self.base,
+                                      members=[dict(pr=1, head_sha=self.base)])
+
+        class FailedFetch(TestMirror):
+            def git(self, *args, **kwargs):
+                if args[0] == 'fetch':
+                    raise local.Failure('timeout', operation='fetch')
+                return super().git(*args, **kwargs)
+
+        first = FailedFetch(request, self.upstream)
+        with self.assertRaises(local.Failure):
+            first.run()
+        self.assertAlmostEqual(first.deadline - first.started, 30, places=6)
+        again = FailedFetch(request | dict(members=[dict(pr=2, head_sha=self.base)]), self.upstream)
+        with self.assertRaises(local.Failure) as error:
+            again.run()
+        self.assertEqual(error.exception.details['kind'], 'cold_mirror_unavailable')
+        self.assertAlmostEqual(again.deadline - again.started, 8, places=6)
+
+    def test_header_batches_bound_bytes_without_one_process_per_twelve_files(self):
+        from unittest.mock import patch
+        head = self.commit(self.base, {f'TauCeti/F{i}.lean': f'def value{i} := {i}\n'
+                                      for i in range(1200)})
+        request = self.request | dict(operation='compatibility', base_sha=head,
+                                      members=[dict(pr=1, head_sha=head)])
+        mirror = TestMirror(request, self.upstream)
+        with patch.object(mirror, 'git', wraps=mirror.git) as calls:
+            result = mirror.run()['results'][0]
+        self.assertEqual(result['status'], 'pass')
+        reads = [c for c in calls.call_args_list if c.args[:2] == ('cat-file', '--batch')]
+        self.assertEqual(len(reads), 3)
+        self.assertTrue(all(len(c.kwargs['input'].splitlines()) <= 512 for c in reads))
+
+    def test_timeout_keeps_bounded_phase_and_operation_without_git_diagnostics(self):
+        mirror = local.Mirror(self.request | dict(operation='compatibility', base_sha=self.base))
+        mirror.deadline = 0
+        with self.assertRaises(local.Failure) as failure:
+            mirror.run()
+        self.assertEqual(failure.exception.details,
+                         dict(kind='timeout', operation='init', phase='initialize'))
 
     def test_compatibility_individual_conflicts_and_unknown(self):
         main = self.commit(self.base, {'file': 'main\n'})

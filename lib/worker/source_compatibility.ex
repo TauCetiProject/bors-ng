@@ -5,7 +5,7 @@ defmodule BorsNG.Worker.SourceCompatibility do
   alias BorsNG.GitHub
   alias BorsNG.Worker.{Batcher, LocalGit}
   alias BorsNG.Worker.Orchestration.Outbox
-  @policy "local-source-v2"
+  @policy "local-source-v3"
   @keep ~w(keep hold wip human do-not-close)
 
   def enabled?, do: System.get_env("BORS_SOURCE_COMPATIBILITY", "on") != "off"
@@ -34,7 +34,7 @@ defmodule BorsNG.Worker.SourceCompatibility do
 
   def wake(_, _), do: :ok
 
-  def chunk(project_id, checker \\ &LocalGit.compatibility(&1, &2, &3, &4, 8)) do
+  def chunk(project_id, checker \\ &LocalGit.compatibility(&1, &2, &3, &4, 8, 30)) do
     project = Repo.get!(Project, project_id)
     conn = Project.installation_connection(project.repo_xref, Repo)
     previous = project.source_compatibility || %{}
@@ -216,7 +216,7 @@ defmodule BorsNG.Worker.SourceCompatibility do
           reason =
             case failure do
               %{"details" => %{"kind" => kind}}
-              when kind in ~w(timeout lock_timeout git_failed mirror_limit output_limit helper_failed helper_or_auth_failed helper_unavailable) ->
+              when kind in ~w(timeout lock_timeout git_failed mirror_limit output_limit helper_failed helper_or_auth_failed helper_unavailable missing_commit cold_mirror_unavailable) ->
                 "source_helper_" <> kind
 
               _ ->
@@ -233,6 +233,27 @@ defmodule BorsNG.Worker.SourceCompatibility do
                 "status" => "unknown",
                 "reason" => reason
               }
+            end)
+
+          details =
+            case failure do
+              %{"details" => details} when is_map(details) -> details
+              _ -> %{}
+            end
+
+          phase = details["phase"]
+          operation = details["operation"]
+
+          results =
+            Enum.map(results, fn result ->
+              result =
+                if phase in ~w(lock initialize fetch base_headers merge_tree candidate_headers),
+                  do: Map.put(result, "phase", phase),
+                  else: result
+
+              if operation in ~w(init for-each-ref update-ref gc cat-file count-objects fetch ls-tree merge-tree),
+                do: Map.put(result, "operation", operation),
+                else: result
             end)
 
           apply_results(project, conn, base, pending, results)
@@ -331,7 +352,10 @@ defmodule BorsNG.Worker.SourceCompatibility do
 
         if result["head_sha"] == link.head_sha and
              result["base_sha"] == candidate.snapshot["base_sha"] and result["policy"] == @policy do
-          Map.take(result, ~w(pr head_sha base_sha policy status reason coverage))
+          Map.take(
+            result,
+            ~w(pr head_sha base_sha policy status reason coverage phase operation base_headers_reason base_headers_operation)
+          )
         else
           %{
             "pr" => patch.pr_xref,
