@@ -20,6 +20,8 @@ import time
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 OUTPUT_LIMIT = 1024 * 1024
+ASSEMBLY_MEMBER_LIMIT = 128
+COMPATIBILITY_MEMBER_LIMIT = 32
 
 
 class Failure(Exception):
@@ -531,8 +533,10 @@ def validate(request):
     if request['operation'] in ['assemble', 'compatibility']:
         if not request['members']:
             raise Failure('empty_members')
-        if len(request['members']) > 32:
-            raise Failure('member_limit')
+        limit = (ASSEMBLY_MEMBER_LIMIT if request['operation'] == 'assemble'
+                 else COMPATIBILITY_MEMBER_LIMIT)
+        if len(request['members']) > limit:
+            raise Failure('member_limit', max_members=limit, members=len(request['members']))
         base = request['base_sha'] if request['operation'] == 'compatibility' else request['identity']['base_sha']
         shas = [base] + [m['head_sha'] for m in request['members']]
     else:

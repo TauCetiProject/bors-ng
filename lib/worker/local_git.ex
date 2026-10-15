@@ -17,6 +17,14 @@ defmodule BorsNG.Worker.LocalGit do
     end
   end
 
+  # Keep aligned with priv/local_git.py; compatibility has its own smaller bound.
+  @member_limit 128
+  def capacity(members) do
+    if length(members) <= @member_limit,
+      do: :ok,
+      else: {:error, %{"kind" => "member_limit", "max_members" => @member_limit}}
+  end
+
   @impl true
   def assemble(candidate, context) do
     expected = candidate.snapshot["members"]
