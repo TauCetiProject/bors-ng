@@ -153,7 +153,8 @@ defmodule BorsNG.Worker.SourceCompatibility do
 
     r["projection_pending"] == true or r["base_sha"] != base or
       r["head_sha"] != patch.commit or r["policy"] != @policy or
-      (r["status"] in ["conflict", "missing_source"] and is_nil(r["repair_head"])) or
+      (r["status"] in ["conflict", "missing_source"] and is_nil(r["repair_head"]) and
+         r["hold_head"] != patch.commit) or
       (r["status"] == "pass" and not is_nil(r["repair_head"]) and r["repair_base"] != base)
   end
 
@@ -174,18 +175,28 @@ defmodule BorsNG.Worker.SourceCompatibility do
          do: project_request(conn, patch)
     end)
 
+    cached =
+      Enum.filter(patches, fn patch ->
+        r = patch.source_compatibility || %{}
+
+        r["base_sha"] == base and r["head_sha"] == patch.commit and r["policy"] == @policy and
+          ((r["status"] in ["conflict", "missing_source"] and r["hold_head"] == patch.commit) or
+             (r["status"] == "pass" and requested?(patch, patch.commit) and
+                r["repair_policy"] == @policy and r["repair_base"] != base))
+      end)
+
+    # Retry projections/marker resolution from exact cached evidence, not Git.
+    # apply_results still verifies live main/head/withdrawals before any action.
+    if cached != [],
+      do: apply_results(project, conn, base, cached, Enum.map(cached, & &1.source_compatibility))
+
     pending =
       Enum.reject(patches, fn patch ->
         r = patch.source_compatibility || %{}
 
-        resolving =
-          r["status"] == "pass" and requested?(patch, patch.commit) and
-            r["repair_policy"] == @policy and r["repair_base"] != base
-
         BorsNG.Worker.BumpRecovery.automatic?(patch) or
           (r["base_sha"] == base and r["head_sha"] == patch.commit and r["policy"] == @policy and
-             not resolving and
-             (r["status"] not in ["conflict", "missing_source"] or requested?(patch, patch.commit)))
+             (r["status"] not in ["conflict", "missing_source"] or blocked?(patch, patch.commit)))
       end)
 
     members = Enum.map(pending, &%{pr: &1.pr_xref, head_sha: &1.commit})
@@ -289,9 +300,20 @@ defmodule BorsNG.Worker.SourceCompatibility do
         if get_in(patch.queue_approval || %{}, ["reason"]) == "source_compatibility",
           do: patch |> Patch.changeset(%{merge_eligibility_id: nil}) |> Repo.update!()
 
-        Map.drop(result, ["repair_head", "repair_base", "repair_policy", "projection_pending"])
+        Map.drop(result, [
+          "repair_head",
+          "repair_base",
+          "repair_policy",
+          "projection_pending",
+          "action"
+        ])
       else
-        _ -> result
+        _ ->
+          Map.put(
+            result,
+            "action",
+            "source compatible; request resolution incomplete; author/maintainer attention required"
+          )
       end
     else
       result
@@ -331,6 +353,8 @@ defmodule BorsNG.Worker.SourceCompatibility do
     with {:ok, labels} <- GitHub.get_labels(conn, patch.pr_xref),
          true <- MapSet.disjoint?(MapSet.new(labels, &String.downcase/1), MapSet.new(@keep)),
          true <- is_nil(patch.bundle_id) do
+      result = Map.drop(result, ["hold_head", "action"])
+
       unless requested?(patch, patch.commit) do
         body = request(patch.commit, result)
         # Reuse durable notices, including crash/API-outage retry and dedup.

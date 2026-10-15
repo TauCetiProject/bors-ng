@@ -409,6 +409,67 @@ defmodule BorsNG.Worker.SourceCompatibilityTest do
     assert [%{state: "done"}] = Repo.all(OrchestrationJob)
   end
 
+  test "held evidence skips background Git and a released hold reuses the finding", c do
+    [patch, healthy] = c.patches
+    update_mock(:labels, %{1 => ["keep"], 2 => []})
+
+    SourceCompatibility.apply_results(c.project, @conn, @base, c.patches, [
+      result(1),
+      result(2, "pass")
+    ])
+
+    SourceCompatibility.chunk(c.project.id, fn _, _, _, _ ->
+      flunk("a held exact finding and healthy cached head need no source scan")
+    end)
+
+    current = Repo.get!(Patch, patch.id)
+
+    SourceCompatibility.check(c.project, @conn, @base, [current], fn _, _, _, _ ->
+      flunk("holding the diagnosed head must not repeat Git")
+    end)
+
+    assert Repo.aggregate(OrchestrationJob, :count, :id) == 0
+    update_mock(:labels, %{1 => [], 2 => []})
+
+    SourceCompatibility.check(c.project, @conn, @base, [Repo.get!(Patch, patch.id)], fn _,
+                                                                                        _,
+                                                                                        _,
+                                                                                        _ ->
+      flunk("releasing the hold must reuse the exact diagnosis")
+    end)
+
+    repaired = Repo.get!(Patch, patch.id)
+    assert SourceCompatibility.requested?(repaired, @head)
+    refute Map.has_key?(repaired.source_compatibility, "hold_head")
+    refute Map.has_key?(repaired.source_compatibility, "action")
+    assert Repo.aggregate(OrchestrationJob, :count, :id) == 1
+    refute SourceCompatibility.requested?(Repo.get!(Patch, healthy.id), @head)
+  end
+
+  test "incomplete request resolution retries from cached pass without rescanning source", c do
+    [patch | _] = c.patches
+    SourceCompatibility.apply_results(c.project, @conn, @base, [patch], [result(1)])
+    new_main = String.duplicate("d", 40)
+    update_mock(:branches, %{"main" => new_main})
+    update_mock(:resolve_source_request_error, :incomplete_request_history)
+    passing = Map.put(result(1, "pass"), "base_sha", new_main)
+    SourceCompatibility.apply_results(c.project, @conn, new_main, [patch], [passing])
+    current = Repo.get!(Patch, patch.id)
+    assert current.source_compatibility["action"] =~ "maintainer attention"
+    assert SourceCompatibility.requested?(current, @head)
+
+    checker = fn _, _, _, _ -> flunk("the exact passing inventory must be reused") end
+    SourceCompatibility.check(c.project, @conn, new_main, [current], checker)
+    assert SourceCompatibility.requested?(Repo.get!(Patch, patch.id), @head)
+
+    update_mock(:resolve_source_request_error, nil)
+    SourceCompatibility.check(c.project, @conn, new_main, [Repo.get!(Patch, patch.id)], checker)
+    resolved = Repo.get!(Patch, patch.id)
+    refute SourceCompatibility.requested?(resolved, @head)
+    refute Map.has_key?(resolved.source_compatibility, "action")
+    assert GitHub.get_labels(@conn, 1) == {:ok, []}
+  end
+
   test "partial label publication is retried without duplicating the request or source work", c do
     [patch | _] = c.patches
     SourceCompatibility.apply_results(c.project, @conn, @base, [patch], [result(1)])
