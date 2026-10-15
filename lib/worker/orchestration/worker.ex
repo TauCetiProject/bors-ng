@@ -24,6 +24,13 @@ defmodule BorsNG.Worker.Orchestration.Worker do
     end
   end
 
+  def init({:notification, project_id}) do
+    # Advisory work has its own serialized executor. It cannot run Batcher
+    # mutations; comments/statuses use one bounded API attempt per operation.
+    Process.put(:orchestration_notification, true)
+    {:ok, project_id}
+  end
+
   def init(project_id) do
     Process.put(:orchestration_executor, true)
     send(self(), :restore_rechecks)
@@ -34,6 +41,10 @@ defmodule BorsNG.Worker.Orchestration.Worker do
   def handle_info({:execute, dispatcher, job}, project_id) do
     Process.put(:orchestration_job, job)
     started = System.monotonic_time(:millisecond)
+
+    if Process.get(:orchestration_notification, false),
+      do: Process.put(:orchestration_advisory_deadline, started + 8_000)
+
     inserted = job.inserted_at |> DateTime.from_naive!("Etc/UTC") |> DateTime.to_unix()
 
     enqueued_at = job.enqueued_at_ms || inserted * 1000
@@ -60,6 +71,9 @@ defmodule BorsNG.Worker.Orchestration.Worker do
 
     result =
       try do
+        if Process.get(:orchestration_notification, false) and not Outbox.notification?(job),
+          do: throw(:wrong_notification_lane)
+
         if Outbox.owned?(job) do
           case {job.kind, Outbox.payload(job)} do
             {kind, args} when kind in ["cast", "cancel", "cancel_all"] ->
@@ -77,6 +91,11 @@ defmodule BorsNG.Worker.Orchestration.Worker do
             {"compatibility", _} ->
               BorsNG.Worker.SourceCompatibility.chunk(project_id)
 
+            {"projection", payload} ->
+              if Process.get(:orchestration_notification, false),
+                do: BorsNG.Worker.Orchestration.Projections.deliver(payload),
+                else: throw(:wrong_projection_lane)
+
             {"notice", {conn, pr, body, marker}} ->
               deliver_notice(job, conn, pr, body, marker)
           end
@@ -87,6 +106,8 @@ defmodule BorsNG.Worker.Orchestration.Worker do
         error -> {:error, error.__struct__}
       catch
         :throw, :withdrawal_pending -> {:defer, :withdrawal_pending}
+        :throw, {:notification_terminal, status} -> {:terminal, {:http_status, status}}
+        :throw, :comment_lookup_truncated -> {:terminal, :comment_lookup_truncated}
         kind, reason when is_atom(reason) -> {:error, {kind, reason}}
         kind, _reason -> {:error, kind}
       end
@@ -121,12 +142,15 @@ defmodule BorsNG.Worker.Orchestration.Worker do
 
     send(killer, :done)
     Process.delete(:orchestration_job)
+    Process.delete(:orchestration_advisory_deadline)
     send(dispatcher, {:finished, self(), job, result})
     {:noreply, project_id}
   end
 
   def handle_info(args, project_id) do
-    Outbox.enqueue(project_id, "info", args, timer_key(project_id, args))
+    unless Process.get(:orchestration_notification, false),
+      do: Outbox.enqueue(project_id, "info", args, timer_key(project_id, args))
+
     {:noreply, project_id}
   end
 

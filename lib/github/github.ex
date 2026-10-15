@@ -484,19 +484,11 @@ defmodule BorsNG.GitHub do
   end
 
   def post_comment_once(conn, number, body) do
-    GenServer.call(
-      BorsNG.GitHub,
-      {:post_comment, conn, {number, body}},
-      Confex.fetch_env!(:bors, :api_github_timeout)
-    )
+    advisory_call(:post_comment, conn, {number, body})
   end
 
   def notice_comments_since(conn, number, since) do
-    GenServer.call(
-      BorsNG.GitHub,
-      {:notice_comments_since, conn, {number, since}},
-      Confex.fetch_env!(:bors, :api_github_timeout)
-    )
+    advisory_call(:notice_comments_since, conn, {number, since})
   end
 
   @spec post_comment!(tconn, number, binary) :: :ok
@@ -514,6 +506,38 @@ defmodule BorsNG.GitHub do
   def post_commit_status(repo_conn, {sha, status, msg, url}) do
     call_with_retry(:post_commit_status, repo_conn, {sha, status, msg, url}, 500, 4_000)
   end
+
+  defp advisory_call(type, conn, data) do
+    timeout = Confex.fetch_env!(:bors, :api_github_timeout)
+
+    if Process.get(:orchestration_notification, false) do
+      now = System.monotonic_time(:millisecond)
+      deadline = min(Process.get(:orchestration_advisory_deadline, now + 8_000), now + timeout)
+      if deadline <= now, do: throw(:advisory_expired)
+
+      response =
+        GenServer.call(
+          BorsNG.GitHub.Advisory,
+          {:advisory, type, conn, data, deadline},
+          min(timeout, deadline - now + 2_000)
+        )
+
+      case response do
+        {:error, _, status, _} when status in 400..499 and status not in [403, 429] ->
+          throw({:notification_terminal, status})
+
+        {:error, _, status} when status in 400..499 and status not in [403, 429] ->
+          throw({:notification_terminal, status})
+
+        _ ->
+          response
+      end
+    else
+      GenServer.call(BorsNG.GitHub, {type, conn, data}, timeout)
+    end
+  end
+
+  def post_commit_status_once(conn, data), do: advisory_call(:post_commit_status, conn, data)
 
   @spec post_commit_status!(tconn, {binary, tstatus, binary, binary}) :: :ok
   def post_commit_status!(repo_conn, {sha, status, msg, url}) do
@@ -721,6 +745,7 @@ defmodule BorsNG.GitHub do
 
   defp retry_timeout_elapsed?(action, started_at) do
     max_elapsed_ms = max_retry_elapsed_ms(action)
+
     System.monotonic_time(:millisecond) - started_at >= max_elapsed_ms
   end
 

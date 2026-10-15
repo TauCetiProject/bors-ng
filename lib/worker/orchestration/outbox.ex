@@ -8,6 +8,9 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
   import Ecto.Query
   alias BorsNG.Database.{Batch, LinkPatchBatch, OrchestrationJob, Patch, Project, Repo}
 
+  @notifications ["notice", "projection"]
+  def notification?(job), do: job.kind in @notifications
+
   def enabled?, do: System.get_env("BORS_ASYNC_ORCHESTRATION", "false") == "true"
   def now, do: System.system_time(:second)
 
@@ -185,6 +188,9 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
         {"info", {:poll, _}} ->
           1
 
+        {"info", {:completion_poll, _}} ->
+          1
+
         {"info", {:retry_promotion, _, _}} ->
           1
 
@@ -214,19 +220,39 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
 
         # Current locking read is necessary on MySQL: a consistent read
         # could reuse the snapshot from before waiting for the project lock.
-        busy =
-          Repo.one(
-            from(j in OrchestrationJob,
-              where:
-                j.project_id == ^job.project_id and j.state == "running" and
-                  j.lease_until > ^now(),
-              select: j.id,
-              limit: 1,
-              lock: "FOR UPDATE"
-            )
+        is_notification = notification?(job)
+
+        busy_query =
+          from(j in OrchestrationJob,
+            where:
+              j.project_id == ^job.project_id and j.state == "running" and j.lease_until > ^now(),
+            select: j.id,
+            limit: 1,
+            lock: "FOR UPDATE"
           )
 
-        if job.state == "pending" and job.available_at <= now() and is_nil(busy) do
+        busy_query =
+          if is_notification,
+            do: from(j in busy_query, where: j.kind in ^@notifications),
+            else: from(j in busy_query, where: j.kind not in ^@notifications)
+
+        busy = Repo.one(busy_query)
+
+        older =
+          if is_notification do
+            Repo.one(
+              from(j in OrchestrationJob,
+                where:
+                  j.project_id == ^job.project_id and j.id < ^job.id and
+                    j.kind in ^@notifications and j.state in ["pending", "running"],
+                select: j.id,
+                limit: 1,
+                lock: "FOR UPDATE"
+              )
+            )
+          end
+
+        if job.state == "pending" and job.available_at <= now() and is_nil(busy) and is_nil(older) do
           token = Base.encode16(:crypto.strong_rand_bytes(16))
 
           # A command received before construction can become relevant while
@@ -257,7 +283,13 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
 
           # Fairness survives dispatcher/executor restarts and retries. One
           # background operation gets a turn after at most eight critical claims.
-          streak = if priority < 2, do: min(project.orchestration_streak + 1, 8), else: 0
+          streak =
+            cond do
+              is_notification -> project.orchestration_streak
+              priority < 2 -> min(project.orchestration_streak + 1, 8)
+              true -> 0
+            end
+
           project |> Ecto.Changeset.change(orchestration_streak: streak) |> Repo.update!()
 
           job
@@ -351,7 +383,8 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
           set: [
             state: "done",
             completed_at_ms: System.system_time(:millisecond),
-            dedup_key: if(job.kind in ["notice", "dispatch"], do: job.dedup_key, else: nil),
+            dedup_key:
+              if(job.kind in ["notice", "projection", "dispatch"], do: job.dedup_key, else: nil),
             token: nil,
             lease_until: 0,
             updated_at: NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)
@@ -406,6 +439,30 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
   end
 
   def fail(job, reason) do
+    if notification?(job) and (job.attempts >= 6 or match?({:terminal, _}, reason)) do
+      Logger.warning(
+        "outbox_notification_terminal job=#{job.id} project=#{job.project_id} attempts=#{job.attempts} reason=#{inspect(reason, limit: 8)}"
+      )
+
+      with_project(job.project_id, fn ->
+        owned(job)
+        |> Repo.update_all(
+          set: [
+            state: "done",
+            token: nil,
+            lease_until: 0,
+            completed_at_ms: System.system_time(:millisecond),
+            last_error:
+              "notification_terminal:" <> inspect(reason, limit: 8, printable_limit: 160)
+          ]
+        )
+      end)
+    else
+      retry(job, reason)
+    end
+  end
+
+  defp retry(job, reason) do
     if job.attempts >= 6,
       do:
         Logger.warning(
@@ -413,7 +470,11 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
         )
 
     delay = min(60 * Integer.pow(2, min(job.attempts - 1, 6)), 3600)
-    delay = if match?({:worker_exit, _}, reason), do: max(delay, 300), else: delay
+
+    delay =
+      if match?({:worker_exit, _}, reason) or job.kind in ["notice", "projection"],
+        do: max(delay, 300),
+        else: delay
 
     with_project(job.project_id, fn ->
       owned(job)
@@ -466,10 +527,31 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
     )
   end
 
-  def due(limit) do
+  def due(limit, lane \\ :mutation)
+
+  def due(limit, :notification) do
+    heads =
+      from(j in OrchestrationJob,
+        where: j.kind in ^@notifications and j.state in ["pending", "running"],
+        group_by: j.project_id,
+        select: %{project_id: j.project_id, id: min(j.id)}
+      )
+
+    Repo.all(
+      from(j in OrchestrationJob,
+        join: h in subquery(heads),
+        on: h.id == j.id,
+        where: j.state == "pending" and j.available_at <= ^now(),
+        order_by: j.id,
+        limit: ^limit
+      )
+    )
+  end
+
+  def due(limit, :mutation) do
     busy =
       from(j in OrchestrationJob,
-        where: j.state == "running" and j.lease_until > ^now(),
+        where: j.state == "running" and j.lease_until > ^now() and j.kind not in ^@notifications,
         select: j.project_id
       )
 
@@ -480,7 +562,8 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
         left_join: a in subquery(active_members()),
         on: a.project_id == j.project_id and a.patch_id == j.subject_id and j.kind == "cast",
         where:
-          j.state == "pending" and j.available_at <= ^now() and j.project_id not in subquery(busy),
+          j.state == "pending" and j.available_at <= ^now() and j.kind not in ^@notifications and
+            j.project_id not in subquery(busy),
         order_by: [
           asc:
             fragment(

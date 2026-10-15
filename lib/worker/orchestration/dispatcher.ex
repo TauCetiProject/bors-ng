@@ -77,16 +77,28 @@ defmodule BorsNG.Worker.Orchestration.Dispatcher do
         _ -> 2
       end
 
-    # Bound returned work and exclude occupied repositories before selection.
-    # The joined priority query may still sort a larger eligible backlog.
-    Enum.reduce(Outbox.due(32), state, fn job, state ->
-      if map_size(state.active) < cap do
+    # Separate bounded notification capacity cannot consume a mutation slot.
+    state = launch(Outbox.due(32, :mutation), state, cap, false)
+    launch(Outbox.due(32, :notification), state, 1, true)
+  end
+
+  defp launch(jobs, state, cap, notification) do
+    Enum.reduce(jobs, state, fn job, state ->
+      active =
+        Enum.count(state.active, fn {_pid, {_ref, running}} ->
+          Outbox.notification?(running) == notification
+        end)
+
+      if active < cap do
         case Outbox.claim(job.id) do
           {:ok, nil} ->
             state
 
           {:ok, claimed} ->
-            {:ok, pid} = Worker.get(claimed.project_id)
+            key =
+              if notification, do: {:notification, claimed.project_id}, else: claimed.project_id
+
+            {:ok, pid} = Worker.get(key)
             ref = Process.monitor(pid)
             send(pid, {:execute, self(), claimed})
             %{state | active: Map.put(state.active, pid, {ref, claimed})}

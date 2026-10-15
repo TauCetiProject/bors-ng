@@ -326,7 +326,7 @@ defmodule BorsNG.Worker.OrchestrationTest do
       set: [state: "done"]
     )
 
-    occupied = Outbox.enqueue(ctx.project.id, "notice", {ctx.conn, 1, "current", "current"})
+    occupied = Outbox.enqueue(ctx.project.id, "info", :restore_rechecks)
     {:ok, running} = Outbox.claim(occupied.id)
 
     Enum.each(1..400, fn n ->
@@ -359,8 +359,8 @@ defmodule BorsNG.Worker.OrchestrationTest do
       set: [state: "done"]
     )
 
-    background = Outbox.enqueue(ctx.project.id, "notice", {ctx.conn, 1, "first", "first"})
-    later = Outbox.enqueue(ctx.project.id, "notice", {ctx.conn, 1, "second", "second"})
+    background = Outbox.enqueue(ctx.project.id, "info", :recover_queue)
+    later = Outbox.enqueue(ctx.project.id, "info", :wake_backend_holds)
     critical = Enum.map(1..10, fn n -> Outbox.enqueue(ctx.project.id, "dispatch", n) end)
 
     Enum.each(Enum.take(critical, 8), fn expected ->
@@ -565,6 +565,257 @@ defmodule BorsNG.Worker.OrchestrationTest do
     assert id == job.id and wait >= 0 and service >= 0
     done = Repo.get!(OrchestrationJob, job.id)
     assert done.completed_at_ms >= done.claimed_at_ms
+  end
+
+  defp notification_worker(ctx) do
+    {:ok, worker} = Worker.get({:notification, ctx.project.id})
+    on_exit(fn -> if Process.alive?(worker), do: GenServer.stop(worker) end)
+    :sys.get_state(worker)
+    worker
+  end
+
+  test "notification leases cannot block a mutator or permit a second mutator", ctx do
+    notice = Outbox.enqueue(ctx.project.id, "notice", {ctx.conn, 1, "first", "first"})
+    later_notice = Outbox.enqueue(ctx.project.id, "notice", {ctx.conn, 1, "second", "second"})
+    mutation = Outbox.enqueue(ctx.project.id, "info", :restore_rechecks)
+    other_mutation = Outbox.enqueue(ctx.project.id, "info", :restore_rechecks)
+    {:ok, n} = Outbox.claim(notice.id)
+    assert n
+    assert Enum.any?(Outbox.due(32), &(&1.id == mutation.id))
+    {:ok, m} = Outbox.claim(mutation.id)
+    assert m
+    assert {:ok, nil} == Outbox.claim(other_mutation.id)
+    assert {:ok, nil} == Outbox.claim(later_notice.id)
+    Outbox.finish(m)
+    assert {:ok, next} = Outbox.claim(other_mutation.id)
+    assert next
+    Outbox.finish(next)
+    Outbox.finish(n)
+    assert {:ok, later} = Outbox.claim(later_notice.id)
+    assert later
+  end
+
+  test "notification executor rejects mutation work and ignores legacy poll messages", ctx do
+    worker = notification_worker(ctx)
+    count = Repo.aggregate(OrchestrationJob, :count)
+    send(worker, :recover_queue)
+    :sys.get_state(worker)
+    assert Repo.aggregate(OrchestrationJob, :count) == count
+    mutation = Outbox.enqueue(ctx.project.id, "dispatch", ctx.batch.id)
+    assert {:error, {:throw, :wrong_notification_lane}} == execute(worker, mutation)
+    assert get_in(GitHub.ServerMock.get_state(), [ctx.conn, :branches, "staging"]) == "old"
+  end
+
+  test "notification FIFO includes retry backoff and late green cannot overwrite canceled red",
+       ctx do
+    worker = notification_worker(ctx)
+    ctx.batch |> Batch.changeset(%{state: :running, commit: "iniN"}) |> Repo.update!()
+    green_payload = {:status, ctx.conn, {"N", :ok, "green", "url"}, ctx.batch.id}
+    red_payload = {:status, ctx.conn, {"N", :error, "red", "url"}, ctx.batch.id}
+    green = Outbox.enqueue(ctx.project.id, "projection", green_payload, "green-projection")
+    red = Outbox.enqueue(ctx.project.id, "projection", red_payload, "red-projection")
+    {:ok, claimed} = Outbox.claim(green.id)
+    Outbox.fail(claimed, :unknown_response)
+    assert Repo.get!(OrchestrationJob, green.id).available_at >= Outbox.now() + 299
+    assert Outbox.due(32, :notification) == []
+    assert {:ok, nil} == Outbox.claim(red.id)
+    ctx.batch |> Batch.changeset(%{state: :canceled}) |> Repo.update!()
+    assert :ok == execute(worker, green)
+    assert :ok == execute(worker, red)
+    late = Outbox.enqueue(ctx.project.id, "projection", green_payload, "late-green")
+    assert :ok == execute(worker, late)
+    assert get_in(GitHub.ServerMock.get_state(), [ctx.conn, :statuses, "N", "bors"]) == :error
+    Outbox.enqueue(ctx.project.id, "projection", red_payload, "red-projection")
+
+    assert Repo.aggregate(
+             from(j in OrchestrationJob, where: j.dedup_key == "red-projection"),
+             :count
+           ) == 1
+  end
+
+  test "canceling a lone waiting PR delivers red after deleting its batch", ctx do
+    worker = notification_worker(ctx)
+
+    assert :ok ==
+             execute(
+               ctx.worker,
+               Outbox.enqueue(ctx.project.id, "cast", {:cancel, ctx.patch.id, :requested})
+             )
+
+    refute Repo.get(Batch, ctx.batch.id)
+
+    [projection] =
+      Repo.all(
+        from(j in OrchestrationJob,
+          where: j.project_id == ^ctx.project.id and j.kind == "projection"
+        )
+      )
+
+    assert :ok == execute(worker, projection)
+    assert get_in(GitHub.ServerMock.get_state(), [ctx.conn, :statuses, "N", "bors"]) == :error
+  end
+
+  test "notification failures terminate visibly after six attempts and release FIFO", ctx do
+    first = Outbox.enqueue(ctx.project.id, "projection", :unused, "exhausted-projection")
+    next = Outbox.enqueue(ctx.project.id, "notice", :unused, "following-notice")
+
+    Enum.each(1..6, fn _ ->
+      Repo.get!(OrchestrationJob, first.id)
+      |> Ecto.Changeset.change(available_at: 0)
+      |> Repo.update!()
+
+      {:ok, owned} = Outbox.claim(first.id)
+      assert {:ok, nil} == Outbox.claim(next.id)
+      Outbox.fail(owned, :infrastructure)
+    end)
+
+    retired = Repo.get!(OrchestrationJob, first.id)
+    assert retired.state == "done"
+    assert retired.dedup_key == "exhausted-projection"
+    assert retired.last_error =~ "notification_terminal:"
+    assert {:ok, owned} = Outbox.claim(next.id)
+    assert owned
+    Outbox.fail(owned, {:terminal, {:http_status, 404}})
+    assert Repo.get!(OrchestrationJob, next.id).state == "done"
+  end
+
+  test "a queued advisory never overwrites a SHA later bound as a tested commit", ctx do
+    worker = notification_worker(ctx)
+
+    old =
+      Outbox.enqueue(
+        ctx.project.id,
+        "projection",
+        {:status, ctx.conn, {"N", :running, "old pending", "url"}, ctx.batch.id}
+      )
+
+    ctx.batch |> Batch.changeset(%{state: :running, commit: "N"}) |> Repo.update!()
+    assert :ok == GitHub.post_commit_status(ctx.conn, {"N", :ok, "tested green", "url"})
+    assert :ok == execute(worker, old)
+    assert get_in(GitHub.ServerMock.get_state(), [ctx.conn, :statuses, "N", "bors"]) == :ok
+  end
+
+  test "terminal completion yields before preparing the next waiting batch", ctx do
+    dispatch = construct(ctx)
+    assert :ok == execute(ctx.worker, dispatch)
+    batch = Repo.get!(Batch, ctx.batch.id)
+    waiting = Repo.insert!(%Batch{Batch.new(ctx.project.id, "master") | last_polled: 0})
+    failed_poll = Outbox.enqueue(ctx.project.id, "info", {:poll, :once})
+    {:ok, failed_poll} = Outbox.claim(failed_poll.id)
+    Outbox.fail(failed_poll, :infrastructure)
+
+    GitHub.ServerMock.put_state(
+      put_in(GitHub.ServerMock.get_state(), [ctx.conn, :statuses, batch.commit], %{
+        "ci" => :ok,
+        "cd" => :ok
+      })
+    )
+
+    assert :ok ==
+             execute(
+               ctx.worker,
+               Outbox.enqueue(ctx.project.id, "cast", {:status, {batch.commit, "ci", :ok, "url"}})
+             )
+
+    assert Repo.get!(Batch, batch.id).state == :ok
+
+    assert get_in(GitHub.ServerMock.get_state(), [ctx.conn, :statuses, batch.commit, "bors"]) ==
+             :ok
+
+    refute get_in(GitHub.ServerMock.get_state(), [ctx.conn, :statuses, "N", "bors"]) == :ok
+    assert Repo.get!(Batch, waiting.id).state == :waiting
+    assert Outbox.pending?(ctx.project.id, "complete:#{batch.id}")
+    assert Enum.any?(Outbox.due(32), &(Outbox.payload(&1) == {:completion_poll, batch.id}))
+    assert Repo.get!(OrchestrationJob, failed_poll.id).available_at > Outbox.now()
+  end
+
+  test "one recovery turn handles one PR and durably yields the remaining bounded budget", ctx do
+    patches =
+      for n <- 1..4 do
+        Repo.insert!(%Patch{
+          project_id: ctx.project.id,
+          pr_xref: 100 + n,
+          commit: "H#{n}",
+          into_branch: "main",
+          queue_pending: true,
+          queue_approval: %{
+            "state" => "approved",
+            "head_sha" => "H#{n}",
+            "reviewer" => "reviewer"
+          }
+        })
+      end
+
+    job = Outbox.enqueue(ctx.project.id, "info", :recover_queue)
+    assert :ok == execute(ctx.worker, job)
+    {:dictionary, data} = Process.info(ctx.worker, :dictionary)
+    assert Map.new(data)[:queue_recovery_cursor] == hd(patches).id
+
+    Enum.each(3..1//-1, fn budget ->
+      # A restart loses the process cursor; the durable visited list still
+      # advances through distinct PRs instead of terminating on the first one.
+      :sys.replace_state(ctx.worker, fn state ->
+        Process.delete(:queue_recovery_cursor)
+        state
+      end)
+
+      [slice] =
+        Repo.all(
+          from(j in OrchestrationJob,
+            where: j.project_id == ^ctx.project.id and j.state == "pending"
+          )
+        )
+        |> Enum.filter(&match?({:recover_queue_slice, ^budget, _}, Outbox.payload(&1)))
+
+      assert :ok == execute(ctx.worker, slice)
+    end)
+
+    {:dictionary, data} = Process.info(ctx.worker, :dictionary)
+    assert Map.new(data)[:queue_recovery_cursor] == List.last(patches).id
+
+    refute Enum.any?(
+             Repo.all(
+               from(j in OrchestrationJob,
+                 where: j.project_id == ^ctx.project.id and j.state == "pending"
+               )
+             ),
+             fn j -> match?({:recover_queue_slice, _, _}, Outbox.payload(j)) end
+           )
+  end
+
+  test "a short recovery queue is visited only once per original wakeup", ctx do
+    patch =
+      Repo.insert!(%Patch{
+        project_id: ctx.project.id,
+        pr_xref: 999,
+        commit: "H",
+        into_branch: "main",
+        queue_pending: true,
+        queue_approval: %{"state" => "approved", "head_sha" => "H", "reviewer" => "reviewer"}
+      })
+
+    assert :ok == execute(ctx.worker, Outbox.enqueue(ctx.project.id, "info", :recover_queue))
+
+    [slice] =
+      Repo.all(
+        from(j in OrchestrationJob,
+          where: j.project_id == ^ctx.project.id and j.state == "pending"
+        )
+      )
+      |> Enum.filter(&match?({:recover_queue_slice, _, _}, Outbox.payload(&1)))
+
+    assert {:recover_queue_slice, 3, [id]} = Outbox.payload(slice)
+    assert id == patch.id
+    assert :ok == execute(ctx.worker, slice)
+
+    refute Enum.any?(
+             Repo.all(
+               from(j in OrchestrationJob,
+                 where: j.project_id == ^ctx.project.id and j.state == "pending"
+               )
+             ),
+             &match?({:recover_queue_slice, _, _}, Outbox.payload(&1))
+           )
   end
 
   test "deleted repository work terminates without restarting the dispatcher", ctx do

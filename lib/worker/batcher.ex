@@ -711,6 +711,9 @@ defmodule BorsNG.Worker.Batcher do
 
   def handle_info(:wake_backend_holds, project_id), do: recover_backend_holds(project_id)
 
+  def handle_info({:completion_poll, _batch_id}, project_id),
+    do: handle_info({:poll, :once}, project_id)
+
   def handle_info({:poll, repetition}, project_id) do
     check_self(project_id)
 
@@ -727,107 +730,13 @@ defmodule BorsNG.Worker.Batcher do
     end
   end
 
-  def handle_info(:recover_queue, project_id) do
-    project = Repo.get!(Project, project_id)
-    conn = get_repo_conn(project)
-    cursor = Process.get(:queue_recovery_cursor, 0)
+  def handle_info(:recover_queue, project_id), do: recover_queue(project_id, 4)
 
-    candidates =
-      if BorsNG.MergeBackend.allow(project, "main", :admit) == :ok,
-        do: QueueApproval.candidates(project_id, cursor, 4),
-        else: []
+  def handle_info({:recover_queue_slice, budget, seen}, project_id) when budget in 1..3,
+    do: recover_queue(project_id, budget, seen)
 
-    Enum.each(candidates, fn patch ->
-      Process.put(:queue_recovery_cursor, patch.id)
-
-      try do
-        case patch.queue_approval do
-          %{"head_sha" => head, "reviewer" => reviewer, "state" => "approved"}
-          when head == patch.commit and is_binary(reviewer) ->
-            # Cached database state discovers orphans; normal live admission
-            # verifies authorization, head, holds and CI before any build starts.
-            case GitHub.get_pr(conn, patch.pr_xref) do
-              {:ok, pr} ->
-                if pr.state == :open and not pr.draft and pr.head_sha == head and
-                     pr.base_ref == patch.into_branch do
-                  with {:ok, labels} <- GitHub.get_labels(conn, patch.pr_xref),
-                       true <-
-                         MapSet.disjoint?(
-                           MapSet.new(labels, &String.downcase/1),
-                           MapSet.new(~w(keep hold wip human do-not-close))
-                         ) do
-                    do_handle_cast({:recover_reviewed, patch.id, head, reviewer}, project_id)
-                    Logger.info("queue_recovered pr=#{patch.pr_xref} head=#{head}")
-                  else
-                    _ -> :ok
-                  end
-                else
-                  do_handle_cast({:cancel, patch.id, :eligibility_changed}, project_id)
-                  if pr.user, do: Syncer.sync_patch(project.id, pr)
-                end
-
-              _ ->
-                :ok
-            end
-
-          %{"head_sha" => head, "state" => "withdrawn", "reason" => reason}
-          when head == patch.commit and reason in ["preflight", "preflight_timeout"] ->
-            # A failed/cancelled standalone check stops admission, not the
-            # exact-head human scope decision. Recover only once all live
-            # admission guards pass; red checks cause no writes or comments.
-            now = System.monotonic_time(:second)
-            key = {:scope_recovery_after, patch.id}
-
-            if not match?({^head, due} when due > now, Process.get(key)) do
-              Process.put(key, {head, now + 300})
-
-              admission =
-                with {:ok, labels} <- GitHub.get_labels(conn, patch.pr_xref),
-                     true <-
-                       MapSet.disjoint?(
-                         MapSet.new(labels, &String.downcase/1),
-                         MapSet.new(~w(keep hold wip human do-not-close))
-                       ) do
-                  patch_preflight(conn, patch)
-                else
-                  _ -> :waiting
-                end
-
-              case admission do
-                {:ok, _} ->
-                  actor = get_in(patch.manual_approval || %{}, ["actor_id"])
-
-                  user =
-                    if is_integer(actor), do: Repo.get_by(BorsNG.Database.User, user_xref: actor)
-
-                  if user && is_binary(user.login) do
-                    # No live held approval or active membership remains.
-                    Process.delete({:approval_pending, patch.id})
-                    do_handle_cast({:recover_reviewed, patch.id, head, user.login}, project_id)
-                  end
-
-                {:error, :manual_approval_changed} ->
-                  do_handle_cast({:cancel, patch.id, :eligibility_changed}, project_id)
-
-                _ ->
-                  :ok
-              end
-            end
-
-          _ ->
-            QueueApproval.stop([patch], :revision_changed)
-        end
-      rescue
-        error ->
-          Logger.warning(
-            "queue recovery deferred pr=#{patch.pr_xref}: #{Exception.message(error)}"
-          )
-      end
-    end)
-
-    if candidates != [], do: Process.put(:queue_recovery_cursor, List.last(candidates).id)
-    {:noreply, project_id}
-  end
+  def handle_info({:backend_holds_slice, budget, seen}, project_id) when budget in 1..3,
+    do: recover_backend_holds(project_id, budget, seen)
 
   def handle_info(:restore_rechecks, project_id) do
     try do
@@ -945,7 +854,129 @@ defmodule BorsNG.Worker.Batcher do
     {:noreply, proj_id}
   end
 
-  defp recover_backend_holds(project_id) do
+  defp recover_queue(project_id, budget, seen \\ []) do
+    project = Repo.get!(Project, project_id)
+    conn = get_repo_conn(project)
+    cursor = Process.get(:queue_recovery_cursor, 0)
+
+    candidates =
+      if BorsNG.MergeBackend.allow(project, "main", :admit) == :ok,
+        do:
+          QueueApproval.candidates(
+            project_id,
+            cursor,
+            if(Process.get(:orchestration_executor, false), do: length(seen) + 1, else: budget)
+          ),
+        else: []
+
+    # Cursor queries wrap; a short queue must not repeat a PR in one wakeup.
+    candidates =
+      candidates
+      |> Enum.reject(&(&1.id in seen))
+      |> Enum.take(if(Process.get(:orchestration_executor, false), do: 1, else: budget))
+
+    Enum.each(candidates, fn patch ->
+      Process.put(:queue_recovery_cursor, patch.id)
+
+      try do
+        case patch.queue_approval do
+          %{"head_sha" => head, "reviewer" => reviewer, "state" => "approved"}
+          when head == patch.commit and is_binary(reviewer) ->
+            # Cached database state discovers orphans; normal live admission
+            # verifies authorization, head, holds and CI before any build starts.
+            case GitHub.get_pr(conn, patch.pr_xref) do
+              {:ok, pr} ->
+                if pr.state == :open and not pr.draft and pr.head_sha == head and
+                     pr.base_ref == patch.into_branch do
+                  with {:ok, labels} <- GitHub.get_labels(conn, patch.pr_xref),
+                       true <-
+                         MapSet.disjoint?(
+                           MapSet.new(labels, &String.downcase/1),
+                           MapSet.new(~w(keep hold wip human do-not-close))
+                         ) do
+                    do_handle_cast({:recover_reviewed, patch.id, head, reviewer}, project_id)
+                    Logger.info("queue_recovered pr=#{patch.pr_xref} head=#{head}")
+                  else
+                    _ -> :ok
+                  end
+                else
+                  do_handle_cast({:cancel, patch.id, :eligibility_changed}, project_id)
+                  if pr.user, do: Syncer.sync_patch(project.id, pr)
+                end
+
+              _ ->
+                :ok
+            end
+
+          %{"head_sha" => head, "state" => "withdrawn", "reason" => reason}
+          when head == patch.commit and reason in ["preflight", "preflight_timeout"] ->
+            # A failed/cancelled standalone check stops admission, not the
+            # exact-head human scope decision. Recover only once all live
+            # admission guards pass; red checks cause no writes or comments.
+            now = System.monotonic_time(:second)
+            key = {:scope_recovery_after, patch.id}
+
+            if not match?({^head, due} when due > now, Process.get(key)) do
+              Process.put(key, {head, now + 300})
+
+              admission =
+                with {:ok, labels} <- GitHub.get_labels(conn, patch.pr_xref),
+                     true <-
+                       MapSet.disjoint?(
+                         MapSet.new(labels, &String.downcase/1),
+                         MapSet.new(~w(keep hold wip human do-not-close))
+                       ) do
+                  patch_preflight(conn, patch)
+                else
+                  _ -> :waiting
+                end
+
+              case admission do
+                {:ok, _} ->
+                  actor = get_in(patch.manual_approval || %{}, ["actor_id"])
+
+                  user =
+                    if is_integer(actor), do: Repo.get_by(BorsNG.Database.User, user_xref: actor)
+
+                  if user && is_binary(user.login) do
+                    # No live held approval or active membership remains.
+                    Process.delete({:approval_pending, patch.id})
+                    do_handle_cast({:recover_reviewed, patch.id, head, user.login}, project_id)
+                  end
+
+                {:error, :manual_approval_changed} ->
+                  do_handle_cast({:cancel, patch.id, :eligibility_changed}, project_id)
+
+                _ ->
+                  :ok
+              end
+            end
+
+          _ ->
+            QueueApproval.stop([patch], :revision_changed)
+        end
+      rescue
+        error ->
+          Logger.warning(
+            "queue recovery deferred pr=#{patch.pr_xref}: #{Exception.message(error)}"
+          )
+      end
+    end)
+
+    if candidates != [], do: Process.put(:queue_recovery_cursor, List.last(candidates).id)
+
+    if candidates != [] and budget > 1 and Process.get(:orchestration_executor, false),
+      do:
+        schedule_message(
+          self(),
+          {:recover_queue_slice, budget - 1, Enum.map(candidates, & &1.id) ++ seen},
+          0
+        )
+
+    {:noreply, project_id}
+  end
+
+  defp recover_backend_holds(project_id, budget \\ 4, seen \\ []) do
     project = Repo.get!(Project, project_id)
 
     if BorsNG.MergeBackend.scoped?(project, "main") and
@@ -962,7 +993,12 @@ defmodule BorsNG.Worker.Batcher do
       cursor = Process.get(:held_recovery_cursor, 0)
       held = Enum.sort_by(held, & &1.id)
       {older, newer} = Enum.split_while(held, &(&1.id <= cursor))
-      selected = Enum.take(newer ++ older, 4)
+
+      selected =
+        Enum.take(
+          Enum.reject(newer ++ older, &(&1.id in seen)),
+          if(Process.get(:orchestration_executor, false), do: 1, else: budget)
+        )
 
       Enum.each(selected, fn p ->
         Process.put(:held_recovery_cursor, p.id)
@@ -972,6 +1008,14 @@ defmodule BorsNG.Worker.Batcher do
           do_handle_cast({:reviewed, p.id, p.bundle_reviewer}, project_id)
         end
       end)
+
+      if selected != [] and budget > 1 and Process.get(:orchestration_executor, false),
+        do:
+          schedule_message(
+            self(),
+            {:backend_holds_slice, budget - 1, Enum.map(selected, & &1.id) ++ seen},
+            0
+          )
     end
 
     {:noreply, project_id}
@@ -1823,7 +1867,7 @@ defmodule BorsNG.Worker.Batcher do
              else: GitHub.get_branch!(conn, batch.project.staging_branch).commit
            ),
          :ok <- BorsNG.Worker.CandidateAssembler.validate_result(candidate, result),
-         :ok <- local_live_heads(conn, links),
+         :ok <- phase(batch, :assembly_live_heads, fn -> local_live_heads(conn, links) end),
          :dispatch <- local_import_preflight(batch, links, candidate, result) do
       if Train.tracked?(candidate) do
         CandidateJournal.event(candidate, "train_barrier_checked", "bors.local_git", %{
@@ -2001,20 +2045,47 @@ defmodule BorsNG.Worker.Batcher do
     end
   end
 
+  defp phase(batch, name, fun) do
+    if job = Process.get(:orchestration_job) do
+      started = System.monotonic_time(:millisecond)
+
+      try do
+        fun.()
+      after
+        service_ms = System.monotonic_time(:millisecond) - started
+
+        :telemetry.execute([:bors, :outbox, :phase], %{service_ms: service_ms}, %{
+          job_id: job.id,
+          project_id: batch.project_id,
+          batch_id: batch.id,
+          phase: name
+        })
+
+        Logger.info(
+          "outbox_phase job=#{job.id} batch=#{batch.id} phase=#{name} service_ms=#{service_ms}"
+        )
+      end
+    else
+      fun.()
+    end
+  end
+
   defp local_assembly(batch, links, candidate, toml) do
     conn = get_repo_conn(batch.project)
 
     metadata =
-      Enum.reduce_while(links, {:ok, []}, fn link, {:ok, members} ->
-        if link.head_sha != link.patch.commit do
-          {:halt, :race}
-        else
-          case get_squash_pr_data(conn, link.patch, toml) do
-            {:ok, data} -> {:cont, {:ok, members ++ [Map.put(data, :pr, link.patch.pr_xref)]}}
-            {:error, :head_changed} -> {:halt, :race}
-            error -> {:halt, error}
+      phase(batch, :preparation_metadata, fn ->
+        Enum.reduce_while(links, {:ok, []}, fn link, {:ok, members} ->
+          if link.head_sha != link.patch.commit do
+            {:halt, :race}
+          else
+            case get_squash_pr_data(conn, link.patch, toml) do
+              {:ok, data} -> {:cont, {:ok, members ++ [Map.put(data, :pr, link.patch.pr_xref)]}}
+              {:error, :head_changed} -> {:halt, :race}
+              error -> {:halt, error}
+            end
           end
-        end
+        end)
       end)
 
     with {:ok, members} <- metadata do
@@ -2025,7 +2096,9 @@ defmodule BorsNG.Worker.Batcher do
         date: DateTime.to_iso8601(DateTime.utc_now())
       }
 
-      case BorsNG.Worker.LocalGit.assemble(candidate, context) do
+      case phase(batch, :local_git_assembly, fn ->
+             BorsNG.Worker.LocalGit.assemble(candidate, context)
+           end) do
         {:ok, result} ->
           CandidateJournal.event(candidate, "local_assembled", "bors.local_git", result)
           {:ok, result, context}
@@ -2678,7 +2751,7 @@ defmodule BorsNG.Worker.Batcher do
 
       ensure_no_withdrawal!(batch, patch_ids(candidate))
       conn = get_repo_conn(batch.project)
-      ensure_live_members!(batch, conn)
+      phase(batch, :dispatch_live_members, fn -> ensure_live_members!(batch, conn) end)
       requested = Enum.find(events, &(&1.kind == "dispatch_requested"))
       # A single bounded Actions page reconciles an ambiguous repository_dispatch.
       # No retry is allowed on an unavailable or truncated lookup.
@@ -2717,7 +2790,10 @@ defmodule BorsNG.Worker.Batcher do
 
         # A push to the same SHA is idempotent and never fires another push build.
         ensure_no_withdrawal!(batch, patch_ids(candidate))
-        publish_bound_candidate!(batch, candidate, conn, publisher)
+
+        phase(batch, :dispatch_publication, fn ->
+          publish_bound_candidate!(batch, candidate, conn, publisher)
+        end)
 
         if System.get_env("BORS_STAGE_DISPATCH_PROJECT") == batch.project.name do
           ensure_no_withdrawal!(batch, patch_ids(candidate))
@@ -3150,7 +3226,15 @@ defmodule BorsNG.Worker.Batcher do
         Labeler.reconcile_queue(repo_conn, batch.into_branch, patches)
       end
 
-      poll_(batch.project_id)
+      if Process.get(:orchestration_executor, false),
+        do:
+          Outbox.enqueue(
+            batch.project_id,
+            "info",
+            {:completion_poll, batch.id},
+            "complete:#{batch.id}"
+          ),
+        else: poll_(batch.project_id)
     end
   end
 
@@ -4449,6 +4533,8 @@ defmodule BorsNG.Worker.Batcher do
     unless is_nil(commit) do
       {msg, status} = Batcher.Message.generate_status(message)
 
+      # The tested-commit bors status can be a branch push prerequisite.
+      # Retain its synchronous ordering before promotion.
       case GitHub.post_commit_status(
              repo_conn,
              {commit, status, msg, batch_url(Endpoint, :show, id)}
@@ -4466,11 +4552,15 @@ defmodule BorsNG.Worker.Batcher do
 
   defp send_status(repo_conn, batch_id, patches, message) do
     {msg, status} = Batcher.Message.generate_status(message)
+    batch = Repo.get(Batch, batch_id)
+    tested_commit = if batch, do: batch.commit
 
     Enum.each(patches, fn patch ->
-      case GitHub.post_commit_status(
+      case post_bors_status(
              repo_conn,
-             {patch.commit, status, msg, batch_url(Endpoint, :show, batch_id)}
+             {patch.commit, status, msg, batch_url(Endpoint, :show, batch_id)},
+             batch_id,
+             tested_commit
            ) do
         :ok ->
           :ok
@@ -4481,6 +4571,21 @@ defmodule BorsNG.Worker.Batcher do
           )
       end
     end)
+  end
+
+  defp post_bors_status(conn, data, batch_id, tested_commit) do
+    if BorsNG.Worker.Orchestration.Projections.enabled?() and elem(data, 0) != tested_commit do
+      job = Process.get(:orchestration_job)
+
+      BorsNG.Worker.Orchestration.Projections.enqueue(
+        job.project_id,
+        {:status, conn, data, batch_id}
+      )
+
+      :ok
+    else
+      GitHub.post_commit_status(conn, data)
+    end
   end
 
   # this should be called whenever the state of a Batch is changed using Batch.changeset
