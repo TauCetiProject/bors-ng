@@ -89,7 +89,16 @@ defmodule BorsNG.Worker.Orchestration.Dispatcher do
           Outbox.notification?(running) == notification
         end)
 
-      if active < cap do
+      occupied =
+        Enum.any?(state.active, fn {_pid, {_ref, running}} ->
+          running.project_id == job.project_id and
+            Outbox.notification?(running) == notification
+        end)
+
+      # due/2 can return many rows for a repository that was free when read.
+      # Once launched, skip its remaining rows in this turn without taking
+      # redundant project/job locks. claim/1 remains the durable lease fence.
+      if active < cap and not occupied do
         case Outbox.claim(job.id) do
           {:ok, nil} ->
             state

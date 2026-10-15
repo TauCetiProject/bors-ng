@@ -119,6 +119,79 @@ defmodule BorsNG.Worker.OrchestrationTest do
     Repo.get_by!(OrchestrationJob, kind: "dispatch", project_id: ctx.project.id)
   end
 
+  test "one dispatcher turn locks one job per repository despite hundreds of due rows", ctx do
+    dispatch = construct(ctx)
+
+    Repo.delete_all(
+      from(j in OrchestrationJob, where: j.project_id == ^ctx.project.id and j.id != ^dispatch.id)
+    )
+
+    for n <- 1..300 do
+      Outbox.enqueue(ctx.project.id, "cast", {:status, {"noise#{n}", "ordinary", :ok, "url"}})
+    end
+
+    test_pid = self()
+    handler = {__MODULE__, make_ref()}
+    prefix = Repo.config()[:telemetry_prefix]
+
+    :ok =
+      :telemetry.attach(
+        handler,
+        prefix ++ [:query],
+        fn _event, _measurements, metadata, _config ->
+          if self() == test_pid and metadata.source == "projects" and
+               String.contains?(metadata.query, "FOR UPDATE"),
+             do: send(test_pid, :project_claim_lock)
+        end,
+        nil
+      )
+
+    :sys.suspend(GitHub)
+    Process.delete(:last_drain_at)
+    Process.delete(:last_renew_at)
+    old_cap = System.get_env("BORS_ASYNC_WORKERS")
+    System.put_env("BORS_ASYNC_WORKERS", "2")
+
+    try do
+      {:noreply, state} =
+        BorsNG.Worker.Orchestration.Dispatcher.handle_info(:tick, %{active: %{}})
+
+      assert map_size(state.active) == 1
+      {:messages, messages} = Process.info(self(), :messages)
+      assert Enum.count(messages, &(&1 == :project_claim_lock)) == 1
+      assert Repo.get!(OrchestrationJob, dispatch.id).state == "running"
+      notification_worker(ctx)
+      Outbox.enqueue(ctx.project.id, "notice", {ctx.conn, 1, "message", "marker"})
+      Process.delete(:last_drain_at)
+      {:noreply, state} = BorsNG.Worker.Orchestration.Dispatcher.handle_info(:tick, state)
+      assert map_size(state.active) == 2
+      :sys.resume(GitHub)
+
+      state =
+        Enum.reduce(1..2, state, fn _, state ->
+          assert_receive {:finished, worker, claimed, :ok}, 5000
+
+          {:noreply, state} =
+            BorsNG.Worker.Orchestration.Dispatcher.handle_info(
+              {:finished, worker, claimed, :ok},
+              state
+            )
+
+          state
+        end)
+
+      assert state.active == %{}
+    after
+      :telemetry.detach(handler)
+      if Process.get(:tick_timer), do: Process.cancel_timer(Process.get(:tick_timer))
+      :sys.resume(GitHub)
+
+      if old_cap,
+        do: System.put_env("BORS_ASYNC_WORKERS", old_cap),
+        else: System.delete_env("BORS_ASYNC_WORKERS")
+    end
+  end
+
   test "construction commits binding and dispatch intent before staging mutation", ctx do
     dispatch = construct(ctx)
     batch = Repo.get!(Batch, ctx.batch.id)
