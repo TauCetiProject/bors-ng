@@ -143,7 +143,13 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
     )
   end
 
-  def payload(job), do: :erlang.binary_to_term(job.payload, [:safe])
+  def payload(job) do
+    # A cold VM may claim a continuation/publisher before its producer runs.
+    # Intern only trusted module literals; keep rejecting unknown stored atoms.
+    Code.ensure_loaded!(BorsNG.Worker.Batcher)
+    Code.ensure_loaded!(BorsNG.Worker.CandidateAssembler)
+    :erlang.binary_to_term(job.payload, [:safe])
+  end
 
   # All observations of a running candidate share one FIFO class, including
   # pending/red observations. Never move an old green ahead of a newer red.
