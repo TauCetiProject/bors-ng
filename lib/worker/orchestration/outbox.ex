@@ -23,6 +23,7 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
       end
 
     attributes = schedule_attributes(project_id, kind, payload)
+    wake_key = wake_key(project_id, kind, payload)
 
     key =
       if is_nil(key) and kind == "cast" and match?({:status, _}, payload),
@@ -32,24 +33,77 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
         else: key
 
     job =
-      Repo.insert!(
-        %OrchestrationJob{
-          project_id: project_id,
-          kind: kind,
-          subject_id: subject || attributes.subject_id,
-          priority: attributes.priority,
-          enqueued_at_ms: System.system_time(:millisecond),
-          payload: :erlang.term_to_binary(payload),
-          dedup_key: key,
-          available_at: available_at
-        },
-        on_conflict: :nothing
-      )
+      %OrchestrationJob{
+        project_id: project_id,
+        kind: kind,
+        subject_id: subject || attributes.subject_id,
+        priority: attributes.priority,
+        enqueued_at_ms: System.system_time(:millisecond),
+        payload: :erlang.term_to_binary(payload),
+        dedup_key: wake_key || key,
+        available_at: available_at
+      }
+      |> insert_job(wake_key)
 
     if Process.whereis(BorsNG.Worker.Orchestration.Dispatcher),
       do: send(BorsNG.Worker.Orchestration.Dispatcher, :tick)
 
     job
+  end
+
+  # These requests read current authoritative state; their payload is a wakeup,
+  # never a verdict or an approval/cancellation command.
+  defp wake_key(project, "cast", {:eligibility, pr}), do: "wake:#{project}:eligibility:#{pr}"
+  defp wake_key(project, "info", {:poll, :once}), do: "wake:#{project}:poll"
+
+  defp wake_key(project, "info", operation)
+       when operation in [:recover_queue, :wake_backend_holds],
+       do: "wake:#{project}:#{operation}"
+
+  defp wake_key(_, _, _), do: nil
+
+  defp insert_job(job, nil), do: Repo.insert!(job, on_conflict: :nothing)
+
+  defp insert_job(job, key) do
+    {:ok, result} =
+      Repo.transaction(fn ->
+        Repo.insert!(job, on_conflict: :nothing)
+
+        current =
+          Repo.one(from(j in OrchestrationJob, where: j.dedup_key == ^key, lock: "FOR UPDATE"))
+
+        if current do
+          # A running observation cannot cover an arrival that races its external
+          # read. Record that revision and the earliest requested follow-up time.
+          changes =
+            if current.state == "running" do
+              [rerun_at: min(current.rerun_at || job.available_at, job.available_at)]
+            else
+              # A fresh webhook may shorten a timer, but cannot defeat error backoff.
+              ready =
+                if current.attempts > 0 and current.last_error,
+                  do: current.available_at,
+                  else: min(current.available_at, job.available_at)
+
+              [available_at: ready]
+            end
+
+          current
+          |> Ecto.Changeset.change(
+            changes ++
+              [
+                wake_version: current.wake_version + 1,
+                subject_id: job.subject_id,
+                priority: min(current.priority, job.priority)
+              ]
+          )
+          |> Repo.update!()
+        end
+      end)
+
+    # Completion may have cleared the key between ON CONFLICT and the locking
+    # read on PostgreSQL. Retry insertion; that wakeup still needs an owner.
+    if result, do: result, else: insert_job(job, key)
   end
 
   def payload(job), do: :erlang.binary_to_term(job.payload, [:safe])
@@ -174,6 +228,8 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
 
           job
           |> Ecto.Changeset.change(
+            claimed_version: job.wake_version,
+            rerun_at: nil,
             claimed_at_ms: System.system_time(:millisecond),
             state: "running",
             token: token,
@@ -188,6 +244,36 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
   end
 
   def renew(job), do: owned(job) |> Repo.update_all(set: [lease_until: now() + 300])
+
+  def finish(%{wake_version: version} = job) when version > 0 do
+    {:ok, result} =
+      Repo.transaction(fn ->
+        current = Repo.one(from(j in owned(job), lock: "FOR UPDATE"))
+
+        if current do
+          dirty = current.wake_version > job.claimed_version
+
+          changes = [
+            state: if(dirty, do: "pending", else: "done"),
+            dedup_key: if(dirty, do: current.dedup_key, else: nil),
+            available_at: if(dirty, do: current.rerun_at || now(), else: current.available_at),
+            completed_at_ms: System.system_time(:millisecond),
+            token: nil,
+            lease_until: 0,
+            rerun_at: nil,
+            last_error: nil
+          ]
+
+          changes = if dirty, do: [{:attempts, 0} | changes], else: changes
+          current |> Ecto.Changeset.change(changes) |> Repo.update!()
+          {1, nil}
+        else
+          {0, nil}
+        end
+      end)
+
+    result
+  end
 
   def finish(job) do
     result =
