@@ -272,6 +272,7 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
         end
       end)
 
+    if elem(result, 0) > 0 and job.subject_id, do: wake_deferred(job.project_id)
     result
   end
 

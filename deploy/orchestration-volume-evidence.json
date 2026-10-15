@@ -1,0 +1,201 @@
+{
+  "issue": "https://github.com/TauCetiProject/TauCeti/issues/16811",
+  "source_candidate_journal": "https://bors.taucetiproject.org/repositories/1/candidates?base=main&batch_id=745",
+  "source_composition": {
+    "sample": "319 older jobs completed during batch745 dispatch wait01:51:56\u201301:55:53",
+    "total": 319,
+    "command_counts": [
+      {
+        "kind": "cast",
+        "command": "status",
+        "count": 206
+      },
+      {
+        "kind": "cast",
+        "command": "eligibility",
+        "count": 72
+      },
+      {
+        "kind": "info",
+        "command": "recover_queue",
+        "count": 11
+      },
+      {
+        "kind": "info",
+        "command": "wake_backend_holds",
+        "count": 11
+      },
+      {
+        "kind": "cancel",
+        "command": "cancel_generation",
+        "count": 11
+      },
+      {
+        "kind": "info",
+        "command": "poll",
+        "count": 6
+      },
+      {
+        "kind": "cast",
+        "command": "set_priority",
+        "count": 1
+      },
+      {
+        "kind": "cast",
+        "command": "maintainer_reviewed_generation",
+        "count": 1
+      }
+    ],
+    "exact_repeat_jobs": 42,
+    "unique_status_keys": 203,
+    "status_jobs": 206,
+    "unique_eligibility_prs": 55,
+    "eligibility_jobs": 72,
+    "eligibility_repeats": 17,
+    "exact_repeats_by_command": [
+      {
+        "kind": "info",
+        "command": "poll",
+        "extra": 5
+      },
+      {
+        "kind": "cast",
+        "command": "eligibility",
+        "extra": 1
+      },
+      {
+        "kind": "info",
+        "command": "recover_queue",
+        "extra": 10
+      },
+      {
+        "kind": "cast",
+        "command": "eligibility",
+        "extra": 2
+      },
+      {
+        "kind": "info",
+        "command": "wake_backend_holds",
+        "extra": 10
+      },
+      {
+        "kind": "cast",
+        "command": "eligibility",
+        "extra": 3
+      },
+      {
+        "kind": "cast",
+        "command": "eligibility",
+        "extra": 1
+      },
+      {
+        "kind": "cast",
+        "command": "eligibility",
+        "extra": 1
+      },
+      {
+        "kind": "cast",
+        "command": "eligibility",
+        "extra": 1
+      },
+      {
+        "kind": "cast",
+        "command": "eligibility",
+        "extra": 1
+      },
+      {
+        "kind": "cast",
+        "command": "eligibility",
+        "extra": 1
+      },
+      {
+        "kind": "cast",
+        "command": "eligibility",
+        "extra": 1
+      },
+      {
+        "kind": "cast",
+        "command": "eligibility",
+        "extra": 1
+      },
+      {
+        "kind": "cast",
+        "command": "eligibility",
+        "extra": 1
+      },
+      {
+        "kind": "cast",
+        "command": "eligibility",
+        "extra": 1
+      },
+      {
+        "kind": "cast",
+        "command": "eligibility",
+        "extra": 1
+      },
+      {
+        "kind": "cast",
+        "command": "eligibility",
+        "extra": 1
+      }
+    ]
+  },
+  "correlation": {
+    "distinct_status_shas": 181,
+    "matching_recorded_project_1_batches_or_attempts": 0
+  },
+  "implemented_reductions": [
+    "Identity-based async ingress filter before durable stage-status scheduling, with assembly/legacy fallback and unchanged trying/check/eligibility routes.",
+    "Per-key authoritative wakeup coalescing: requested/claimed durable revisions; arrival during running always leaves a follow-up; error backoff retained."
+  ],
+  "not_coalesced": [
+    "approval/cancellation/head/priority/bundle commands",
+    "candidate status verdict receipts",
+    "candidate/check observation journal"
+  ],
+  "limits": [
+    "The 206 ineffective statuses and 42 repeated wakeups are source operation-count opportunities, not measured CPU/API/wall-time/throughput savings.",
+    "Actual filtering retains assembling-candidate fallback traffic, and actual wakeups during execution intentionally create follow-ups.",
+    "The first priority release remains independently deployed as PR30; fresh production measurements must distinguish releases.",
+    "Long preparation, recursive polls and outgoing labels/status projections can still occupy the single executor. They are measured/bounded next in this same issue."
+  ],
+  "local_validation": {
+    "postgresql": "1019 tests + 7 doctests passed",
+    "mysql": "1019 tests + 7 doctests passed",
+    "focused": "routing/wakeup/orchestration 40; ingress/routing/wakeup 41 passed"
+  },
+  "production_rollout": "pending; do not infer a production gain from local tests",
+  "priority_rollout_evidence": {
+    "merged_pr": "https://github.com/TauCetiProject/bors-ng/pull/30",
+    "merge_commit": "8cdb593019d7a3cad0d59d675cd5d75e279540f1",
+    "deployed_at_utc": "2026-10-15T02:40:36.177Z",
+    "image_sha256": "8387b607f9011033ff09c4e3793b978c25f7505884c2ffb2cfab680528d7092d",
+    "worker_version": "de9db01f-2f0f-4c31-85a3-5a27bee211d9",
+    "observation_at_utc": "2026-10-15T02:46:27.804962+00:00",
+    "old_lease_expired_at_utc": "2026-10-15T02:45:55Z",
+    "critical_claim_gap_after_previous_completion_ms": [
+      309,
+      231,
+      364,
+      301,
+      298,
+      182,
+      251
+    ],
+    "critical_operation_service_ms": [
+      313,
+      121,
+      272,
+      265,
+      257,
+      197,
+      98,
+      128
+    ],
+    "unchanged_candidate_snapshots": 93,
+    "unchanged_admission_snapshots": 2082,
+    "unchanged_current_head_approvals": 323,
+    "duplicate_active_heads": 0,
+    "limitation": "No fresh post-deployment dispatch yet at this snapshot; raw old-row waits include restart lease hold."
+  }
+}
