@@ -88,7 +88,10 @@ defmodule BorsNG.WebhookControllerTest do
 
     on_exit(fn ->
       if Process.alive?(batcher), do: GenServer.stop(batcher)
-      if Process.alive?(attemptor), do: GenServer.stop(attemptor)
+
+      if Process.alive?(attemptor),
+        do: DynamicSupervisor.terminate_child(BorsNG.Worker.Attemptor.Supervisor, attemptor)
+
       System.delete_env("BORS_ASYNC_ORCHESTRATION")
       :sys.resume(BorsNG.Worker.Orchestration.Dispatcher)
     end)

@@ -38,8 +38,11 @@ defmodule BorsNG.ConnCase do
     owner = Ecto.Adapters.SQL.Sandbox.start_owner!(repo, shared: not tags[:async])
 
     on_exit(fn ->
-      unless tags[:async], do: BorsNG.Worker.TestCase.stop_actors()
-      Ecto.Adapters.SQL.Sandbox.stop_owner(owner)
+      try do
+        unless tags[:async], do: BorsNG.Worker.TestCase.stop_actors()
+      after
+        Ecto.Adapters.SQL.Sandbox.stop_owner(owner)
+      end
     end)
 
     {:ok, conn: Phoenix.ConnTest.build_conn()}

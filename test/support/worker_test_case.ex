@@ -34,8 +34,11 @@ defmodule BorsNG.Worker.TestCase do
     owner = Ecto.Adapters.SQL.Sandbox.start_owner!(repo, shared: not tags[:async])
 
     on_exit(fn ->
-      unless tags[:async], do: stop_actors()
-      Ecto.Adapters.SQL.Sandbox.stop_owner(owner)
+      try do
+        unless tags[:async], do: stop_actors()
+      after
+        Ecto.Adapters.SQL.Sandbox.stop_owner(owner)
+      end
     end)
 
     :ok
