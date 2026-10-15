@@ -366,3 +366,10 @@ or inconsistent head coverage retain the complete REST path. This conservative
 fallback can still exceed the service target; it never silently truncates
 attribution. Native and other-repository paths retain their serial reads.
 No status verdict, approval decision or command is combined by these queries.
+
+The dispatcher skips additional rows for a repository already active in the same
+lane during its current launch turn. A single due page can contain32rows from
+one previously idle repository; after its first launch, repeated claims would
+only acquire project/job locks and find the existing lease. Skipping those rows
+avoids redundant database work without replacing `claim/1`'s durable cross-node
+lock/token checks. Notification and mutation occupancy remain independent.
