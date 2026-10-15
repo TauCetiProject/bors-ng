@@ -147,6 +147,12 @@ ten drains per second, with completion always triggering an immediate drain.
 Pending candidate commands, including policy eligibility, fence construction,
 dispatch and promotion even during retry backoff. An eligibility wakeup received
 before its PR has a patch row conservatively fences the whole project until read.
+Within a priority class, polls and dispatches previously deferred by the
+withdrawal fence yield to other ready jobs. This lets the waiting member commands
+that block publication drain after defer backoff expires, even when the poll has
+an older FIFO ID. Candidate status casts keep their verdict order, and every
+publication still rechecks pending withdrawals before acting.
+
 Fence hits defer without increasing failure attempts. Their next check respects
 the earliest pending-command deadline, with completion of a command waking
 blocked operations immediately; they do not cause exponential failure backoff.

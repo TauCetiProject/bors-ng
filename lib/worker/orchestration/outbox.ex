@@ -596,6 +596,16 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
               a.rank,
               j.priority
             ),
+          # Once backoff expires, an older blocked poll/dispatch must yield to
+          # its same-class member commands. Otherwise it can reclaim forever
+          # while withdrawal_pending? prevents those very commands from draining.
+          # Verdict-bearing casts keep their existing FIFO order.
+          asc:
+            fragment(
+              "CASE WHEN ? IN ('info', 'dispatch') AND ? = 'deferred:withdrawal_pending' THEN 1 ELSE 0 END",
+              j.kind,
+              j.last_error
+            ),
           asc: j.id
         ],
         limit: ^limit

@@ -463,6 +463,12 @@ defmodule BorsNG.Worker.OrchestrationTest do
         Outbox.enqueue(ctx.project.id, "cast", {:status, {batch.commit, "ci", state, "url"}})
       end)
 
+    # An earlier green receipt can have deferred while processing a withdrawal.
+    # It must retain FIFO relative to the later red, rather than move behind it.
+    hd(observations)
+    |> Ecto.Changeset.change(last_error: "deferred:withdrawal_pending")
+    |> Repo.update!()
+
     ids = Enum.map(observations, & &1.id)
     due = Enum.map(Outbox.due(32), & &1.id)
     assert Enum.filter(due, &(&1 in ids)) == ids
@@ -492,6 +498,34 @@ defmodule BorsNG.Worker.OrchestrationTest do
     assert claimed.priority == 0
     Outbox.finish(claimed)
     assert dispatch.priority == 1
+  end
+
+  test "a deferred poll yields to waiting-member commands after its backoff expires", ctx do
+    Repo.update_all(from(j in OrchestrationJob, where: j.project_id == ^ctx.project.id),
+      set: [state: "done"]
+    )
+
+    poll = Outbox.enqueue(ctx.project.id, "info", {:poll, :once})
+    command = Outbox.enqueue(ctx.project.id, "cast", {:set_priority, ctx.patch.id, 7})
+    assert command.priority == 2
+    assert {:defer, :withdrawal_pending} == execute(ctx.worker, poll)
+    assert Repo.get!(Batch, ctx.batch.id).state == :waiting
+
+    # Reproduce a normal tick after the one-second defer deadline. The older
+    # priority-1 poll and dynamically upgraded waiting-member command now tie.
+    # Reclaiming the poll first would repeatedly hit the same withdrawal fence.
+    Repo.get!(OrchestrationJob, poll.id)
+    |> Ecto.Changeset.change(available_at: Outbox.now() - 1)
+    |> Repo.update!()
+
+    own_due = Enum.filter(Outbox.due(32), &(&1.project_id == ctx.project.id))
+    assert hd(own_due).id == command.id
+    assert :ok == execute(ctx.worker, command)
+    assert :ok == execute(ctx.worker, Repo.get!(OrchestrationJob, poll.id))
+    batch = Repo.get!(Batch, ctx.batch.id)
+    assert batch.state == :running
+    assert batch.commit == "iniN"
+    assert Outbox.pending?(ctx.project.id, "dispatch:#{batch.id}")
   end
 
   test "same-PR commands retain FIFO when a batch finishes before either runs", ctx do
