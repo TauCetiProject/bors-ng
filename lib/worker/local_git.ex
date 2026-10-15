@@ -86,6 +86,15 @@ defmodule BorsNG.Worker.LocalGit do
     end
   end
 
+  def compatibility(project, conn, base, members) do
+    run(%{repository: project.name, conn: conn}, %{
+      operation: "compatibility",
+      base_sha: base,
+      members: members,
+      timeout: 30
+    })
+  end
+
   defp run(context, request) do
     input =
       Path.join(
@@ -99,7 +108,7 @@ defmodule BorsNG.Worker.LocalGit do
           root: System.get_env("BORS_GIT_MIRROR_ROOT", "/tmp/bors-git-mirrors"),
           repository: context.repository,
           max_bytes: 2 * 1024 * 1024 * 1024,
-          timeout: 600
+          timeout: Map.get(request, :timeout, 600)
         })
 
       {:ok, file} = File.open(input, [:write, :exclusive])

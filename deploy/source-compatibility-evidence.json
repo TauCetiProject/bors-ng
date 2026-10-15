@@ -1,0 +1,56 @@
+{
+  "schema": "source-compatibility-readonly-fixture/v1",
+  "historical_run": "https://github.com/TauCetiProject/TauCeti/actions/runs/38627869562",
+  "cold": {
+    "seconds": 7.678513282007771,
+    "cpu_seconds": 4.225978801,
+    "result": {
+      "status": "ok",
+      "results": [
+        {
+          "pr": 16175,
+          "head_sha": "dedc6f8a9464710a0ab92fa76475942b7eb16d31",
+          "base_sha": "5fa17650a559a7bd9764fcc11cb306d8f8edf286",
+          "policy": "local-source-v1",
+          "status": "missing_source",
+          "tree": "c826572bb1220f234465b3de5fa299b708f72afd",
+          "missing_imports": [
+            {
+              "path": "TauCeti/AlgebraicGeometry/EllipticCurve/Affine/Point/NonsplitReduction.lean",
+              "module": "TauCeti.AlgebraicGeometry.EllipticCurve.VariableChange",
+              "provider_path": "TauCeti/AlgebraicGeometry/EllipticCurve/VariableChange.lean"
+            }
+          ],
+          "coverage": "all_project_local_headers"
+        }
+      ]
+    }
+  },
+  "warm": {
+    "seconds": 0.23122604298987426,
+    "cpu_seconds": 0.102120495,
+    "result": {
+      "status": "ok",
+      "results": [
+        {
+          "pr": 16175,
+          "head_sha": "dedc6f8a9464710a0ab92fa76475942b7eb16d31",
+          "base_sha": "5fa17650a559a7bd9764fcc11cb306d8f8edf286",
+          "policy": "local-source-v1",
+          "status": "missing_source",
+          "tree": "c826572bb1220f234465b3de5fa299b708f72afd",
+          "missing_imports": [
+            {
+              "path": "TauCeti/AlgebraicGeometry/EllipticCurve/Affine/Point/NonsplitReduction.lean",
+              "module": "TauCeti.AlgebraicGeometry.EllipticCurve.VariableChange",
+              "provider_path": "TauCeti/AlgebraicGeometry/EllipticCurve/VariableChange.lean"
+            }
+          ],
+          "coverage": "all_project_local_headers"
+        }
+      ]
+    }
+  },
+  "no_branch_or_status_mutations": true,
+  "production_acceptance": false
+}
