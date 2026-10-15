@@ -124,6 +124,41 @@ defmodule BorsNG.WebhookControllerTest do
            end)
   end
 
+  test "async stage-status filtering still delivers trying receipts to its serialized actor", %{
+    conn: conn,
+    project: project
+  } do
+    attemptor = async_webhooks(project)
+    :sys.suspend(attemptor)
+    on_exit(fn -> if Process.alive?(attemptor), do: :sys.resume(attemptor) end)
+
+    body = %{
+      "repository" => %{"id" => project.repo_xref},
+      "commit" => %{"sha" => "not-yet-recorded-try"},
+      "context" => "build",
+      "state" => "success",
+      "target_url" => "https://ci.example/try"
+    }
+
+    result =
+      conn
+      |> put_req_header("x-github-event", "status")
+      |> post(webhook_path(conn, :webhook, "github"), body)
+
+    assert result.status == 200
+    {:messages, messages} = Process.info(attemptor, :messages)
+
+    assert {:"$gen_cast",
+            {:status, {"not-yet-recorded-try", "build", :ok, "https://ci.example/try"}}} in messages
+
+    refute Enum.any?(Repo.all(BorsNG.Database.OrchestrationJob), fn j ->
+             match?({:status, _}, BorsNG.Worker.Orchestration.Outbox.payload(j))
+           end)
+
+    :sys.resume(attemptor)
+    :sys.get_state(attemptor)
+  end
+
   test "async filtering preserves ordinary PR eligibility notifications and dirty versions", %{
     conn: conn,
     project: project

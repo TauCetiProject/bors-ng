@@ -11,6 +11,7 @@ defmodule BorsNG.Database.OrchestrationJob do
     field(:state, :string, default: "pending")
     field(:wake_version, :integer, default: 0)
     field(:claimed_version, :integer)
+    field(:rerun_enqueued_at_ms, :integer)
     field(:rerun_at, :integer)
     field(:priority, :integer, default: 2)
     field(:enqueued_at_ms, :integer)

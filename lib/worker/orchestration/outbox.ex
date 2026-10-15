@@ -23,7 +23,8 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
       end
 
     attributes = schedule_attributes(project_id, kind, payload)
-    wake_key = wake_key(project_id, kind, payload)
+    # A read before a future timer's deadline cannot satisfy that timer.
+    wake_key = if available_at <= now(), do: wake_key(project_id, kind, payload)
 
     key =
       if is_nil(key) and kind == "cast" and match?({:status, _}, payload),
@@ -62,48 +63,81 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
 
   defp wake_key(_, _, _), do: nil
 
-  defp insert_job(job, nil), do: Repo.insert!(job, on_conflict: :nothing)
+  defp insert_job(job, nil),
+    do: with_project(job.project_id, fn -> Repo.insert!(job, on_conflict: :nothing) end)
 
   defp insert_job(job, key) do
     {:ok, result} =
       Repo.transaction(fn ->
+        # Match claim's lock order. MySQL's unique-key insert plus a locking
+        # read can otherwise deadlock simultaneous producers and completion.
+        Repo.one(from(p in Project, where: p.id == ^job.project_id, lock: "FOR UPDATE"))
         Repo.insert!(job, on_conflict: :nothing)
 
         current =
           Repo.one(from(j in OrchestrationJob, where: j.dedup_key == ^key, lock: "FOR UPDATE"))
 
-        if current do
-          # A running observation cannot cover an arrival that races its external
-          # read. Record that revision and the earliest requested follow-up time.
-          changes =
-            if current.state == "running" do
-              [rerun_at: min(current.rerun_at || job.available_at, job.available_at)]
-            else
-              # A fresh webhook may shorten a timer, but cannot defeat error backoff.
-              ready =
-                if current.attempts > 0 and current.last_error,
-                  do: current.available_at,
-                  else: min(current.available_at, job.available_at)
+        cond do
+          is_nil(current) ->
+            nil
 
-              [available_at: ready]
-            end
+          current.state == "pending" and command_after?(current) ->
+            # Keep the earlier read, but a later wakeup must also observe commands
+            # queued in between. Give that later read a new FIFO position.
+            current |> Ecto.Changeset.change(dedup_key: nil) |> Repo.update!()
+            job |> Ecto.Changeset.change(wake_version: 1) |> Repo.insert!()
 
-          current
-          |> Ecto.Changeset.change(
-            changes ++
-              [
-                wake_version: current.wake_version + 1,
-                subject_id: job.subject_id,
-                priority: min(current.priority, job.priority)
-              ]
-          )
-          |> Repo.update!()
+          true ->
+            changes =
+              if current.state == "running" do
+                [
+                  rerun_at: min(current.rerun_at || job.available_at, job.available_at),
+                  rerun_enqueued_at_ms:
+                    min(current.rerun_enqueued_at_ms || job.enqueued_at_ms, job.enqueued_at_ms)
+                ]
+              else
+                ready =
+                  if current.attempts > 0 and current.last_error,
+                    do: current.available_at,
+                    else: min(current.available_at, job.available_at)
+
+                [available_at: ready]
+              end
+
+            current
+            |> Ecto.Changeset.change(
+              changes ++
+                [
+                  wake_version: current.wake_version + 1,
+                  subject_id: job.subject_id,
+                  priority: job.priority
+                ]
+            )
+            |> Repo.update!()
         end
       end)
 
-    # Completion may have cleared the key between ON CONFLICT and the locking
-    # read on PostgreSQL. Retry insertion; that wakeup still needs an owner.
+    # Concurrent completion may clear the key after ON CONFLICT. The receipt
+    # must acquire a fresh owner instead of being acknowledged without work.
     if result, do: result, else: insert_job(job, key)
+  end
+
+  defp command_after?(job) do
+    # Current locking read: MySQL may otherwise reuse a pre-lock snapshot.
+    not is_nil(
+      Repo.one(
+        from(j in OrchestrationJob,
+          where:
+            j.project_id == ^job.project_id and j.id > ^job.id and
+              j.state in ["pending", "running"] and j.wake_version == 0 and
+              (not is_nil(j.subject_id) or j.kind == "cancel_all"),
+          select: j.id,
+          order_by: [desc: j.id],
+          limit: 1,
+          lock: "FOR UPDATE"
+        )
+      )
+    )
   end
 
   def payload(job), do: :erlang.binary_to_term(job.payload, [:safe])
@@ -230,6 +264,7 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
           |> Ecto.Changeset.change(
             claimed_version: job.wake_version,
             rerun_at: nil,
+            rerun_enqueued_at_ms: nil,
             claimed_at_ms: System.system_time(:millisecond),
             state: "running",
             token: token,
@@ -243,29 +278,61 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
     end)
   end
 
-  def renew(job), do: owned(job) |> Repo.update_all(set: [lease_until: now() + 300])
+  defp with_project(project_id, action) do
+    {:ok, result} =
+      Repo.transaction(fn ->
+        Repo.one(from(p in Project, where: p.id == ^project_id, lock: "FOR UPDATE"))
+        action.()
+      end)
+
+    result
+  end
+
+  def renew(job),
+    do:
+      with_project(job.project_id, fn ->
+        owned(job) |> Repo.update_all(set: [lease_until: now() + 300])
+      end)
 
   def finish(%{wake_version: version} = job) when version > 0 do
     {:ok, result} =
       Repo.transaction(fn ->
+        Repo.one(from(p in Project, where: p.id == ^job.project_id, lock: "FOR UPDATE"))
         current = Repo.one(from(j in owned(job), lock: "FOR UPDATE"))
 
         if current do
-          dirty = current.wake_version > job.claimed_version
+          unless is_integer(current.claimed_version), do: Repo.rollback(:missing_wake_claim)
+          dirty = current.wake_version > current.claimed_version
+          key = current.dedup_key
 
-          changes = [
-            state: if(dirty, do: "pending", else: "done"),
-            dedup_key: if(dirty, do: current.dedup_key, else: nil),
-            available_at: if(dirty, do: current.rerun_at || now(), else: current.available_at),
+          current
+          |> Ecto.Changeset.change(
+            state: "done",
+            dedup_key: nil,
+            wake_version: current.claimed_version,
             completed_at_ms: System.system_time(:millisecond),
             token: nil,
-            lease_until: 0,
-            rerun_at: nil,
-            last_error: nil
-          ]
+            lease_until: 0
+          )
+          |> Repo.update!()
 
-          changes = if dirty, do: [{:attempts, 0} | changes], else: changes
-          current |> Ecto.Changeset.change(changes) |> Repo.update!()
+          if dirty do
+            attributes = schedule_attributes(current.project_id, current.kind, payload(current))
+            # A continuation belongs after commands queued during the read. Row
+            # replacement and key transfer commit atomically with completion.
+            Repo.insert!(%OrchestrationJob{
+              project_id: current.project_id,
+              kind: current.kind,
+              subject_id: attributes.subject_id,
+              priority: attributes.priority,
+              payload: current.payload,
+              dedup_key: key,
+              available_at: current.rerun_at || now(),
+              enqueued_at_ms: current.rerun_enqueued_at_ms || System.system_time(:millisecond),
+              wake_version: current.wake_version - current.claimed_version
+            })
+          end
+
           {1, nil}
         else
           {0, nil}
@@ -278,17 +345,19 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
 
   def finish(job) do
     result =
-      owned(job)
-      |> Repo.update_all(
-        set: [
-          state: "done",
-          completed_at_ms: System.system_time(:millisecond),
-          dedup_key: if(job.kind in ["notice", "dispatch"], do: job.dedup_key, else: nil),
-          token: nil,
-          lease_until: 0,
-          updated_at: NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)
-        ]
-      )
+      with_project(job.project_id, fn ->
+        owned(job)
+        |> Repo.update_all(
+          set: [
+            state: "done",
+            completed_at_ms: System.system_time(:millisecond),
+            dedup_key: if(job.kind in ["notice", "dispatch"], do: job.dedup_key, else: nil),
+            token: nil,
+            lease_until: 0,
+            updated_at: NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)
+          ]
+        )
+      end)
 
     if elem(result, 0) > 0 and (job.subject_id || job.kind == "cancel_all"),
       do: wake_deferred(job.project_id)
@@ -297,39 +366,43 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
   end
 
   defp wake_deferred(project_id) do
-    Repo.update_all(
-      from(j in OrchestrationJob,
-        where:
-          j.project_id == ^project_id and j.state == "pending" and
-            j.last_error == "deferred:withdrawal_pending"
-      ),
-      set: [available_at: now()]
-    )
+    with_project(project_id, fn ->
+      Repo.update_all(
+        from(j in OrchestrationJob,
+          where:
+            j.project_id == ^project_id and j.state == "pending" and
+              j.last_error == "deferred:withdrawal_pending"
+        ),
+        set: [available_at: now()]
+      )
+    end)
   end
 
   def defer(job, reason) do
-    pending_at =
-      Repo.one(
-        from(j in OrchestrationJob,
-          where:
-            j.project_id == ^job.project_id and j.state == "pending" and
-              (j.kind == "cancel_all" or not is_nil(j.subject_id)),
-          select: min(j.available_at)
+    with_project(job.project_id, fn ->
+      pending_at =
+        Repo.one(
+          from(j in OrchestrationJob,
+            where:
+              j.project_id == ^job.project_id and j.state == "pending" and
+                (j.kind == "cancel_all" or not is_nil(j.subject_id)),
+            select: min(j.available_at)
+          )
         )
-      )
 
-    owned(job)
-    |> Repo.update_all(
-      set: [
-        state: "pending",
-        token: nil,
-        lease_until: 0,
-        available_at: max(now() + 1, pending_at || 0),
-        attempts: max(job.attempts - 1, 0),
-        completed_at_ms: System.system_time(:millisecond),
-        last_error: "deferred:#{reason}"
-      ]
-    )
+      owned(job)
+      |> Repo.update_all(
+        set: [
+          state: "pending",
+          token: nil,
+          lease_until: 0,
+          available_at: max(now() + 1, pending_at || 0),
+          attempts: max(job.attempts - 1, 0),
+          completed_at_ms: System.system_time(:millisecond),
+          last_error: "deferred:#{reason}"
+        ]
+      )
+    end)
   end
 
   def fail(job, reason) do
@@ -342,17 +415,19 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
     delay = min(60 * Integer.pow(2, min(job.attempts - 1, 6)), 3600)
     delay = if match?({:worker_exit, _}, reason), do: max(delay, 300), else: delay
 
-    owned(job)
-    |> Repo.update_all(
-      set: [
-        state: "pending",
-        completed_at_ms: System.system_time(:millisecond),
-        available_at: now() + delay,
-        token: nil,
-        lease_until: 0,
-        last_error: inspect(reason, limit: 8, printable_limit: 200)
-      ]
-    )
+    with_project(job.project_id, fn ->
+      owned(job)
+      |> Repo.update_all(
+        set: [
+          state: "pending",
+          completed_at_ms: System.system_time(:millisecond),
+          available_at: now() + delay,
+          token: nil,
+          lease_until: 0,
+          last_error: inspect(reason, limit: 8, printable_limit: 200)
+        ]
+      )
+    end)
   end
 
   def withdrawal_pending?(project_id, patch_ids) do
@@ -425,10 +500,33 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
   end
 
   def recover_expired do
-    Repo.update_all(
-      from(j in OrchestrationJob, where: j.state == "running" and j.lease_until <= ^now()),
-      set: [state: "pending", token: nil, lease_until: 0]
-    )
+    projects =
+      Repo.all(
+        from(j in OrchestrationJob,
+          where: j.state == "running" and j.lease_until <= ^now(),
+          distinct: true,
+          select: j.project_id,
+          limit: 32
+        )
+      )
+
+    count =
+      Enum.reduce(projects, 0, fn project_id, count ->
+        {changed, _} =
+          with_project(project_id, fn ->
+            Repo.update_all(
+              from(j in OrchestrationJob,
+                where:
+                  j.project_id == ^project_id and j.state == "running" and j.lease_until <= ^now()
+              ),
+              set: [state: "pending", token: nil, lease_until: 0]
+            )
+          end)
+
+        count + changed
+      end)
+
+    {count, nil}
   end
 
   def owned?(job), do: Repo.exists?(owned(job))

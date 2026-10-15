@@ -37,10 +37,10 @@ defmodule BorsNG.Worker.StatusRoutingTest do
     assert StatusRouting.batch?(p.id, "not-yet-bound")
   end
 
-  test "trying identities are retained, scoped to their repository", %{project: p} do
+  test "trying identities do not require a redundant stage-status job", %{project: p} do
     patch = Repo.insert!(%Patch{project_id: p.id, commit: "pr", pr_xref: 1})
     Repo.insert!(%Attempt{patch_id: patch.id, state: 1, commit: "try-head"})
-    assert StatusRouting.batch?(p.id, "try-head")
+    refute StatusRouting.batch?(p.id, "try-head")
     other = Repo.insert!(%Project{name: "other", repo_xref: 4813})
     refute StatusRouting.batch?(other.id, "try-head")
   end

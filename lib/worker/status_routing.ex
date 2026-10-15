@@ -1,7 +1,7 @@
 defmodule BorsNG.Worker.StatusRouting do
   @moduledoc "Avoid serialized no-op status work while preserving construction races."
   import Ecto.Query
-  alias BorsNG.Database.{Attempt, Batch, Candidate, Patch, Repo}
+  alias BorsNG.Database.{Batch, Candidate, Repo}
   alias BorsNG.Worker.Orchestration.Outbox
 
   def batch?(project_id, commit) do
@@ -9,20 +9,12 @@ defmodule BorsNG.Worker.StatusRouting do
     # durably binds before publication, but conservatively retain observations
     # while a candidate is being assembled on temporary refs as well.
     not Outbox.enabled?() or
+      Repo.exists?(from(b in Batch, where: b.project_id == ^project_id and b.commit == ^commit)) or
       Repo.exists?(
         from(b in Batch,
-          left_join: c in Candidate,
+          join: c in Candidate,
           on: c.batch_id == b.id,
-          where:
-            b.project_id == ^project_id and
-              (b.commit == ^commit or (b.state == :waiting and not is_nil(c.id)))
-        )
-      ) or
-      Repo.exists?(
-        from(a in Attempt,
-          join: p in Patch,
-          on: p.id == a.patch_id,
-          where: p.project_id == ^project_id and a.commit == ^commit
+          where: b.project_id == ^project_id and b.state == :waiting
         )
       )
   end

@@ -160,9 +160,9 @@
     "Long preparation, recursive polls and outgoing labels/status projections can still occupy the single executor. They are measured/bounded next in this same issue."
   ],
   "local_validation": {
-    "postgresql": "1019 tests + 7 doctests passed",
-    "mysql": "1019 tests + 7 doctests passed",
-    "focused": "routing/wakeup/orchestration 40; ingress/routing/wakeup 41 passed"
+    "postgresql": "1023 tests + 7 doctests passed; final locking run in progress",
+    "mysql": "1023 tests + 7 doctests passed; final locking/cleanup run in progress",
+    "focused": "74 ingress/wakeup/routing/orchestration tests; 38 final lock/wakeup/orchestration tests passed"
   },
   "production_rollout": "pending; do not infer a production gain from local tests",
   "priority_rollout_evidence": {
@@ -197,5 +197,19 @@
     "unchanged_current_head_approvals": 323,
     "duplicate_active_heads": 0,
     "limitation": "No fresh post-deployment dispatch yet at this snapshot; raw old-row waits include restart lease hold."
+  },
+  "review_corrections": [
+    "Future timers retain per-deadline keys; immediate reads cannot consume a later admission deadline.",
+    "Receipts separated by pending commands keep distinct FIFO reads; dirty completions atomically transfer the key to a fresh FIFO row.",
+    "Follow-up queue age starts at the earliest late receipt; claimed revision is read from the locked durable row.",
+    "Indexed batch identity/assembly queries preserve unconditional trying delivery without scanning attempts for stage routing.",
+    "All short mailbox transactions follow project-then-job lock order; real MySQL concurrent producer/consumer deadlock reproduced before the fix.",
+    "Test sandbox ownership lasts until globally supervised fixture actors stop; assertions and production behaviour are unchanged."
+  ],
+  "concurrency_fixtures": {
+    "workload": "four concurrent producers, 80 authoritative wakeups, 16 interleaved exact commands, one consumer; no GitHub requests",
+    "postgresql": "80 versions conserved; no pending rows or missing receipts",
+    "mysql": "80 versions conserved; 16 exact commands; 8 completed reads in this run, 24 total claims; no pending rows or missing receipts",
+    "limits": "Synthetic database operation counts, not a production API or throughput saving. Command/timer ordering and stale-token cases have separate regressions."
   }
 }

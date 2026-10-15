@@ -191,20 +191,30 @@ of current state; it does not carry a verdict. Enqueue increments `wake_version`
 under a row lock. Claim snapshots it in `claimed_version`. Completion clears the
 key only when those versions still match. A receipt during execution increments
 the version and records the earliest requested `rerun_at`, so completion re-pends
-one follow-up read. The comparison and completion update hold the same row lock
-as receipt, preventing a lost wakeup on either side of completion. A receipt that
+one follow-up read in a new FIFO row, atomically completing the old owner and
+transferring the key. This puts a late read after commands queued during the
+previous read. A pending wakeup separated by a command also gets a new row,
+retaining the earlier read and preserving command order. The comparison and key
+transfer hold the same row lock as receipt, preventing a lost wakeup on either
+side of completion. A receipt that
 races key removal retries insertion instead of disappearing.
 
-Repeated pending wakeups share one read. A fresh receipt can advance a scheduled
-timer, but cannot shorten infrastructure-error backoff. A retry/expired-lease
+Short mailbox transactions use the same project-then-job lock order for
+receipt, completion, recovery and leases on both adapters. They never hold that
+lock over GitHub work. This prevents MySQL unique-key/gap-lock deadlocks between
+producers and a completing/claiming consumer.
+
+Repeated pending wakeups share one read. Only immediately due wakeups coalesce. Future timers retain their original
+per-deadline keys: an earlier read cannot satisfy a later admission deadline.
+Fresh receipts cannot shorten infrastructure-error backoff. A retry/expired-lease
 claim snapshots the latest durable version; stale tokens cannot complete it.
 No approval, withdrawal, head-change, bundle/priority command or candidate status
 verdict uses this coalescing mechanism. Existing exact status-payload deduplication
 and immutable check/candidate observation receipts retain their prior semantics.
 
-In async mode, webhook ingress avoids durable status jobs for SHAs that match no
-recorded batch or trying attempt, outside an assembling candidate's conservative
-fallback. Async dispatch binds its commit before publication. An unbound candidate
+In async mode, webhook ingress avoids durable stage-status jobs for SHAs that
+match no recorded batch, outside an assembling candidate's conservative fallback.
+Trying receipts still go directly to their independent serialized actor. Async dispatch binds its commit before publication. An unbound candidate
 on a waiting batch retains unmatched observations to cover temporary-ref assembly
 races; a database/read failure fails the webhook for its ordinary durable retry.
 Legacy mode still forwards every status because its publication can precede its

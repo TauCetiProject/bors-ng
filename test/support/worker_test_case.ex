@@ -20,12 +20,23 @@ defmodule BorsNG.Worker.TestCase do
     end
   end
 
-  setup tags do
-    :ok = Ecto.Adapters.SQL.Sandbox.checkout(:persistent_term.get(:db_repo))
-
-    unless tags[:async] do
-      Ecto.Adapters.SQL.Sandbox.mode(:persistent_term.get(:db_repo), {:shared, self()})
+  # Keep SQL ownership alive while globally supervised fixture actors stop.
+  # Otherwise a final asynchronous webhook cast can outlive its test process
+  # and take the application down through repeated sandbox ownership exits.
+  def stop_actors do
+    for supervisor <- [BorsNG.Worker.Batcher.Supervisor, BorsNG.Worker.Attemptor.Supervisor] do
+      if Process.whereis(supervisor), do: supervisor.terminate_all()
     end
+  end
+
+  setup tags do
+    repo = :persistent_term.get(:db_repo)
+    owner = Ecto.Adapters.SQL.Sandbox.start_owner!(repo, shared: not tags[:async])
+
+    on_exit(fn ->
+      unless tags[:async], do: stop_actors()
+      Ecto.Adapters.SQL.Sandbox.stop_owner(owner)
+    end)
 
     :ok
   end

@@ -1,13 +1,14 @@
 defmodule BorsNG.Worker.WakeupTest do
   use BorsNG.Worker.TestCase
-  alias BorsNG.Database.{OrchestrationJob, Project, Repo}
+  alias BorsNG.Database.{OrchestrationJob, Patch, Project, Repo}
   alias BorsNG.Worker.Orchestration.Outbox
 
   setup do
     :sys.suspend(BorsNG.Worker.Orchestration.Dispatcher)
     project = Repo.insert!(%Project{name: "wake-test", repo_xref: 4811})
+    patch = Repo.insert!(%Patch{project_id: project.id, pr_xref: 1, commit: "head"})
     on_exit(fn -> :sys.resume(BorsNG.Worker.Orchestration.Dispatcher) end)
-    {:ok, project: project}
+    {:ok, project: project, patch: patch}
   end
 
   test "one pending eligibility read covers every receipt before claim", %{project: p} do
@@ -22,26 +23,71 @@ defmodule BorsNG.Worker.WakeupTest do
     assert Outbox.enqueue(p.id, "cast", {:eligibility, 1}).id != claimed.id
   end
 
-  test "arrival during a read guarantees one follow-up, with the earliest requested deadline", %{
+  test "future poll deadlines survive an earlier pending or running poll", %{project: p} do
+    job = Outbox.enqueue(p.id, "info", {:poll, :once})
+    early = Outbox.enqueue(p.id, "info", {:poll, :once}, "timer:10", Outbox.now() + 10)
+    {:ok, claimed} = Outbox.claim(job.id)
+    late = Outbox.enqueue(p.id, "info", {:poll, :once}, "timer:30", Outbox.now() + 30)
+    assert early.id != job.id and late.id != job.id
+    assert early.wake_version == 0 and late.wake_version == 0
+    assert {1, _} = Outbox.finish(claimed)
+    assert Repo.get!(OrchestrationJob, early.id).state == "pending"
+    assert Repo.get!(OrchestrationJob, late.id).state == "pending"
+    assert early.available_at < late.available_at
+    early |> Ecto.Changeset.change(available_at: 0) |> Repo.update!()
+    {:ok, early_claim} = Outbox.claim(early.id)
+    Outbox.finish(early_claim)
+    assert Repo.get!(OrchestrationJob, late.id).state == "pending"
+    assert Repo.get!(OrchestrationJob, late.id).available_at == late.available_at
+  end
+
+  test "a receipt during a read survives after intervening commands in a new FIFO row", %{
+    project: p,
+    patch: patch
+  } do
+    job = Outbox.enqueue(p.id, "cast", {:eligibility, 1})
+    {:ok, claimed} = Outbox.claim(job.id)
+    command = Outbox.enqueue(p.id, "cast", {:set_priority, patch.id, 7})
+    receipt = Outbox.enqueue(p.id, "cast", {:eligibility, 1})
+    assert receipt.id == job.id
+    assert {1, _} = Outbox.finish(claimed)
+    assert Repo.get!(OrchestrationJob, job.id).state == "done"
+    followup = Repo.get_by!(OrchestrationJob, dedup_key: "wake:#{p.id}:eligibility:1")
+    assert followup.id > command.id and followup.wake_version == 1
+    assert followup.enqueued_at_ms >= job.enqueued_at_ms
+    assert Enum.map(Outbox.due(32), & &1.id) == [command.id, followup.id]
+    {:ok, command_claim} = Outbox.claim(command.id)
+    Outbox.finish(command_claim)
+    {:ok, current} = Outbox.claim(followup.id)
+    assert {0, _} = Outbox.finish(claimed)
+    assert {1, _} = Outbox.finish(current)
+  end
+
+  test "a pending coalesced read does not swallow a wakeup after an intervening command", %{
+    project: p,
+    patch: patch
+  } do
+    first = Outbox.enqueue(p.id, "cast", {:eligibility, 1})
+    command = Outbox.enqueue(p.id, "cast", {:set_priority, patch.id, 7})
+    later = Outbox.enqueue(p.id, "cast", {:eligibility, 1})
+    assert first.id < command.id and later.id > command.id
+    assert Repo.get!(OrchestrationJob, first.id).dedup_key == nil
+    assert Enum.map(Outbox.due(32), & &1.id) == [first.id, command.id, later.id]
+  end
+
+  test "an initially unknown PR resolves its subject before a later FIFO continuation", %{
     project: p
   } do
-    job = Outbox.enqueue(p.id, "info", {:poll, :once})
-    {:ok, claimed} = Outbox.claim(job.id)
-    first = Outbox.enqueue(p.id, "info", {:poll, :once}, nil, Outbox.now() + 30)
-    second = Outbox.enqueue(p.id, "info", {:poll, :once}, nil, Outbox.now() + 10)
-    assert first.id == job.id and second.id == job.id
-    assert {1, _} = Outbox.finish(claimed)
-    dirty = Repo.get!(OrchestrationJob, job.id)
-    assert dirty.state == "pending" and dirty.wake_version == 3
-    assert dirty.available_at == second.rerun_at
-    assert dirty.available_at >= Outbox.now() + 9
-    assert {:ok, nil} == Outbox.claim(job.id)
-    dirty |> Ecto.Changeset.change(available_at: 0) |> Repo.update!()
-    {:ok, followup} = Outbox.claim(job.id)
-    assert followup.claimed_version == 3
-    assert {0, _} = Outbox.finish(claimed)
-    assert {1, _} = Outbox.finish(followup)
-    assert Repo.get!(OrchestrationJob, job.id).state == "done"
+    first = Outbox.enqueue(p.id, "cast", {:eligibility, 99})
+    assert first.subject_id == 0
+    {:ok, claimed} = Outbox.claim(first.id)
+    patch = Repo.insert!(%Patch{project_id: p.id, pr_xref: 99, commit: "new"})
+    command = Outbox.enqueue(p.id, "cast", {:set_priority, patch.id, 7})
+    Outbox.enqueue(p.id, "cast", {:eligibility, 99})
+    Outbox.finish(claimed)
+    next = Repo.get_by!(OrchestrationJob, dedup_key: "wake:#{p.id}:eligibility:99")
+    assert next.subject_id == patch.id and next.priority == 2 and next.id > command.id
+    assert Enum.map(Outbox.due(32), & &1.id) == [command.id, next.id]
   end
 
   test "new wakeups cannot shorten infrastructure backoff", %{project: p} do
