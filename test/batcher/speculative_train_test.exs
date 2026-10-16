@@ -466,6 +466,90 @@ defmodule BorsNG.Worker.SpeculativeTrainTest do
     end
   end
 
+  for workflow_status <- ["queued", "in_progress"] do
+    @workflow_status workflow_status
+    test "green statuses durably retry a #{@workflow_status} exact workflow", %{project: project} do
+      {a, ca, _} = candidate(project, 1)
+      Train.reserve(ca, @conn)
+      run(ca, @workflow_status)
+
+      GitHub.ServerMock.put_state(
+        put_in(GitHub.ServerMock.get_state(), [@conn, :statuses, a.commit], %{"build" => :ok})
+      )
+
+      {:ok, job} = Outbox.claim(Outbox.enqueue(project.id, "info", {:poll, :once}).id)
+      Process.put(:orchestration_job, job)
+      before = Outbox.now()
+      Batcher.do_handle_cast({:status, {a.commit, "build", :ok, "url"}}, project.id)
+      assert Repo.get!(Batch, a.id).state == :running
+      refute Train.event?(ca, "promotion_requested")
+
+      [retry] =
+        Repo.all(
+          from(j in BorsNG.Database.OrchestrationJob,
+            where: j.project_id == ^project.id and j.state == "pending" and j.kind == "info"
+          )
+        )
+        |> Enum.filter(&(Outbox.payload(&1) == {:retry_promotion, a.id, a.commit}))
+
+      assert retry.available_at >= before + 120
+      assert retry.available_at <= Outbox.now() + 122
+      Outbox.finish(job)
+      Process.delete(:orchestration_job)
+      Process.delete({:batch_recheck, a.id})
+
+      # The retry survives its original executor and bypasses the coarse poll,
+      # while still requiring this generation's actual successful workflow.
+      run(ca, "completed", "success")
+      retry |> Ecto.Changeset.change(available_at: Outbox.now()) |> Repo.update!()
+      {:ok, retry} = Outbox.claim(retry.id)
+      Process.put(:orchestration_job, retry)
+      Batcher.handle_info(Outbox.payload(retry), project.id)
+      # The fixture deliberately has no Git publisher credentials. Reaching
+      # normal promotion must retain its existing fail-closed infrastructure
+      # backoff, rather than treating the successful workflow as a landing.
+      assert Train.event?(ca, "promotion_requested")
+      assert Repo.get!(Batch, a.id).state == :running
+      assert Repo.get!(Batch, a.id).promotion_failures == 1
+      refute Train.event?(ca, "promoted")
+      assert GitHub.ServerMock.get_state()[@conn].branches["main"] == @base
+    end
+  end
+
+  test "a pending-workflow retry still honors a later withdrawal", %{project: project} do
+    {a, ca, [link]} = candidate(project, 1)
+    Train.reserve(ca, @conn)
+    run(ca, "in_progress")
+
+    GitHub.ServerMock.put_state(
+      put_in(GitHub.ServerMock.get_state(), [@conn, :statuses, a.commit], %{"build" => :ok})
+    )
+
+    {:ok, job} = Outbox.claim(Outbox.enqueue(project.id, "info", {:poll, :once}).id)
+    Process.put(:orchestration_job, job)
+    Batcher.do_handle_cast({:status, {a.commit, "build", :ok, "url"}}, project.id)
+
+    [retry] =
+      Repo.all(
+        from(j in BorsNG.Database.OrchestrationJob,
+          where: j.project_id == ^project.id and j.state == "pending" and j.kind == "info"
+        )
+      )
+      |> Enum.filter(&(Outbox.payload(&1) == {:retry_promotion, a.id, a.commit}))
+
+    Outbox.finish(job)
+    Process.delete(:orchestration_job)
+    run(ca, "completed", "success")
+    Outbox.enqueue(project.id, "cast", {:cancel, link.patch_id, :requested})
+    retry |> Ecto.Changeset.change(available_at: Outbox.now()) |> Repo.update!()
+    {:ok, retry} = Outbox.claim(retry.id)
+    Process.put(:orchestration_job, retry)
+    Batcher.handle_info(Outbox.payload(retry), project.id)
+    assert Repo.get!(Batch, a.id).state == :running
+    refute Train.event?(ca, "promotion_requested")
+    assert GitHub.ServerMock.get_state()[@conn].branches["main"] == @base
+  end
+
   test "lifetime canary budget survives new parent generations", %{project: project} do
     {_, ca, _} = candidate(project, 1)
     assert Train.budget_available?(project.id)
