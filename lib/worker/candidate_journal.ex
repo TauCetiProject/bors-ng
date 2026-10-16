@@ -144,7 +144,13 @@ defmodule BorsNG.Worker.CandidateJournal do
                 }
 
               a ->
-                Map.put(a.snapshot, "admission_id", a.id)
+                # Admission is historical provenance, including the original
+                # approval. A same-head human takeover updates the queued link;
+                # freeze that decision in this generation without rewriting age,
+                # reviewer, admitted head, scheduling or ancestry evidence.
+                a.snapshot
+                |> Map.put("admission_id", a.id)
+                |> Map.put("manual_approval", link.manual_approval)
             end
             |> Map.put("link_id", link.id)
             |> Map.put("assembly_head_sha", link.patch.commit)
@@ -212,8 +218,13 @@ defmodule BorsNG.Worker.CandidateJournal do
           |> Map.merge(%{commit: commit, tree: tree})
 
         case BorsNG.Worker.CandidateAssembler.validate_result(candidate, result) do
-          :ok -> :ok
-          {:error, reason} -> raise(ArgumentError, "assembly result rejected: #{reason}")
+          :ok ->
+            :ok
+
+          {:error, reason} ->
+            raise BorsNG.Worker.CandidateAssembler.Rejected,
+              candidate: candidate,
+              reason: reason
         end
 
         event(candidate, "constructed", source, %{

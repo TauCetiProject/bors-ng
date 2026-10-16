@@ -7,11 +7,17 @@ defmodule BorsNG.Worker.CandidateAssembler do
   CI, authorize reviews or publish caches. Context supplies repository access,
   policy and attribution metadata; implementations must not substitute live
   heads. External mutations and their recovery belong to the authorized caller.
-  The serial GitHub path records the same result envelope at its existing
-  combined create/push boundary; see CANDIDATES.md.
+  The serial GitHub path records the same result envelope after object creation
+  and before staging publication; see CANDIDATES.md.
   """
   alias BorsNG.Database.{Candidate, LinkPatchBatch, Repo}
   alias BorsNG.Worker.CandidateJournal
+
+  defmodule Rejected do
+    defexception [:candidate, :reason]
+
+    def message(%{reason: reason}), do: "assembly result rejected: #{reason}"
+  end
 
   @type input :: Candidate.t()
   @type result :: %{
@@ -63,8 +69,10 @@ defmodule BorsNG.Worker.CandidateAssembler do
     fields = ~w(link_id patch_id head_sha reviewer manual_approval assembly_head_sha)
     expected = candidate.snapshot["members"] |> Enum.map(&Map.take(&1, fields))
 
+    links = Repo.all(LinkPatchBatch.from_batch(candidate.batch_id))
+
     actual =
-      Repo.all(LinkPatchBatch.from_batch(candidate.batch_id))
+      links
       |> Enum.map(fn link ->
         %{
           "link_id" => link.id,
@@ -76,6 +84,7 @@ defmodule BorsNG.Worker.CandidateAssembler do
         }
       end)
 
-    Enum.sort_by(expected, & &1["link_id"]) == Enum.sort_by(actual, & &1["link_id"])
+    Enum.all?(links, &(&1.manual_approval == &1.patch.manual_approval)) and
+      Enum.sort_by(expected, & &1["link_id"]) == Enum.sort_by(actual, & &1["link_id"])
   end
 end

@@ -384,9 +384,11 @@ defmodule BorsNG.Worker.CandidateJournalTest do
     begin(ctx.batch)
     assert assembler.validate_result(first, result) == {:error, :stale_candidate}
 
-    assert_raise ArgumentError, "assembly result rejected: stale_candidate", fn ->
-      bind(first, "built")
-    end
+    assert_raise BorsNG.Worker.CandidateAssembler.Rejected,
+                 "assembly result rejected: stale_candidate",
+                 fn ->
+                   bind(first, "built")
+                 end
 
     assert Journal.commit_binding(first) == %{}
   end
@@ -403,10 +405,85 @@ defmodule BorsNG.Worker.CandidateJournalTest do
     Repo.delete!(link)
     assert assembler.validate_result(candidate, result) == {:error, :membership_changed}
 
-    assert_raise ArgumentError, "assembly result rejected: membership_changed", fn ->
-      bind(candidate, "built")
-    end
+    assert_raise BorsNG.Worker.CandidateAssembler.Rejected,
+                 "assembly result rejected: membership_changed",
+                 fn ->
+                   bind(candidate, "built")
+                 end
 
     assert Journal.commit_binding(candidate) == %{}
+  end
+
+  test "new generations refresh only manual approval, retaining immutable provenance", ctx do
+    link = member(ctx.batch, ctx.patch)
+    original = Journal.admission(link.id)
+    first = begin(ctx.batch)
+    approval = %{"head_sha" => "head", "actor_id" => 8, "merge_base_sha" => "base"}
+    ctx.patch |> Patch.changeset(%{manual_approval: approval}) |> Repo.update!()
+    link |> LinkPatchBatch.changeset(%{manual_approval: approval}) |> Repo.update!()
+    second = begin(ctx.batch)
+
+    assert hd(second.snapshot["members"]) ==
+             hd(first.snapshot["members"]) |> Map.put("manual_approval", approval)
+
+    refute BorsNG.Worker.CandidateAssembler.identity(first).members_digest ==
+             BorsNG.Worker.CandidateAssembler.identity(second).members_digest
+
+    assert :ok == bind(second, "built")
+    assert Journal.admission(link.id) == original
+    assert Repo.get!(Candidate, first.id) == first
+  end
+
+  for {field, changed} <- [
+        {:manual_approval, nil},
+        {:manual_approval, %{"actor_id" => 8, "head_sha" => "head"}},
+        {:reviewer, "different reviewer"},
+        {:head_sha, "other head"}
+      ] do
+    test "post-begin #{field}=#{inspect(changed)} rejects binding", ctx do
+      link = member(ctx.batch, ctx.patch)
+      candidate = begin(ctx.batch)
+
+      link
+      |> LinkPatchBatch.changeset(%{unquote(field) => unquote(Macro.escape(changed))})
+      |> Repo.update!()
+
+      assert_raise BorsNG.Worker.CandidateAssembler.Rejected,
+                   "assembly result rejected: membership_changed",
+                   fn -> bind(candidate, "built") end
+
+      assert Journal.commit_binding(candidate) == %{}
+    end
+  end
+
+  test "patch-only manual revocation rejects a candidate even if its queued link is unchanged",
+       ctx do
+    member(ctx.batch, ctx.patch)
+    candidate = begin(ctx.batch)
+    ctx.patch |> Patch.changeset(%{manual_approval: nil}) |> Repo.update!()
+
+    assert_raise BorsNG.Worker.CandidateAssembler.Rejected,
+                 "assembly result rejected: membership_changed",
+                 fn -> bind(candidate, "built") end
+  end
+
+  for {field, changed} <- [{:reviewer, "other reviewer"}, {:head_sha, "other head"}] do
+    test "pre-begin #{field} mismatch cannot refresh admitted identity", ctx do
+      link = member(ctx.batch, ctx.patch)
+      admission = Journal.admission(link.id)
+
+      link
+      |> LinkPatchBatch.changeset(%{unquote(field) => unquote(changed)})
+      |> Repo.update!()
+
+      candidate = begin(ctx.batch)
+
+      assert hd(candidate.snapshot["members"])[unquote(to_string(field))] ==
+               admission.snapshot[unquote(to_string(field))]
+
+      assert_raise BorsNG.Worker.CandidateAssembler.Rejected,
+                   "assembly result rejected: membership_changed",
+                   fn -> bind(candidate, "built") end
+    end
   end
 end
