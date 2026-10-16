@@ -252,6 +252,192 @@ defmodule BorsNG.Worker.FailureIsolationTest do
     }
   end
 
+  defp checkpoint_error(binding, roots, providers \\ ["TauCeti/File3.lean"]) do
+    direct = provider_result(binding, roots, providers)
+
+    files =
+      Enum.map(direct["files"], fn file ->
+        file
+        |> Map.put("base_blob", file["blob"])
+        |> Map.update!("providers", fn values -> Enum.map(values, &Map.put(&1, "bytes", 50)) end)
+      end)
+
+    checkpoint =
+      Map.merge(direct, %{
+        "policy" => "direct_depth_v1",
+        "files" => files,
+        "headers" => length(roots),
+        "source_bytes" => 100 * length(roots),
+        "paths" => Enum.sort(Enum.uniq(roots ++ providers)),
+        "completed_elapsed_ms" => 5
+      })
+
+    bounded_result(binding, roots, providers)
+    |> Map.merge(%{
+      "policy" => "bounded_depth_v2",
+      "status" => "error",
+      "bounded_complete" => false,
+      "details" => %{"kind" => "provider_header_limit"},
+      "direct_checkpoint" => checkpoint
+    })
+  end
+
+  test "natural254 caps deep coverage but complete checkpoint preserves all46 in1/45" do
+    alias BorsNG.Worker.FailureDiagnostics
+
+    data =
+      "test/fixtures/provider-checkpoint-candidate254.json" |> File.read!() |> Jason.decode!()
+
+    assert CandidateJournal.digest(data["members"]) == data["binding"]["members_digest"]
+    assert length(data["members"]) == 46
+    assert :unavailable = FailureDiagnostics.map_paths(data["hints"], data["logs"])
+
+    assert :unavailable =
+             FailureDiagnostics.map_retry_providers(
+               data["hints"],
+               data["logs"],
+               data["binding"],
+               data["recorded_lookup"]
+             )
+
+    lookup = data["provider_lookup"]
+    assert lookup["bounded_complete"] == false
+    assert lookup["full_closure_complete"] == false
+    assert lookup["details"]["kind"] == "provider_header_limit"
+
+    assert {:ok, [16848], "import_provider_hint"} =
+             FailureDiagnostics.map_retry_providers(
+               data["hints"],
+               data["logs"],
+               data["binding"],
+               lookup
+             )
+
+    assert :unavailable =
+             FailureDiagnostics.map_bounded_providers(
+               data["hints"],
+               data["logs"],
+               data["binding"],
+               lookup
+             )
+
+    links =
+      Enum.map(data["members"], fn m ->
+        %LinkPatchBatch{
+          id: m["link_id"],
+          patch_id: m["patch_id"],
+          head_sha: m["head_sha"],
+          reviewer: m["reviewer"],
+          manual_approval: m["manual_approval"],
+          patch: %Patch{
+            pr_xref: m["pr"],
+            commit: m["head_sha"],
+            bundle_id: m["bundle_id"],
+            is_single: get_in(m, ["scheduling", "singleton"]) == true
+          }
+        }
+      end)
+
+    assert :fallback = FailureIsolation.partition(links, data["hints"], nil)
+
+    assert {:ok, groups, "import_provider_hint"} =
+             FailureIsolation.partition(
+               links,
+               Map.put(data["hints"], "provider_suspects", [16848]),
+               nil
+             )
+
+    assert Enum.map(groups, &length/1) == [1, 45]
+    assert hd(prs(groups)) == [16848]
+
+    snapshots =
+      groups
+      |> List.flatten()
+      |> Enum.map(fn l -> Enum.find(data["members"], &(&1["link_id"] == l.id)) end)
+
+    assert Enum.sort_by(snapshots, & &1["link_id"]) ==
+             Enum.sort_by(data["members"], & &1["link_id"])
+
+    assert data["recorded_baseline"]["id"] == 3775
+    assert data["recorded_baseline"]["details"]["strategy"] == "deterministic_bisection"
+  end
+
+  test "checkpoint fallback requires separately complete bound all-root proof and combined limits",
+       c do
+    alias BorsNG.Worker.FailureDiagnostics
+    logs = log_result(["TauCeti/Downstream.lean"])
+    binding = %{"run_id" => 100}
+
+    result =
+      checkpoint_error(binding, ["TauCeti/Downstream.lean"], [
+        "TauCeti/File2.lean",
+        "TauCeti/File3.lean"
+      ])
+
+    assert {:ok, [2, 3], "import_provider_hint"} =
+             FailureDiagnostics.map_retry_providers(c.hints, logs, binding, result)
+
+    for bad <- [
+          Map.put(result, "policy", "bounded_depth_v1"),
+          Map.put(result, "policy", "unknown"),
+          Map.put(result, "bounded_complete", true),
+          Map.put(result, "complete", true),
+          Map.put(result, "binding", %{}),
+          Map.put(result, "roots", []),
+          Map.put(result, "proof_authority", true),
+          Map.put(result, "full_closure_complete", true),
+          Map.delete(result, "status"),
+          Map.delete(result, "direct_checkpoint"),
+          Map.put(result, "details", %{}),
+          Map.put(result, "padding", String.duplicate("x", 65536)),
+          put_in(result, ["limits", "max_headers"], 65),
+          put_in(result, ["direct_checkpoint", "complete"], false),
+          put_in(result, ["direct_checkpoint", "policy"], "unknown"),
+          put_in(result, ["direct_checkpoint", "binding"], %{}),
+          put_in(result, ["direct_checkpoint", "files"], []),
+          put_in(result, ["direct_checkpoint", "paths"], []),
+          put_in(result, ["direct_checkpoint", "headers"], 0),
+          put_in(result, ["direct_checkpoint", "source_bytes"], 524_289),
+          put_in(result, ["direct_checkpoint", "completed_elapsed_ms"], 5001),
+          put_in(result, ["direct_checkpoint", "files", Access.at(0), "base_blob"], "moved"),
+          put_in(
+            result,
+            ["direct_checkpoint", "files", Access.at(0), "providers", Access.at(0), "path"],
+            "../secret"
+          ),
+          put_in(
+            result,
+            ["direct_checkpoint", "files", Access.at(0), "providers", Access.at(0), "bytes"],
+            262_145
+          )
+        ] do
+      assert :unavailable = FailureDiagnostics.map_retry_providers(c.hints, logs, binding, bad)
+    end
+
+    roots = ["TauCeti/Downstream.lean", "TauCeti/Other.lean"]
+    multi = checkpoint_error(binding, roots)
+
+    assert {:ok, [3], "import_provider_hint"} =
+             FailureDiagnostics.map_retry_providers(c.hints, log_result(roots), binding, multi)
+
+    # A complete but ownerless second root cannot be silently ignored.
+    multi = put_in(multi, ["direct_checkpoint", "files", Access.at(1), "providers"], [])
+
+    assert :unavailable =
+             FailureDiagnostics.map_retry_providers(c.hints, log_result(roots), binding, multi)
+
+    # Existing bundle/component widening still applies to checkpoint suspects.
+    [a, b, d, e] = c.links
+    a = %{a | patch: %{a.patch | bundle_id: 7}}
+    b = %{b | patch: %{b.patch | bundle_id: 7}}
+    hints = c.hints |> Map.put("provider_suspects", [2]) |> Map.put("import_edges", [[2, 3]])
+
+    assert {:ok, groups, "import_provider_hint"} =
+             FailureIsolation.partition([a, b, d, e], hints, nil)
+
+    assert prs(groups) == [[1, 2, 3], [4]]
+  end
+
   test "bounded natural replays preserve all snapshots; candidate232 has no narrowing gain" do
     alias BorsNG.Worker.FailureDiagnostics
 
@@ -268,6 +454,60 @@ defmodule BorsNG.Worker.FailureIsolationTest do
                  data["logs"],
                  data["binding"],
                  data["provider_lookup"]
+               )
+
+      # New v2 must preserve successful deep coverage rather than falling
+      # back to an ownerless direct layer in these two real natural cases.
+      old = data["provider_lookup"]
+      graph = Map.new(old["nodes"], &{&1["path"], &1})
+
+      files =
+        Enum.map(old["roots"], fn path ->
+          node = graph[path]
+
+          Map.take(node, ["path", "blob", "base_blob", "bytes"])
+          |> Map.put(
+            "providers",
+            Enum.map(node["providers"], fn provider ->
+              Map.take(graph[provider], ["path", "blob", "bytes"])
+            end)
+          )
+        end)
+
+      checkpoint = %{
+        "policy" => "direct_depth_v1",
+        "complete" => true,
+        "binding" => data["binding"],
+        "authority" => "retry_only",
+        "proof_authority" => false,
+        "files" => files,
+        "headers" => length(files),
+        "source_bytes" => Enum.sum(Enum.map(files, & &1["bytes"])),
+        "completed_elapsed_ms" => 10,
+        "paths" =>
+          (files ++ Enum.flat_map(files, & &1["providers"]))
+          |> Enum.map(& &1["path"])
+          |> Enum.uniq()
+          |> Enum.sort()
+      }
+
+      updated =
+        old |> Map.put("policy", "bounded_depth_v2") |> Map.put("direct_checkpoint", checkpoint)
+
+      assert {:ok, [^owner], "bounded_provider_hint"} =
+               FailureDiagnostics.map_retry_providers(
+                 data["hints"],
+                 data["logs"],
+                 data["binding"],
+                 updated
+               )
+
+      assert :unavailable =
+               FailureDiagnostics.map_retry_providers(
+                 data["hints"],
+                 data["logs"],
+                 data["binding"],
+                 put_in(updated, ["direct_checkpoint", "files", Access.at(0), "bytes"], 0)
                )
 
       links =
@@ -314,56 +554,67 @@ defmodule BorsNG.Worker.FailureIsolationTest do
     end
   end
 
-  test "one weak bounded owner cannot invoke provisional eviction or diagnosis", c do
-    alias BorsNG.Worker.FailureDiagnostics
-    {batch, evidence, hints} = provider_terminal(c)
-    logs = log_result(["TauCeti/Downstream.lean"])
-    lookup = fn _, :conn, binding, paths -> bounded_result(binding, paths) end
-    assert :ok = FailureDiagnostics.observe(batch, evidence, :conn, fn _, _ -> logs end, lookup)
-    FailureIsolation.classified(batch, "candidate_failure", evidence)
-    assert :unavailable = FailureDiagnostics.diagnosis(c.candidate, hints)
-    assert :unavailable = FailureDiagnostics.suspects(c.candidate, hints)
+  for {kind, reason} <- [
+        {:bounded, "bounded_provider_hint"},
+        {:checkpoint, "import_provider_hint"}
+      ] do
+    test "one weak #{kind} owner cannot invoke provisional eviction or diagnosis", c do
+      alias BorsNG.Worker.FailureDiagnostics
+      {batch, evidence, hints} = provider_terminal(c)
+      logs = log_result(["TauCeti/Downstream.lean"])
 
-    assert {:ok, [3], "bounded_provider_hint"} =
-             FailureDiagnostics.retry_suspects(c.candidate, hints)
+      lookup = fn _, :conn, binding, paths ->
+        if unquote(kind) == :bounded,
+          do: bounded_result(binding, paths),
+          else: checkpoint_error(binding, paths)
+      end
 
-    # No mocked GitHub call: an attempted provisional repair fails the test.
-    assert :retrying = FailureIsolation.split(c.links, batch, nil, :conn)
-    children = Repo.all(from(b in Batch, where: b.id != ^batch.id, order_by: b.id))
-    groups = Enum.map(children, &stored_links(&1.id))
-    assert prs(groups) == [[3], [1, 2, 4]]
-    assert Enum.all?(children, & &1.sealed)
+      assert :ok = FailureDiagnostics.observe(batch, evidence, :conn, fn _, _ -> logs end, lookup)
+      FailureIsolation.classified(batch, "candidate_failure", evidence)
+      assert :unavailable = FailureDiagnostics.diagnosis(c.candidate, hints)
+      assert :unavailable = FailureDiagnostics.suspects(c.candidate, hints)
 
-    for link <- List.flatten(groups) do
-      original = Enum.find(c.links, &(&1.patch_id == link.patch_id))
+      assert {:ok, [3], unquote(reason)} =
+               FailureDiagnostics.retry_suspects(c.candidate, hints)
 
-      assert Map.take(link, [:head_sha, :reviewer, :manual_approval]) ==
-               Map.take(original, [:head_sha, :reviewer, :manual_approval])
+      # No mocked GitHub call: an attempted provisional repair fails the test.
+      assert :retrying = FailureIsolation.split(c.links, batch, nil, :conn)
+      children = Repo.all(from(b in Batch, where: b.id != ^batch.id, order_by: b.id))
+      groups = Enum.map(children, &stored_links(&1.id))
+      assert prs(groups) == [[3], [1, 2, 4]]
+      assert Enum.all?(children, & &1.sealed)
 
-      admission = CandidateJournal.admission(link.id).snapshot
-      before = CandidateJournal.admission(original.id)
-      assert admission["original_admitted_at"] == before.snapshot["original_admitted_at"]
-      assert admission["parent_candidate_id"] == c.candidate.id
-      assert admission["parent_admission_id"] == before.id
-      assert admission["retry_reason"] == "bounded_provider_hint"
-      assert link.patch.queue_approval == original.patch.queue_approval
-      assert link.patch.source_compatibility == original.patch.source_compatibility
-      assert link.patch.bundle_id == original.patch.bundle_id
+      for link <- List.flatten(groups) do
+        original = Enum.find(c.links, &(&1.patch_id == link.patch_id))
+
+        assert Map.take(link, [:head_sha, :reviewer, :manual_approval]) ==
+                 Map.take(original, [:head_sha, :reviewer, :manual_approval])
+
+        admission = CandidateJournal.admission(link.id).snapshot
+        before = CandidateJournal.admission(original.id)
+        assert admission["original_admitted_at"] == before.snapshot["original_admitted_at"]
+        assert admission["parent_candidate_id"] == c.candidate.id
+        assert admission["parent_admission_id"] == before.id
+        assert admission["retry_reason"] == unquote(reason)
+        assert link.patch.queue_approval == original.patch.queue_approval
+        assert link.patch.source_compatibility == original.patch.source_compatibility
+        assert link.patch.bundle_id == original.patch.bundle_id
+      end
+
+      refute Repo.exists?(from(e in CandidateEvent, where: e.kind == "provisional_repair"))
+
+      assert :ok =
+               FailureDiagnostics.observe(
+                 batch,
+                 evidence,
+                 :conn,
+                 fn _, _ -> flunk("immutable logs repeated") end,
+                 fn _, _, _, _ -> flunk("immutable lookup repeated") end
+               )
+
+      FailureIsolation.classified(batch, "candidate_failure", %{evidence | run_attempt: 2})
+      assert :unavailable = FailureDiagnostics.retry_suspects(c.candidate, hints)
     end
-
-    refute Repo.exists?(from(e in CandidateEvent, where: e.kind == "provisional_repair"))
-
-    assert :ok =
-             FailureDiagnostics.observe(
-               batch,
-               evidence,
-               :conn,
-               fn _, _ -> flunk("immutable logs repeated") end,
-               fn _, _, _, _ -> flunk("immutable lookup repeated") end
-             )
-
-    FailureIsolation.classified(batch, "candidate_failure", %{evidence | run_attempt: 2})
-    assert :unavailable = FailureDiagnostics.retry_suspects(c.candidate, hints)
   end
 
   test "bounded validation rejects partial graphs, moved bindings, caps and forged coverage", c do

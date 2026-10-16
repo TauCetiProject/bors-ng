@@ -348,10 +348,11 @@ defmodule BorsNG.Worker.FailureDiagnostics do
     "total_timeout_ms" => 5000
   }
 
-  def map_retry_providers(hints, logs, binding, %{"policy" => "bounded_depth_v1"} = lookup) do
+  def map_retry_providers(hints, logs, binding, %{"policy" => policy} = lookup)
+      when policy in ["bounded_depth_v1", "bounded_depth_v2"] do
     case map_bounded_providers(hints, logs, binding, lookup) do
       {:ok, prs} -> {:ok, prs, "bounded_provider_hint"}
-      _ -> :unavailable
+      _ -> map_direct_checkpoint(hints, logs, binding, lookup)
     end
   end
 
@@ -364,11 +365,106 @@ defmodule BorsNG.Worker.FailureDiagnostics do
     end
   end
 
+  # Only a separately completed checkpoint from the new policy can survive a
+  # failed deep traversal. Legacy/partial graph nodes cannot become direct proof.
+  defp map_direct_checkpoint(hints, logs, binding, lookup) do
+    with %{
+           "policy" => "bounded_depth_v2",
+           "status" => "error",
+           "complete" => false,
+           "bounded_complete" => false,
+           "full_closure_complete" => false,
+           "binding" => ^binding,
+           "authority" => "retry_only",
+           "proof_authority" => false,
+           "limits" => @provider_limits,
+           "details" => %{"kind" => reason},
+           "direct_checkpoint" => checkpoint
+         }
+         when is_binary(reason) and reason != "" <- lookup,
+         true <- byte_size(Jason.encode!(lookup)) <= 65_536,
+         {:ok, roots} <- provider_paths(hints, logs),
+         true <- lookup["roots"] == roots,
+         :ok <- validate_direct_checkpoint(checkpoint, binding, roots),
+         {:ok, prs} <- map_providers(hints, logs, binding, checkpoint) do
+      {:ok, prs, "import_provider_hint"}
+    else
+      _ -> :unavailable
+    end
+  rescue
+    _ -> :unavailable
+  end
+
+  defp validate_direct_checkpoint(checkpoint, binding, roots) do
+    %{
+      "policy" => "direct_depth_v1",
+      "complete" => true,
+      "binding" => ^binding,
+      "authority" => "retry_only",
+      "proof_authority" => false,
+      "files" => files,
+      "headers" => headers,
+      "source_bytes" => source_bytes,
+      "paths" => paths,
+      "completed_elapsed_ms" => elapsed
+    } = checkpoint
+
+    true = is_list(files) and Enum.map(files, & &1["path"]) == roots
+    true = headers == length(roots) and headers in 1..8
+    true = is_integer(elapsed) and elapsed in 0..5000
+    true = Enum.all?(files, &(&1["base_blob"] == &1["blob"]))
+    true = source_bytes == Enum.sum(Enum.map(files, & &1["bytes"])) and source_bytes <= 524_288
+    entries = files ++ Enum.flat_map(files, & &1["providers"])
+
+    true =
+      Enum.all?(entries, fn entry ->
+        project_path?(entry["path"]) and sha?(entry["blob"]) and
+          is_integer(entry["bytes"]) and entry["bytes"] in 0..262_144
+      end)
+
+    true =
+      Enum.all?(files, fn file ->
+        providers = Enum.map(file["providers"], & &1["path"])
+        providers == Enum.sort(Enum.uniq(providers))
+      end)
+
+    true = paths == entries |> Enum.map(& &1["path"]) |> Enum.uniq() |> Enum.sort()
+    true = length(paths) <= 128
+
+    true =
+      Enum.all?(Enum.group_by(entries, & &1["path"]), fn {_, values} ->
+        length(Enum.uniq(Enum.map(values, &Map.take(&1, ["blob", "bytes"])))) == 1
+      end)
+
+    :ok
+  rescue
+    _ -> :unavailable
+  end
+
+  defp checkpoint_matches_graph?(%{"policy" => "bounded_depth_v1"}, _, _), do: true
+
+  defp checkpoint_matches_graph?(lookup, binding, roots) do
+    checkpoint = lookup["direct_checkpoint"]
+    graph = Map.new(lookup["nodes"], &{&1["path"], &1})
+
+    validate_direct_checkpoint(checkpoint, binding, roots) == :ok and
+      Enum.all?(checkpoint["files"], fn file ->
+        node = graph[file["path"]]
+
+        Map.take(file, ["blob", "base_blob", "bytes"]) ==
+          Map.take(node, ["blob", "base_blob", "bytes"]) and
+          Enum.map(file["providers"], & &1["path"]) == node["providers"] and
+          Enum.all?(file["providers"], fn p ->
+            Map.take(p, ["blob", "bytes"]) == Map.take(graph[p["path"]], ["blob", "bytes"])
+          end)
+      end)
+  end
+
   # Validate the entire bounded graph, including every residual branch. No
   # resource-truncated graph or root without a changed frontier can guide retries.
   def map_bounded_providers(hints, logs, binding, lookup) do
     with %{
-           "policy" => "bounded_depth_v1",
+           "policy" => policy,
            "complete" => false,
            "bounded_complete" => true,
            "full_closure_complete" => false,
@@ -378,10 +474,12 @@ defmodule BorsNG.Worker.FailureDiagnostics do
            "limits" => @provider_limits,
            "nodes" => nodes
          }
-         when is_list(nodes) <- lookup,
+         when is_list(nodes) and policy in ["bounded_depth_v1", "bounded_depth_v2"] <- lookup,
+         true <- lookup["status"] == nil,
          true <- byte_size(Jason.encode!(lookup)) <= 65_536,
          {:ok, roots} <- provider_paths(hints, logs),
          true <- lookup["roots"] == roots,
+         true <- checkpoint_matches_graph?(lookup, binding, roots),
          true <- length(nodes) in 1..128,
          changed = hints["changed_files"] |> Enum.flat_map(& &1["paths"]) |> MapSet.new(),
          :ok <-

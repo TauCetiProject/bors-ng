@@ -26,7 +26,7 @@ COMPATIBILITY_MEMBER_LIMIT = 32
 PROVIDER_OPERATIONS = ('import_providers', 'bounded_import_providers')
 OFFLINE_OPERATIONS = (*PROVIDER_OPERATIONS, 'collision_sources')
 PROVIDER_PATH = re.compile(r"TauCeti(?:/[A-Za-z_][A-Za-z0-9_'\-]*)+\.lean\Z")
-BOUNDED_PROVIDER_POLICY = 'bounded_depth_v1'
+BOUNDED_PROVIDER_POLICY = 'bounded_depth_v2'
 PROVIDER_LIMITS = dict(max_depth=5, max_headers=64, max_file_bytes=256 * 1024,
                        max_source_bytes=512 * 1024, max_paths=128,
                        max_evidence_bytes=64 * 1024, total_timeout_ms=5000)
@@ -565,14 +565,18 @@ class Mirror:
         source_bytes = header_count = cold_blobs = 0
         self.provider_progress = dict(nodes=nodes)
         self.provider_queue = queue
+        candidate_entries = {}
 
         def check():
             if time.monotonic() >= self.deadline:
                 raise Failure('timeout')
-            if len(json.dumps(nodes).encode()) > limits['max_evidence_bytes']:
+            evidence = dict(nodes=nodes, direct_checkpoint=getattr(self, 'direct_checkpoint', None))
+            if len(json.dumps(evidence).encode()) > limits['max_evidence_bytes']:
                 raise Failure('provider_output_limit')
 
         def entry(commit, path):
+            if commit == binding['commit'] and path in candidate_entries:
+                return candidate_entries[path]
             listing = self.git('ls-tree', '-l', '-z', commit, '--', path,
                                output_limit=2048)[0].split('\0')
             if len(listing) != 2 or listing[-1] != '' or '\t' not in listing[0]:
@@ -584,7 +588,42 @@ class Mirror:
                 raise Failure('unsupported_source')
             if int(fields[3]) > limits['max_file_bytes']:
                 raise Failure('provider_byte_limit')
-            return fields[2], int(fields[3])
+            result = fields[2], int(fields[3])
+            if commit == binding['commit']:
+                candidate_entries[path] = result
+            return result
+
+        def available(entries):
+            expected = dict(entries)
+            oids = list(expected)
+            if not oids:
+                return
+            checked = self.git('cat-file', '--batch-check', input='\n'.join(oids) + '\n',
+                               output_limit=16 * 1024)[0].splitlines()
+            if checked != [f"{oid} blob {expected[oid]}" for oid in oids]:
+                raise Failure('missing_source')
+
+        def checkpoint():
+            # Called only after ALL roots are fully parsed. Complete the entire
+            # direct layer independently, before any deeper source expansion.
+            direct = sorted({p for n in nodes for p in n['providers']})
+            for path in direct:
+                check()
+                entry(binding['commit'], path)
+            available((oid, length) for oid, length in candidate_entries.values())
+            result = dict(policy='direct_depth_v1', complete=True, binding=binding,
+                authority='retry_only', proof_authority=False, headers=header_count,
+                source_bytes=source_bytes, paths=sorted(seen), files=[dict(
+                    path=n['path'], blob=n['blob'], base_blob=n['base_blob'], bytes=n['bytes'],
+                    providers=[dict(path=p, blob=candidate_entries[p][0],
+                                    bytes=candidate_entries[p][1]) for p in n['providers']]) for n in nodes],
+                completed_elapsed_ms=round((time.monotonic() - self.started) * 1000))
+            # Reserve room for the binding, limits and an explicit UNKNOWN error.
+            # Combined progress is independently capped by check()/error_result.
+            if len(json.dumps(result).encode()) > limits['max_evidence_bytes'] - 4096:
+                raise Failure('provider_output_limit')
+            check()
+            self.direct_checkpoint = result
 
         while queue:
             check()
@@ -601,13 +640,13 @@ class Mirror:
             else:
                 if (blob, length) != entry(binding['base_sha'], path):
                     raise Failure('unowned_changed_source')
+                if header_count >= limits['max_headers']:
+                    raise Failure('provider_header_limit')
+                if source_bytes + length > limits['max_source_bytes']:
+                    raise Failure('provider_byte_limit')
                 header_count += 1
                 source_bytes += length
                 self.provider_progress.update(headers=header_count, source_bytes=source_bytes)
-                if header_count > limits['max_headers']:
-                    raise Failure('provider_header_limit')
-                if source_bytes > limits['max_source_bytes']:
-                    raise Failure('provider_byte_limit')
                 modules = stored.get(blob)
                 if not (isinstance(modules, list) and len(modules) <= 128
                         and all(isinstance(m, str) and len(m) <= 512 and
@@ -635,16 +674,14 @@ class Mirror:
                         queue.append((provider, depth + 1))
             nodes.append(node)
             self.provider_progress.pop('active_path', None)
+            if depth == 0 and (not queue or queue[0][1] > 0):
+                checkpoint()
             check()
         # ls-tree alone cannot establish availability of a terminal blob.
-        oids = list(dict.fromkeys(n['blob'] for n in nodes))
-        checked = self.git('cat-file', '--batch-check', input='\n'.join(oids) + '\n',
-                           output_limit=16 * 1024)[0].splitlines()
-        expected = {n['blob']: n['bytes'] for n in nodes}
-        if checked != [f"{oid} blob {expected[oid]}" for oid in oids]:
-            raise Failure('missing_source')
+        available((n['blob'], n['bytes']) for n in nodes)
         result = dict(complete=False, bounded_complete=True, policy=BOUNDED_PROVIDER_POLICY,
                       full_closure_complete=False, binding=binding, roots=roots, nodes=nodes,
+                      direct_checkpoint=self.direct_checkpoint,
                       residual_frontier=[n['path'] for n in nodes if n.get('stop') == 'depth_limit'],
                       changed_frontier=[n['path'] for n in nodes if n.get('stop') == 'changed_frontier'],
                       limits=limits, headers=header_count, source_bytes=source_bytes,
@@ -661,6 +698,26 @@ class Mirror:
         if len(json.dumps(result).encode()) > limits['max_evidence_bytes']:
             raise Failure('provider_output_limit')
         check()
+        return result
+
+    def provider_error_result(self, error):
+        result = dict(status='error', details=error.details, complete=False,
+                      bounded_complete=False, full_closure_complete=False,
+                      policy=BOUNDED_PROVIDER_POLICY, limits=PROVIDER_LIMITS,
+                      binding=self.request['binding'], roots=sorted(self.request['paths']),
+                      authority='retry_only', proof_authority=False,
+                      elapsed_ms=round((time.monotonic() - self.started) * 1000),
+                      cpu_ms=round((time.process_time() - self.cpu_started) * 1000))
+        checkpoint = getattr(self, 'direct_checkpoint', None)
+        if checkpoint is not None:
+            result['direct_checkpoint'] = checkpoint
+        if len(json.dumps(result).encode()) > PROVIDER_LIMITS['max_evidence_bytes']:
+            progress = result['details'].get('progress', {})
+            result['details'] = dict(kind=error.details['kind'], phase=self.phase,
+                progress=dict(evidence_truncated=True, headers=progress.get('headers', 0),
+                              source_bytes=progress.get('source_bytes', 0),
+                              nodes_recorded=len(progress.get('nodes', [])),
+                              pending_paths_count=len(progress.get('pending_paths', []))))
         return result
 
     def compatibility(self):
@@ -1047,7 +1104,10 @@ def main():
         mirror = Mirror(request)
         result = mirror.run()
     except Failure as error:
-        result = dict(status='error', details=error.details)
+        if 'mirror' in locals() and request.get('operation') == 'bounded_import_providers':
+            result = mirror.provider_error_result(error)
+        else:
+            result = dict(status='error', details=error.details)
     except Exception:
         result = dict(status='error', details=dict(kind='helper_failed'))
     if (isinstance(locals().get('request'), dict)

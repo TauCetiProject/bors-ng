@@ -164,7 +164,7 @@ class LocalGitTest(unittest.TestCase):
         self.assertTrue(result['bounded_complete'])
         self.assertFalse(result['complete'])
         self.assertFalse(result['full_closure_complete'])
-        self.assertEqual(result['policy'], 'bounded_depth_v1')
+        self.assertEqual(result['policy'], 'bounded_depth_v2')
         self.assertEqual(result['headers'], 3)
         self.assertEqual(len(result['nodes']), 4)
         self.assertEqual(result['changed_frontier'], ['TauCeti/Owner.lean'])
@@ -300,9 +300,207 @@ class LocalGitTest(unittest.TestCase):
         request_path.write_text(json.dumps(request))
         result = json.loads(subprocess.check_output(['python3', str(Path(local.__file__)), str(request_path)]))
         self.assertFalse(result['bounded_complete'])
-        self.assertEqual(result['policy'], 'bounded_depth_v1')
+        self.assertEqual(result['policy'], 'bounded_depth_v2')
         self.assertEqual(result['limits'], local.PROVIDER_LIMITS)
         self.assertLess(len(json.dumps(result).encode()), 65536)
+
+    def checkpoint_result(self, request, mirror=None):
+        mirror = mirror or TestMirror(request, self.upstream)
+        try:
+            return mirror.run()
+        except local.Failure as failure:
+            return mirror.provider_error_result(failure)
+
+    def checkpoint_cap_sources(self):
+        # One owner at depth one, plus enough independent unchanged headers to
+        # exhaust deeper coverage. The checkpoint needs only the root header.
+        return {'TauCeti/Root.lean': 'import TauCeti.Owner\n' + '\n'.join(
+            f'import TauCeti.P{i}' for i in range(64)), 'TauCeti/Owner.lean': '-- owner',
+            **{f'TauCeti/P{i}.lean': f'-- header {i}' for i in range(64)}}
+
+    def test_checkpoint_survives_deep_header_cap_without_repeated_root_reads(self):
+        from unittest.mock import patch
+        request = self.bounded_fixture(self.checkpoint_cap_sources())
+        mirror = TestMirror(request, self.upstream)
+        with patch.object(mirror, 'diagnostic_objects', wraps=mirror.diagnostic_objects) as reads:
+            result = self.checkpoint_result(request, mirror)
+        self.assertFalse(result['bounded_complete'])
+        self.assertFalse(result['complete'])
+        self.assertFalse(result['full_closure_complete'])
+        self.assertEqual(result['details']['kind'], 'provider_header_limit')
+        checkpoint = result['direct_checkpoint']
+        self.assertEqual(checkpoint['policy'], 'direct_depth_v1')
+        self.assertTrue(checkpoint['complete'])
+        self.assertEqual(checkpoint['binding'], request['binding'])
+        self.assertEqual(checkpoint['headers'], 1)
+        self.assertEqual(checkpoint['source_bytes'], len(self.checkpoint_cap_sources()['TauCeti/Root.lean']))
+        self.assertEqual(len(checkpoint['files'][0]['providers']), 65)
+        self.assertEqual(len(reads.call_args_list), 64)
+        root_blob = checkpoint['files'][0]['blob']
+        self.assertEqual(sum(root_blob in args.args[0] for args in reads.call_args_list), 1)
+        self.assertEqual(result['details']['progress']['headers'], 64)
+        self.assertLessEqual(len(json.dumps(result).encode()), 65536)
+        request_path = self.root / 'checkpoint-cli-request.json'
+        request_path.write_text(json.dumps(request))
+        cli = json.loads(subprocess.check_output(['python3', str(Path(local.__file__)), str(request_path)]))
+        self.assertEqual(cli['direct_checkpoint']['files'], checkpoint['files'])
+        self.assertEqual(cli['details']['kind'], 'provider_header_limit')
+        self.assertFalse(cli['bounded_complete'])
+        self.assertLessEqual(len(json.dumps(cli).encode()), 65536)
+        # Cache hits are still charged; header/source totals cannot grow a new budget.
+        cache = mirror.repo / 'bors-headers-local-source-v2.json'
+        cache.write_text(json.dumps({git(self.upstream, 'rev-parse', request['binding']['commit'] + ':' + path):
+            local.compatibility_imports(content) for path, content in self.checkpoint_cap_sources().items()}))
+        warm = self.checkpoint_result(request)
+        self.assertEqual(warm['details']['kind'], 'provider_header_limit')
+        self.assertEqual(warm['details']['progress']['source_bytes'], result['details']['progress']['source_bytes'])
+        self.assertEqual(warm['direct_checkpoint']['files'], checkpoint['files'])
+
+    def test_checkpoint_requires_all_roots_and_all_direct_metadata_before_expansion(self):
+        from unittest.mock import patch
+        for sources, roots in [
+            ({'TauCeti/A.lean': 'import TauCeti.Owner', 'TauCeti/B.lean': 'private import TauCeti.Owner',
+              'TauCeti/Owner.lean': ''}, ['TauCeti/A.lean', 'TauCeti/B.lean']),
+            ({'TauCeti/Root.lean': 'import TauCeti.Owner\nimport TauCeti.Missing',
+              'TauCeti/Owner.lean': ''}, None),
+            ({'TauCeti/Root.lean': 'import TauCeti.Owner',
+              'TauCeti/Owner.lean': ' ' * 262145}, None),
+            ({'TauCeti/A.lean': 'import TauCeti.Owner\n' + ' ' * 180000,
+              'TauCeti/B.lean': 'import TauCeti.Owner\n' + ' ' * 180000,
+              'TauCeti/C.lean': 'import TauCeti.Owner\n' + ' ' * 180000,
+              'TauCeti/Owner.lean': ''}, ['TauCeti/A.lean', 'TauCeti/B.lean', 'TauCeti/C.lean'])]:
+            result = self.checkpoint_result(self.bounded_fixture(sources, roots))
+            self.assertFalse(result['bounded_complete'])
+            self.assertNotIn('direct_checkpoint', result)
+        request = self.bounded_fixture()
+        mirror = TestMirror(request, self.upstream)
+        with patch.object(mirror, 'diagnostic_objects', return_value=[b'partial']):
+            self.assertNotIn('direct_checkpoint', self.checkpoint_result(request, mirror))
+        mirror = TestMirror(request, self.upstream)
+        git_call = mirror.git
+        def missing_direct(*args, **kwargs):
+            if args[:2] == ('cat-file', '--batch-check'):
+                return 'missing\n', 0
+            return git_call(*args, **kwargs)
+        with patch.object(mirror, 'git', side_effect=missing_direct):
+            self.assertNotIn('direct_checkpoint', self.checkpoint_result(request, mirror))
+
+    def test_checkpoint_deadline_and_byte_caps_never_start_a_second_budget(self):
+        from unittest.mock import patch
+        request = self.bounded_fixture(self.checkpoint_cap_sources())
+        mirror = TestMirror(request, self.upstream)
+        parse = local.compatibility_imports
+        seen = []
+        def expire_after_root(content):
+            seen.append(content)
+            if len(seen) == 2:
+                mirror.deadline = time.monotonic() - 1
+            return parse(content)
+        with patch.object(local, 'compatibility_imports', side_effect=expire_after_root):
+            result = self.checkpoint_result(request, mirror)
+        self.assertEqual(result['details']['kind'], 'timeout')
+        self.assertTrue(result['direct_checkpoint']['complete'])
+        self.assertEqual(len(seen), 2)  # No parse/fallback read after expiration.
+        mirror = TestMirror(request, self.upstream)
+        def expire_before_checkpoint(content):
+            mirror.deadline = time.monotonic() - 1
+            return parse(content)
+        with patch.object(local, 'compatibility_imports', side_effect=expire_before_checkpoint):
+            self.assertNotIn('direct_checkpoint', self.checkpoint_result(request, mirror))
+        sources = {'TauCeti/Root.lean': 'import TauCeti.Owner\nimport TauCeti.A\nimport TauCeti.B\n' + ' ' * 180000,
+                   'TauCeti/A.lean': '-- A\n' + ' ' * 180000, 'TauCeti/B.lean': '-- B\n' + ' ' * 180000,
+                   'TauCeti/Owner.lean': ''}
+        result = self.checkpoint_result(self.bounded_fixture(sources))
+        self.assertEqual(result['details']['kind'], 'provider_byte_limit')
+        self.assertTrue(result['direct_checkpoint']['complete'])
+        self.assertEqual(result['details']['progress']['headers'], 2)
+        self.assertLessEqual(result['details']['progress']['source_bytes'], 524288)
+
+    def test_checkpoint_combined_evidence_cap_retains_direct_and_marks_deep_truncation(self):
+        modules = ['TauCeti.' + 'P' * 180 + str(i) for i in range(30)]
+        header = '\n'.join('import ' + m for m in modules)
+        sources = {m.replace('.', '/') + '.lean': header for m in modules}
+        sources['TauCeti/Root.lean'] = 'import TauCeti.Owner\n' + header
+        sources['TauCeti/Owner.lean'] = ''
+        request = self.bounded_fixture(sources)
+        result = self.checkpoint_result(request)
+        self.assertEqual(result['details']['kind'], 'provider_output_limit')
+        self.assertTrue(result['direct_checkpoint']['complete'])
+        self.assertLessEqual(len(json.dumps(result).encode()), 65536)
+        self.assertTrue(result['details']['progress']['evidence_truncated'])
+        # Provider count failure during root parsing cannot establish a checkpoint.
+        sources = {'TauCeti/Root.lean': '\n'.join(f'import TauCeti.P{i}' for i in range(128)),
+                   **{f'TauCeti/P{i}.lean': '' for i in range(128)}}
+        result = self.checkpoint_result(self.bounded_fixture(sources))
+        self.assertEqual(result['details']['kind'], 'provider_count_limit')
+        self.assertNotIn('direct_checkpoint', result)
+
+    def test_checkpoint_shared_roots_cover_all_paths_once_and_real_alarm_after_completion(self):
+        from unittest.mock import patch
+        sources = {'TauCeti/A.lean': 'import TauCeti.B\nimport TauCeti.Owner',
+                   'TauCeti/B.lean': 'import TauCeti.Owner', 'TauCeti/Owner.lean': ''}
+        request = self.bounded_fixture(sources, ['TauCeti/A.lean', 'TauCeti/B.lean'])
+        mirror = TestMirror(request, self.upstream)
+        with patch.object(mirror, 'diagnostic_objects', wraps=mirror.diagnostic_objects) as reads:
+            result = mirror.run()
+        self.assertTrue(result['bounded_complete'])
+        self.assertEqual(result['headers'], 2)
+        self.assertEqual(len(reads.call_args_list), 2)
+        self.assertEqual(result['direct_checkpoint']['headers'], 2)
+        self.assertEqual(result['direct_checkpoint']['paths'], sorted(sources))
+        self.assertEqual([f['path'] for f in result['direct_checkpoint']['files']], request['paths'])
+        request = self.bounded_fixture(self.checkpoint_cap_sources()) | dict(timeout=0.5)
+        mirror = TestMirror(request, self.upstream)
+        parse, calls = local.compatibility_imports, []
+        def sleep_after_checkpoint(content):
+            calls.append(content)
+            if len(calls) == 2:
+                time.sleep(2)
+            return parse(content)
+        started = time.monotonic()
+        with patch.object(local, 'compatibility_imports', side_effect=sleep_after_checkpoint):
+            result = self.checkpoint_result(request, mirror)
+        self.assertEqual(result['details']['kind'], 'timeout')
+        self.assertTrue(result['direct_checkpoint']['complete'])
+        self.assertLess(time.monotonic() - started, 1.5)
+        self.assertEqual(len(calls), 2)
+
+    def test_frozen_natural254_cap_retains_complete_direct_checkpoint(self):
+        import gzip
+        fixture = Path(__file__).parent / 'fixtures' / 'provider-checkpoint-candidate254'
+        data = json.loads(fixture.with_suffix('.json').read_text())
+        sources = json.loads(gzip.decompress(Path(str(fixture) + '-sources.json.gz').read_bytes()))
+        expected = data['provider_lookup']
+        request = self.bounded_fixture(sources, expected['roots'],
+            sorted({p for m in data['hints']['changed_files'] for p in m['paths']
+                    if local.PROVIDER_PATH.fullmatch(p)}))
+        result = self.checkpoint_result(request)
+        self.assertEqual(result['details']['kind'], 'provider_header_limit')
+        self.assertFalse(result['bounded_complete'])
+        self.assertEqual(result['details']['progress']['headers'], 64)
+        self.assertEqual(result['details']['progress']['source_bytes'], 519495)
+        self.assertEqual(result['direct_checkpoint']['files'], expected['direct_checkpoint']['files'])
+        self.assertEqual(result['details']['progress']['nodes'], expected['details']['progress']['nodes'])
+        self.assertEqual(result['details']['progress']['active_path'], expected['details']['progress']['active_path'])
+
+    def test_checkpoint_survives_later_path_cap_and_unknown_deep_source_without_more_reads(self):
+        # All 127 direct entries plus the root are complete before a deeper
+        # import would exceed the unchanged128-total-path budget.
+        sources = {'TauCeti/Root.lean': 'import TauCeti.Owner\n' + '\n'.join(
+            f'import TauCeti.P{i}' for i in range(126)), 'TauCeti/Owner.lean': '',
+            **{f'TauCeti/P{i}.lean': 'import TauCeti.Extra' for i in range(126)}}
+        result = self.checkpoint_result(self.bounded_fixture(sources))
+        self.assertEqual(result['details']['kind'], 'provider_count_limit')
+        self.assertTrue(result['direct_checkpoint']['complete'])
+        self.assertEqual(len(result['direct_checkpoint']['paths']), 128)
+        # A hostile deeper header cannot invalidate independently completed
+        # direct coverage, but it can never earn bounded coverage.
+        sources = {'TauCeti/Root.lean': 'import TauCeti.Owner\nimport TauCeti.Bad',
+                   'TauCeti/Owner.lean': '', 'TauCeti/Bad.lean': 'private import TauCeti.Hidden'}
+        result = self.checkpoint_result(self.bounded_fixture(sources))
+        self.assertEqual(result['details']['kind'], 'ambiguous_header')
+        self.assertTrue(result['direct_checkpoint']['complete'])
+        self.assertFalse(result['bounded_complete'])
 
     def collision_fixture(self):
         request = self.provider_fixture()
