@@ -59,6 +59,84 @@ class LocalGitTest(unittest.TestCase):
         local.validate(request)
         return TestMirror(request, self.upstream).run()['results']
 
+    def provider_fixture(self, header='module\npublic import\n TauCeti.Provider\nimport TauCeti.Other\ndef value := 1'):
+        base = self.commit(self.base, {'TauCeti/Downstream.lean': header,
+            'TauCeti/Provider.lean': 'def provider := 1', 'TauCeti/Other.lean': 'def other := 1'})
+        one = self.commit(base, {'TauCeti/Provider.lean': 'def provider := 2'})
+        two = self.commit(base, {'unrelated': 'other'})
+        self.request.update(identity=self.request['identity'] | dict(base_sha=base),
+                            members=[self.member(1, one), self.member(2, two)])
+        result = self.run_mirror()
+        request = self.request | dict(operation='import_providers', timeout=5,
+            paths=['TauCeti/Downstream.lean'], binding=dict(candidate_id=1, generation=1,
+                members_digest='a' * 64, base_sha=base, commit=result['result']['commit'],
+                run_id=100, run_attempt=1, job_ids=[200], workflow='.github/workflows/pr-build.yml'))
+        local.validate(request)
+        return request
+
+    def test_direct_provider_lookup_is_depth_one_offline_and_caches_source_only(self):
+        from unittest.mock import patch
+        request = self.provider_fixture()
+        mirror = TestMirror(request, self.upstream)
+        with patch.object(mirror, 'fetch', side_effect=AssertionError('network')), \
+                patch.object(mirror, 'initialize', side_effect=AssertionError('initialize')):
+            cold = mirror.run()
+        self.assertTrue(cold['complete'])
+        self.assertEqual(cold['binding'], request['binding'])
+        self.assertEqual(cold['cold_blobs'], 1)
+        self.assertEqual([p['path'] for p in cold['files'][0]['providers']],
+                         ['TauCeti/Other.lean', 'TauCeti/Provider.lean'])
+        self.assertEqual(cold['authority'], 'retry_only')
+        self.assertFalse(cold['proof_authority'])
+        warm = TestMirror(request, self.upstream).run()
+        self.assertEqual(warm['cold_blobs'], 0)
+        self.assertEqual(cold['files'], warm['files'])
+        cache = json.loads((mirror.repo / 'bors-headers-local-source-v2.json').read_text())
+        self.assertEqual(cache[cold['files'][0]['blob']], ['TauCeti.Provider', 'TauCeti.Other'])
+        self.assertNotIn('status', warm)
+
+    def test_provider_lookup_rejects_changed_missing_unknown_or_oversize_source(self):
+        for header in ['private import TauCeti.Provider', 'import «TauCeti.Provider»',
+                       'import TauCeti.Provider\n' + ' ' * (256 * 1024),
+                       'import TauCeti.Absent']:
+            request = self.provider_fixture(header)
+            with self.assertRaises(local.Failure, msg=header[:80]):
+                TestMirror(request, self.upstream).run()
+        request = self.provider_fixture()
+        for paths in [['TauCeti/Provider.lean'], ['TauCeti/Absent.lean']]:
+            with self.assertRaises(local.Failure):
+                TestMirror(request | dict(paths=paths), self.upstream).run()
+
+    def test_provider_request_paths_and_identity_are_validated_before_git(self):
+        request = self.provider_fixture()
+        for paths in [[], ['../secret'], ['TauCeti/../secret.lean'], ['TauCeti/A.lean\n'],
+                      ['TauCeti/a;touch.lean'], ['TauCeti/a.lean'] * 9]:
+            with self.assertRaises(local.Failure):
+                local.validate(request | dict(paths=paths))
+        for field, value in [('commit', '-option'), ('base_sha', 'no'), ('generation', 0),
+                             ('run_id', -1), ('run_attempt', 0), ('job_ids', []),
+                             ('members_digest', 'wrong')]:
+            with self.assertRaises(local.Failure):
+                local.validate(request | dict(binding=request['binding'] | {field: value}))
+
+    def test_provider_lookup_busy_missing_mirror_and_expired_budget_are_unavailable(self):
+        import fcntl
+        request = self.provider_fixture()
+        with (Path(request['root']) / '.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            started = time.monotonic()
+            with self.assertRaises(local.Failure) as failure:
+                TestMirror(request, self.upstream).run()
+            self.assertEqual(failure.exception.details['kind'], 'mirror_busy')
+            self.assertLess(time.monotonic() - started, 1)
+        mirror = TestMirror(request, self.upstream)
+        mirror.deadline = time.monotonic() - 1
+        with self.assertRaises(local.Failure):
+            mirror.run()
+        with self.assertRaises(local.Failure):
+            TestMirror(request | dict(root=str(self.root / 'absent')), self.upstream).run()
+        self.assertFalse((self.root / 'absent').exists())
+
     def test_compatibility_deleted_source_and_unchanged_importer(self):
         fork = self.commit(self.base, {'TauCeti/Old.lean': 'def old := 1',
             'TauCeti/Dependency.lean': 'import TauCeti.Old\ndef dependency := 1'})

@@ -104,6 +104,15 @@ defmodule BorsNG.Worker.LocalGit do
     })
   end
 
+  def import_providers(project, conn, binding, paths) do
+    run(%{repository: project.name, conn: conn}, %{
+      operation: "import_providers",
+      binding: binding,
+      paths: paths,
+      timeout: 5
+    })
+  end
+
   defp run(context, request) do
     input =
       Path.join(
@@ -125,7 +134,13 @@ defmodule BorsNG.Worker.LocalGit do
       IO.binwrite(file, Jason.encode!(request))
       File.close(file)
 
-      with {:ok, token} <- GitHub.git_token(context.conn),
+      # This optional offline read needs no publication or API credentials.
+      token_result =
+        if request.operation == "import_providers",
+          do: {:ok, ""},
+          else: GitHub.git_token(context.conn)
+
+      with {:ok, token} <- token_result,
            {output, 0} <-
              System.cmd("python3", [Application.app_dir(:bors, "priv/local_git.py"), input],
                env: [{"BORS_GIT_TOKEN", token}],

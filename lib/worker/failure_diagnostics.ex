@@ -2,7 +2,7 @@ defmodule BorsNG.Worker.FailureDiagnostics do
   @moduledoc "Candidate-bound, durable observations of untrusted terminal compiler output."
   import Ecto.Query
   alias BorsNG.Database.{CandidateEvent, Repo}
-  alias BorsNG.Worker.{CandidateAssembler, CandidateJournal, FailureIsolation}
+  alias BorsNG.Worker.{CandidateAssembler, CandidateJournal, FailureIsolation, LocalGit}
 
   @steps [
     "Preflight exact-candidate import headers",
@@ -12,7 +12,13 @@ defmodule BorsNG.Worker.FailureDiagnostics do
   # Runs in the existing per-project orchestration executor, outside the shared
   # GitHub server/scheduler. A persisted unavailable result is final for this
   # immutable candidate/run attempt, including after process restart.
-  def observe(batch, evidence, conn, collector \\ &collect/2) do
+  def observe(
+        batch,
+        evidence,
+        conn,
+        collector \\ &collect/2,
+        providers \\ &LocalGit.import_providers/4
+      ) do
     candidate = CandidateJournal.current(batch)
     hints = FailureIsolation.hints(candidate)
 
@@ -33,6 +39,8 @@ defmodule BorsNG.Worker.FailureDiagnostics do
         CandidateJournal.event(candidate, "failure_diagnostics", "bors.terminal_logs", %{
           binding: binding,
           result: result,
+          provider_lookup:
+            provider_lookup(candidate, batch, evidence, hints, result, conn, providers),
           authority: "retry_only",
           proof_authority: false
         })
@@ -117,6 +125,45 @@ defmodule BorsNG.Worker.FailureDiagnostics do
   end
 
   def diagnosis(candidate, hints) do
+    with {:ok, observation} <- bound_observation(candidate) do
+      case map_paths(hints, observation.details["result"]) do
+        {:ok, prs} ->
+          {:ok, prs,
+           %{
+             "binding" => observation.details["binding"],
+             "diagnostics" => observation.details["result"]
+           }}
+
+        other ->
+          other
+      end
+    end
+  end
+
+  # Provider hints deliberately never enter diagnosis/2, which authorizes the
+  # stronger provisional singleton repair handoff. Only retry grouping uses them.
+  def retry_suspects(candidate, hints) do
+    case suspects(candidate, hints) do
+      {:ok, prs} ->
+        {:ok, prs, "compiler_diagnostics"}
+
+      _ ->
+        with {:ok, observation} <- bound_observation(candidate),
+             {:ok, prs} <-
+               map_providers(
+                 hints,
+                 observation.details["result"],
+                 observation.details["binding"],
+                 observation.details["provider_lookup"]
+               ) do
+          {:ok, prs, "import_provider_hint"}
+        else
+          _ -> :unavailable
+        end
+    end
+  end
+
+  defp bound_observation(candidate) do
     with false <- is_nil(candidate),
          event when not is_nil(event) <-
            Repo.one(
@@ -134,21 +181,127 @@ defmodule BorsNG.Worker.FailureDiagnostics do
          true <- CandidateJournal.commit_binding(candidate)["commit"] == commit,
          observation when not is_nil(observation) <-
            observation(candidate, binding(candidate, commit, evidence)) do
-      case map_paths(hints, observation.details["result"]) do
-        {:ok, prs} ->
-          {:ok, prs,
-           %{
-             "binding" => observation.details["binding"],
-             "diagnostics" => observation.details["result"]
-           }}
-
-        other ->
-          other
-      end
+      {:ok, observation}
     else
       _ -> :unavailable
     end
   end
+
+  defp provider_lookup(candidate, batch, evidence, hints, result, conn, providers) do
+    bound = CandidateJournal.commit_binding(candidate)
+    identity = CandidateAssembler.identity(candidate)
+    expected = Enum.map(candidate.snapshot["members"], &Map.take(&1, ["pr", "head_sha"]))
+
+    provenance =
+      Map.merge(identity, %{commit: batch.commit, tree: bound["tree"], members: expected})
+      |> Jason.encode!()
+      |> Jason.decode!()
+
+    with :unavailable <- map_paths(hints, result),
+         true <- batch.base_sha == candidate.snapshot["base_sha"],
+         true <- hints["provenance"] == provenance,
+         true <-
+           Enum.map(hints["changed_files"] || [], &Map.take(&1, ["pr", "head_sha"])) == expected,
+         :ok <-
+           CandidateAssembler.validate_result(
+             candidate,
+             Map.merge(
+               identity,
+               %{commit: batch.commit, tree: bound["tree"]}
+             )
+           ),
+         {:ok, paths} <- provider_paths(hints, result) do
+      lookup = providers.(batch.project, conn, binding(candidate, batch.commit, evidence), paths)
+
+      if is_map(lookup) and byte_size(Jason.encode!(lookup)) <= 64 * 1024,
+        do: lookup,
+        else: %{"complete" => false, "reason" => "provider_output_limit"}
+    else
+      _ -> %{"complete" => false, "reason" => "ineligible_or_unmapped"}
+    end
+  rescue
+    _ -> %{"complete" => false, "reason" => "provider_unavailable"}
+  end
+
+  # Restrict the first rollout to precise compiler errors whose paths all lack
+  # existing ownership. Mixed/unknown/audit findings retain conservative fallback.
+  def provider_paths(hints, %{"complete" => true, "jobs" => jobs}) when is_list(jobs) do
+    observations = Enum.flat_map(jobs, & &1["observations"])
+    paths = observations |> Enum.flat_map(& &1["paths"]) |> Enum.uniq() |> Enum.sort()
+    changed = hints["changed_files"] || []
+    dependencies = Map.get(hints, "dependencies_complete", hints["complete"]) == true
+
+    if FailureIsolation.ownership_complete?(hints) and observations != [] and
+         Enum.all?(observations, &(&1["kind"] == "compiler_error" and &1["paths"] != [])) and
+         length(paths) in 1..8 and Enum.all?(paths, &project_path?/1) and
+         Enum.all?(paths, fn path ->
+           Enum.all?(changed, fn member ->
+             path not in member["paths"] and
+               (not dependencies or path not in (member["dependency_paths"] || []))
+           end)
+         end),
+       do: {:ok, paths},
+       else: :unavailable
+  rescue
+    _ -> :unavailable
+  end
+
+  def provider_paths(_, _), do: :unavailable
+
+  def map_providers(
+        hints,
+        logs,
+        binding,
+        %{
+          "complete" => true,
+          "binding" => binding,
+          "files" => files,
+          "authority" => "retry_only",
+          "proof_authority" => false
+        } = lookup
+      )
+      when is_list(files) do
+    with true <- byte_size(Jason.encode!(lookup)) <= 64 * 1024,
+         {:ok, paths} <- provider_paths(hints, logs),
+         true <- Enum.map(files, & &1["path"]) == paths,
+         true <-
+           Enum.all?(files, fn file ->
+             sha?(file["blob"]) and is_integer(file["bytes"]) and file["bytes"] in 0..262_144 and
+               is_list(file["providers"]) and length(file["providers"]) <= 128 and
+               Enum.all?(file["providers"], fn p ->
+                 project_path?(p["path"]) and sha?(p["blob"])
+               end)
+           end),
+         true <- Enum.sum(Enum.map(files, & &1["bytes"])) <= 512 * 1024 do
+      owners =
+        Enum.map(files, fn file ->
+          providers = Enum.map(file["providers"], & &1["path"])
+
+          hints["changed_files"]
+          |> Enum.filter(fn member ->
+            Enum.any?(providers, &(&1 in member["paths"]))
+          end)
+          |> Enum.map(& &1["pr"])
+        end)
+
+      if Enum.all?(owners, &(&1 != [])),
+        do: {:ok, owners |> List.flatten() |> Enum.uniq()},
+        else: :unavailable
+    else
+      _ -> :unavailable
+    end
+  rescue
+    _ -> :unavailable
+  end
+
+  def map_providers(_, _, _, _), do: :unavailable
+
+  defp sha?(value), do: is_binary(value) and Regex.match?(~r/\A[0-9a-f]{40}\z/, value)
+
+  defp project_path?(path),
+    do:
+      is_binary(path) and byte_size(path) <= 512 and
+        Regex.match?(~r/\ATauCeti(?:\/[A-Za-z_][A-Za-z0-9_'\-]*)+\.lean\z/, path)
 
   def map_paths(%{"changed_files" => changed} = hints, %{
         "complete" => true,

@@ -91,7 +91,7 @@ class Mirror:
                             raise Failure('timeout', operation=args[0], phase=self.phase)
                         if os.fstat(out.fileno()).st_size > output_limit or os.fstat(err.fileno()).st_size > output_limit:
                             raise Failure('output_limit', operation=args[0])
-                        if size(self.root) > self.budget:
+                        if self.request['operation'] != 'import_providers' and size(self.root) > self.budget:
                             raise Failure('mirror_limit', max_bytes=self.budget)
             except Failure:
                 os.killpg(proc.pid, signal.SIGKILL)
@@ -404,6 +404,88 @@ class Mirror:
             raise Failure('diagnostic_limit')
         return result
 
+    def import_providers(self):
+        """Depth-one retry hints from a few unchanged diagnostic files, offline.
+
+        Never initializes/fetches a mirror or scans a project inventory. The
+        existing source-only header cache is optional; a cold cache reads only
+        the requested immutable blobs with the same full header parser.
+        """
+        cpu_started = time.process_time()
+        binding = self.request['binding']
+        paths = self.request['paths']
+        self.deadline = min(self.deadline, self.started + 5)
+
+        def entries(commit, selected):
+            listing = self.git('ls-tree', '-l', '-z', commit, '--', *selected,
+                               output_limit=64 * 1024)[0]
+            result = {}
+            for entry in listing.split('\0'):
+                if not entry:
+                    continue
+                meta, path = entry.split('\t', 1)
+                mode, kind, oid, length = meta.split()
+                if (path not in selected or mode != '100644' or kind != 'blob'
+                        or not SHA.fullmatch(oid) or not length.isdigit()):
+                    raise Failure('unsupported_source')
+                result[path] = (oid, int(length))
+            if set(result) != set(selected):
+                raise Failure('missing_source')
+            return result
+
+        files = entries(binding['commit'], paths)
+        if files != entries(binding['base_sha'], paths):
+            raise Failure('changed_diagnostic_source')
+        if (any(length > 256 * 1024 for _, length in files.values())
+                or sum(length for _, length in files.values()) > 512 * 1024):
+            raise Failure('provider_byte_limit')
+        cache = self.repo / 'bors-headers-local-source-v2.json'
+        stored = {}
+        if cache.exists() and cache.stat().st_size <= 4 * 1024 * 1024:
+            try:
+                stored = json.loads(cache.read_text())
+                if not isinstance(stored, dict):
+                    stored = {}
+            except (OSError, ValueError, UnicodeError):
+                pass
+        headers, cold = {}, []
+        for oid, _ in files.values():
+            modules = stored.get(oid)
+            if (isinstance(modules, list) and len(modules) <= 128
+                    and all(isinstance(m, str) and len(m) <= 512
+                            and re.fullmatch(r'TauCeti(?:\.[A-Za-z_][A-Za-z0-9_\']*)*', m)
+                            for m in modules)):
+                headers[oid] = modules
+            elif oid not in cold:
+                cold.append(oid)
+        for oid, content in zip(cold, self.diagnostic_objects(cold, 'blob') if cold else []):
+            headers[oid] = compatibility_imports(content.decode('utf-8'))
+        providers = {path: sorted({m.replace('.', '/') + '.lean' for m in headers[oid]})
+                     for path, (oid, _) in files.items()}
+        all_providers = sorted({p for values in providers.values() for p in values})
+        if len(all_providers) > 128:
+            raise Failure('provider_count_limit')
+        provider_files = entries(binding['commit'], all_providers) if all_providers else {}
+        # Cache only source data, never verdicts or compiled candidate artifacts.
+        if cold:
+            stored.update(headers)
+            encoded = json.dumps(stored)
+            if len(encoded) <= 4 * 1024 * 1024:
+                temp = cache.with_suffix('.tmp')
+                temp.write_text(encoded)
+                temp.replace(cache)
+        result = dict(complete=True, binding=binding, files=[dict(
+            path=path, blob=files[path][0], bytes=files[path][1], providers=[dict(
+                path=p, blob=provider_files[p][0]) for p in providers[path]]) for path in paths],
+            cpu_ms=round((time.process_time() - cpu_started) * 1000),
+            cold_blobs=len(cold), elapsed_ms=round((time.monotonic() - self.started) * 1000),
+            authority='retry_only', proof_authority=False)
+        if len(json.dumps(result)) > 64 * 1024:
+            raise Failure('provider_output_limit')
+        if time.monotonic() >= self.deadline:
+            raise Failure('timeout')
+        return result
+
     def compatibility(self):
         """Exact singleton trees, source data only; unknown coverage never holds a PR."""
         base = self.request['base_sha']
@@ -544,6 +626,10 @@ class Mirror:
         return dict(status='ok', ref=ref, commit=commit)
 
     def run(self):
+        if self.request['operation'] == 'import_providers':
+            self.deadline = min(self.deadline, self.started + 5)
+            if not self.repo.is_dir():
+                raise Failure('mirror_unavailable')
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         with (self.root / '.lock').open('a') as lock:
             # Keep the flock alive in Git's process tree even if the helper dies.
@@ -554,6 +640,8 @@ class Mirror:
                     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     break
                 except BlockingIOError:
+                    if self.request['operation'] == 'import_providers':
+                        raise Failure('mirror_busy')
                     if time.monotonic() >= self.deadline:
                         raise Failure('lock_timeout', phase='lock')
                     time.sleep(0.05)
@@ -564,15 +652,17 @@ class Mirror:
                 error.details.setdefault('phase', self.phase)
                 raise
             finally:
+                # A read-only optional lookup never evicts another lane's mirror.
                 # Failed fetches/assembly may leave unreachable objects; bound
                 # retained bytes on both success and failure, under the lock.
-                mirrors = sorted(self.root.glob('*.git'), key=lambda p: p.stat().st_mtime)
-                total = sum(size(p) for p in mirrors)
-                for mirror in mirrors:
-                    if total <= self.budget:
-                        break
-                    total -= size(mirror)
-                    shutil.rmtree(mirror)
+                if self.request['operation'] != 'import_providers':
+                    mirrors = sorted(self.root.glob('*.git'), key=lambda p: p.stat().st_mtime)
+                    total = sum(size(p) for p in mirrors)
+                    for mirror in mirrors:
+                        if total <= self.budget:
+                            break
+                        total -= size(mirror)
+                        shutil.rmtree(mirror)
 
 
 def compatibility_imports(content):
@@ -694,9 +784,26 @@ def local_imports(content):
 def validate(request):
     if not REPO.fullmatch(request['repository']) or '..' in request['repository']:
         raise Failure('invalid_repository')
-    if request['operation'] not in ['assemble', 'publish', 'promote', 'compatibility']:
+    if request['operation'] not in ['assemble', 'publish', 'promote', 'compatibility', 'import_providers']:
         raise Failure('invalid_operation')
-    if request['operation'] in ['assemble', 'compatibility']:
+    if request['operation'] == 'import_providers':
+        binding, paths = request['binding'], request['paths']
+        if (not isinstance(binding, dict)
+                or any(type(binding.get(k)) is not int or binding[k] <= 0
+                       for k in ['candidate_id', 'generation', 'run_id', 'run_attempt'])
+                or not re.fullmatch(r'[0-9a-f]{64}', binding.get('members_digest', ''))
+                or binding.get('workflow') != '.github/workflows/pr-build.yml'
+                or not isinstance(binding.get('job_ids'), list)
+                or not 1 <= len(binding['job_ids']) <= 2
+                or any(type(j) is not int or j <= 0 for j in binding['job_ids'])
+                or not isinstance(paths, list) or not 1 <= len(paths) <= 8
+                or len(set(paths)) != len(paths)
+                or any(not isinstance(p, str) or len(p) > 512
+                       or not re.fullmatch(r"TauCeti(?:/[A-Za-z_][A-Za-z0-9_'-]*)+\.lean", p)
+                       for p in paths)):
+            raise Failure('invalid_provider_request')
+        shas = [binding['commit'], binding['base_sha']]
+    elif request['operation'] in ['assemble', 'compatibility']:
         if not request['members']:
             raise Failure('empty_members')
         limit = (ASSEMBLY_MEMBER_LIMIT if request['operation'] == 'assemble'
