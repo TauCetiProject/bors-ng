@@ -139,6 +139,14 @@ defmodule BorsNG.Worker.FailureIsolation do
         end
       end
 
+    hints =
+      if is_map(hints) do
+        case BorsNG.Worker.FailureDiagnostics.base_collision(candidate, hints) do
+          {:ok, pr, proof} -> Map.put(hints, "verified_base_collision", Map.put(proof, "pr", pr))
+          _ -> hints
+        end
+      end
+
     case partition(links, hints, conflict) do
       {:ok, groups, reason} ->
         CandidateJournal.event(candidate, "failure_partition", "bors.failure_isolation", %{
@@ -146,7 +154,8 @@ defmodule BorsNG.Worker.FailureIsolation do
           groups: Enum.map(groups, fn group -> Enum.map(group, & &1.patch.pr_xref) end),
           ownership_complete: ownership_complete?(hints),
           dependencies_complete: Map.get(hints, "dependencies_complete", hints["complete"]),
-          authority: "retry_only"
+          authority: "retry_only",
+          verified_base_collision: hints["verified_base_collision"]
         })
 
         groups =
@@ -270,7 +279,7 @@ defmodule BorsNG.Worker.FailureIsolation do
 
       # Preserve provider/importer relationships for missing-import retries.
       suspects =
-        if conflict,
+        if not is_nil(conflict) or verified_base_collision?(hints, owner, path_owners),
           do: suspects,
           else:
             components |> Enum.filter(&Enum.any?(&1, fn i -> i in suspects end)) |> List.flatten()
@@ -319,6 +328,23 @@ defmodule BorsNG.Worker.FailureIsolation do
   end
 
   def partition(_, _, _), do: :fallback
+
+  # This marker is added only after exact source and current binding checks.
+  # Bundles remain units; imports do not enlarge this directly located suspect.
+  defp verified_base_collision?(hints, owner, path_owners) do
+    case hints["verified_base_collision"] do
+      %{"pr" => pr} ->
+        unit = owner[pr]
+
+        hints["compiler_suspects"] == [pr] and hints["missing_imports"] == [] and
+          Enum.all?(path_owners, fn {_, owners} ->
+            unit not in owners or Enum.all?(owners, &(&1 == unit))
+          end)
+
+      _ ->
+        false
+    end
+  end
 
   defp components([], _), do: []
 

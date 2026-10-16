@@ -24,6 +24,7 @@ OUTPUT_LIMIT = 1024 * 1024
 ASSEMBLY_MEMBER_LIMIT = 128
 COMPATIBILITY_MEMBER_LIMIT = 32
 PROVIDER_OPERATIONS = ('import_providers', 'bounded_import_providers')
+OFFLINE_OPERATIONS = (*PROVIDER_OPERATIONS, 'collision_sources')
 PROVIDER_PATH = re.compile(r"TauCeti(?:/[A-Za-z_][A-Za-z0-9_'\-]*)+\.lean\Z")
 BOUNDED_PROVIDER_POLICY = 'bounded_depth_v1'
 PROVIDER_LIMITS = dict(max_depth=5, max_headers=64, max_file_bytes=256 * 1024,
@@ -99,7 +100,7 @@ class Mirror:
                             raise Failure('timeout', operation=args[0], phase=self.phase)
                         if os.fstat(out.fileno()).st_size > output_limit or os.fstat(err.fileno()).st_size > output_limit:
                             raise Failure('output_limit', operation=args[0])
-                        if self.request['operation'] not in PROVIDER_OPERATIONS and size(self.root) > self.budget:
+                        if self.request['operation'] not in OFFLINE_OPERATIONS and size(self.root) > self.budget:
                             raise Failure('mirror_limit', max_bytes=self.budget)
             except Failure:
                 os.killpg(proc.pid, signal.SIGKILL)
@@ -410,6 +411,52 @@ class Mirror:
                       missing_imports=missing, dependency_paths=sorted(dependencies))
         if len(json.dumps(result)) > 192 * 1024:
             raise Failure('diagnostic_limit')
+        return result
+
+    def collision_sources(self):
+        """Identity of exactly two audit paths, offline, without interpreting source.
+
+        An ownerless path is not presumed to exist on base. Return both exact
+        tree entries, and read each unique blob to reject missing/partial objects.
+        No checkout, fetch, source evaluation, header cache or publication.
+        """
+        binding, paths = self.request['binding'], self.request['paths']
+        self.deadline = min(self.deadline, self.started + 5)
+        started_cpu = time.process_time()
+
+        def entries(commit):
+            raw = self.git('ls-tree', '-l', '-z', commit, '--', *paths, output_limit=64 * 1024)[0]
+            found = {}
+            for entry in raw.split('\0'):
+                if not entry:
+                    continue
+                meta, path = entry.split('\t', 1)
+                mode, kind, oid, length = meta.split()
+                if (path not in paths or mode != '100644' or kind != 'blob'
+                        or not SHA.fullmatch(oid) or not length.isdigit()):
+                    raise Failure('unsupported_source')
+                found[path] = dict(blob=oid, bytes=int(length))
+            return found
+
+        current, base = entries(binding['commit']), entries(binding['base_sha'])
+        if set(current) != set(paths):
+            raise Failure('missing_source')
+        blobs = {entry['blob']: entry['bytes'] for entry in [*current.values(), *base.values()]}
+        if any(n > 256 * 1024 for n in blobs.values()) or sum(blobs.values()) > 512 * 1024:
+            raise Failure('source_byte_limit')
+        contents = self.diagnostic_objects(list(blobs), 'blob')
+        if len(contents) != len(blobs) or any(len(content) != n for content, n in zip(contents, blobs.values())):
+            raise Failure('partial_source')
+        result = dict(complete=True, policy='collision-source-identity-v1', binding=binding,
+                      files=[dict(path=p, candidate=current[p], base=base.get(p)) for p in paths],
+                      source_bytes=sum(blobs.values()),
+                      cpu_ms=round((time.process_time() - started_cpu) * 1000),
+                      elapsed_ms=round((time.monotonic() - self.started) * 1000),
+                      authority='retry_only', proof_authority=False)
+        if len(json.dumps(result)) > 64 * 1024:
+            raise Failure('source_output_limit')
+        if time.monotonic() >= self.deadline:
+            raise Failure('timeout')
         return result
 
     def import_providers(self):
@@ -756,7 +803,7 @@ class Mirror:
         return dict(status='ok', ref=ref, commit=commit)
 
     def run(self):
-        if self.request['operation'] in PROVIDER_OPERATIONS:
+        if self.request['operation'] in OFFLINE_OPERATIONS:
             self.deadline = min(self.deadline, self.started + 5)
             remaining = self.deadline - time.monotonic()
             if remaining <= 0:
@@ -774,7 +821,7 @@ class Mirror:
         return self.run_locked()
 
     def run_locked(self):
-        if self.request['operation'] in PROVIDER_OPERATIONS:
+        if self.request['operation'] in OFFLINE_OPERATIONS:
             self.deadline = min(self.deadline, self.started + 5)
             if not self.repo.is_dir():
                 raise Failure('mirror_unavailable')
@@ -788,7 +835,7 @@ class Mirror:
                     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     break
                 except BlockingIOError:
-                    if self.request['operation'] in PROVIDER_OPERATIONS:
+                    if self.request['operation'] in OFFLINE_OPERATIONS:
                         raise Failure('mirror_busy')
                     if time.monotonic() >= self.deadline:
                         raise Failure('lock_timeout', phase='lock')
@@ -816,7 +863,7 @@ class Mirror:
                 # A read-only optional lookup never evicts another lane's mirror.
                 # Failed fetches/assembly may leave unreachable objects; bound
                 # retained bytes on both success and failure, under the lock.
-                if self.request['operation'] not in PROVIDER_OPERATIONS:
+                if self.request['operation'] not in OFFLINE_OPERATIONS:
                     mirrors = sorted(self.root.glob('*.git'), key=lambda p: p.stat().st_mtime)
                     total = sum(size(p) for p in mirrors)
                     for mirror in mirrors:
@@ -945,9 +992,9 @@ def local_imports(content):
 def validate(request):
     if not REPO.fullmatch(request['repository']) or '..' in request['repository']:
         raise Failure('invalid_repository')
-    if request['operation'] not in ['assemble', 'publish', 'promote', 'compatibility', *PROVIDER_OPERATIONS]:
+    if request['operation'] not in ['assemble', 'publish', 'promote', 'compatibility', *OFFLINE_OPERATIONS]:
         raise Failure('invalid_operation')
-    if request['operation'] in PROVIDER_OPERATIONS:
+    if request['operation'] in OFFLINE_OPERATIONS:
         binding, paths = request['binding'], request['paths']
         if (not isinstance(binding, dict)
                 or any(type(binding.get(k)) is not int or binding[k] <= 0
@@ -970,6 +1017,8 @@ def validate(request):
                            or not PROVIDER_PATH.fullmatch(p) for p in changed)
                     or changed != sorted(set(changed))):
                 raise Failure('invalid_changed_frontier')
+        if request['operation'] == 'collision_sources' and len(paths) != 2:
+            raise Failure('invalid_collision_request')
         shas = [binding['commit'], binding['base_sha']]
     elif request['operation'] in ['assemble', 'compatibility']:
         if not request['members']:

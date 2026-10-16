@@ -304,6 +304,100 @@ class LocalGitTest(unittest.TestCase):
         self.assertEqual(result['limits'], local.PROVIDER_LIMITS)
         self.assertLess(len(json.dumps(result).encode()), 65536)
 
+    def collision_fixture(self):
+        request = self.provider_fixture()
+        return request | dict(operation='collision_sources',
+                              paths=['TauCeti/Downstream.lean', 'TauCeti/Provider.lean'])
+
+    def test_collision_source_identity_is_offline_bounded_and_not_provider_authority(self):
+        from unittest.mock import patch
+        request = self.collision_fixture()
+        mirror = TestMirror(request, self.upstream)
+        cache = mirror.repo / 'bors-headers-local-source-v2.json'
+        before = cache.read_bytes() if cache.exists() else None
+        with patch.object(mirror, 'initialize', side_effect=AssertionError('initialize')), \
+                patch.object(mirror, 'fetch', side_effect=AssertionError('fetch')), \
+                patch.object(mirror, 'source_inventory', side_effect=AssertionError('inventory')), \
+                patch.object(local, 'compatibility_imports', side_effect=AssertionError('parse/evaluate')):
+            result = mirror.run()
+        self.assertTrue(result['complete'])
+        self.assertEqual(result['binding'], request['binding'])
+        self.assertEqual(result['policy'], 'collision-source-identity-v1')
+        unchanged, changed = result['files']
+        self.assertEqual(unchanged['candidate'], unchanged['base'])
+        self.assertNotEqual(changed['candidate']['blob'], changed['base']['blob'])
+        self.assertNotIn('providers', unchanged)
+        self.assertEqual(result['authority'], 'retry_only')
+        self.assertFalse(result['proof_authority'])
+        self.assertEqual(before, cache.read_bytes() if cache.exists() else None)
+        self.assertLessEqual(result['source_bytes'], 512 * 1024)
+
+    def test_collision_sources_new_file_missing_source_and_partial_objects(self):
+        from unittest.mock import patch
+        request = self.collision_fixture()
+        head = self.commit(self.request['members'][0]['head_sha'], {'TauCeti/New.lean': 'def collide := 2'})
+        # Seed test objects explicitly; the production identity operation cannot fetch.
+        mirror = TestMirror(request, self.upstream)
+        mirror.git('fetch', '--quiet', str(self.upstream), head)
+        new_request = request | dict(paths=['TauCeti/Downstream.lean', 'TauCeti/New.lean'],
+            binding=request['binding'] | dict(commit=head))
+        self.assertIsNone(TestMirror(new_request, self.upstream).run()['files'][1]['base'])
+        with self.assertRaises(local.Failure):
+            TestMirror(request | dict(paths=['TauCeti/Downstream.lean', 'TauCeti/Absent.lean']), self.upstream).run()
+        mirror = TestMirror(request, self.upstream)
+        with patch.object(mirror, 'diagnostic_objects', return_value=[b'partial']):
+            with self.assertRaises(local.Failure):
+                mirror.run()
+        with self.assertRaises(local.Failure):
+            TestMirror(request | dict(binding=request['binding'] | dict(commit='f' * 40)), self.upstream).run()
+
+    def test_collision_source_limits_and_no_cold_or_busy_mirror_bootstrap(self):
+        import fcntl
+        request = self.collision_fixture()
+        with (Path(request['root']) / '.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaises(local.Failure) as failure:
+                TestMirror(request, self.upstream).run()
+            self.assertEqual(failure.exception.details['kind'], 'mirror_busy')
+        with self.assertRaises(local.Failure):
+            TestMirror(request | dict(root=str(self.root / 'cold-collision')), self.upstream).run()
+        self.assertFalse((self.root / 'cold-collision').exists())
+        mirror = TestMirror(request, self.upstream)
+        mirror.deadline = time.monotonic() - 1
+        with self.assertRaises(local.Failure):
+            mirror.run()
+        head = self.commit(self.request['members'][0]['head_sha'], {'TauCeti/Provider.lean': 'x' * (256 * 1024 + 1)})
+        mirror = TestMirror(request, self.upstream)
+        mirror.git('fetch', '--quiet', str(self.upstream), head)
+        with self.assertRaises(local.Failure):
+            TestMirror(request | dict(binding=request['binding'] | dict(commit=head)), self.upstream).run()
+        for paths in [[], ['TauCeti/A.lean'], ['TauCeti/A.lean'] * 2,
+                      ['TauCeti/A.lean', '../secret']]:
+            with self.assertRaises(local.Failure):
+                local.validate(request | dict(paths=paths))
+
+    def test_collision_source_aggregate_budget_and_symlinks(self):
+        request = self.collision_fixture()
+        base = self.commit(self.base, {'TauCeti/Downstream.lean': 'a' * (180 * 1024),
+                                      'TauCeti/Provider.lean': 'b' * (180 * 1024)})
+        head = self.commit(base, {'TauCeti/Provider.lean': 'c' * (180 * 1024)})
+        mirror = TestMirror(request, self.upstream)
+        mirror.git('fetch', '--quiet', str(self.upstream), head)
+        with self.assertRaises(local.Failure) as failure:
+            TestMirror(request | dict(binding=request['binding'] | dict(base_sha=base, commit=head)), self.upstream).run()
+        self.assertEqual(failure.exception.details['kind'], 'source_byte_limit')
+        git(self.upstream, 'checkout', '-q', '--detach', self.request['members'][0]['head_sha'])
+        link = self.upstream / 'TauCeti' / 'Downstream.lean'
+        link.unlink()
+        link.symlink_to('/unreadable-outside-source')
+        git(self.upstream, 'add', '.')
+        git(self.upstream, 'commit', '-qm', 'unsupported symlink')
+        head = git(self.upstream, 'rev-parse', 'HEAD')
+        mirror.git('fetch', '--quiet', str(self.upstream), head)
+        with self.assertRaises(local.Failure) as failure:
+            TestMirror(request | dict(binding=request['binding'] | dict(commit=head)), self.upstream).run()
+        self.assertEqual(failure.exception.details['kind'], 'unsupported_source')
+
     def test_compatibility_deleted_source_and_unchanged_importer(self):
         fork = self.commit(self.base, {'TauCeti/Old.lean': 'def old := 1',
             'TauCeti/Dependency.lean': 'import TauCeti.Old\ndef dependency := 1'})

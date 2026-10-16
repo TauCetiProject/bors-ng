@@ -17,7 +17,8 @@ defmodule BorsNG.Worker.FailureDiagnostics do
         evidence,
         conn,
         collector \\ &collect/2,
-        providers \\ nil
+        providers \\ nil,
+        sources \\ &LocalGit.collision_sources/4
       ) do
     candidate = CandidateJournal.current(batch)
     hints = FailureIsolation.hints(candidate)
@@ -39,6 +40,8 @@ defmodule BorsNG.Worker.FailureDiagnostics do
         CandidateJournal.event(candidate, "failure_diagnostics", "bors.terminal_logs", %{
           binding: binding,
           result: result,
+          collision_sources:
+            collision_lookup(candidate, batch, evidence, hints, result, conn, sources),
           provider_lookup:
             provider_lookup(candidate, batch, evidence, hints, result, conn, providers),
           authority: "retry_only",
@@ -163,7 +166,88 @@ defmodule BorsNG.Worker.FailureDiagnostics do
     end
   end
 
-  defp bound_observation(candidate) do
+  # Source identity is separate from advisory provider ownership. Only this
+  # bound direct collision exception can bypass component widening.
+  def base_collision(candidate, hints) do
+    with {:ok, observation} <- bound_observation(candidate),
+         {:ok, pr} <-
+           map_base_collision(
+             hints,
+             observation.details["result"],
+             observation.details["binding"],
+             observation.details["collision_sources"]
+           ),
+         {:ok, ^observation} <- bound_observation(candidate, true),
+         true <- current_collision_context?(candidate, hints) do
+      {:ok, pr,
+       %{
+         "binding" => observation.details["binding"],
+         "sources" => observation.details["collision_sources"]
+       }}
+    else
+      _ -> :unavailable
+    end
+  rescue
+    _ -> :unavailable
+  end
+
+  defp current_collision_context?(candidate, hints) do
+    bound = CandidateJournal.commit_binding(candidate)
+    expected = Enum.map(candidate.snapshot["members"], &Map.take(&1, ["pr", "head_sha"]))
+
+    provenance =
+      CandidateAssembler.identity(candidate)
+      |> Map.merge(%{commit: bound["commit"], tree: bound["tree"], members: expected})
+      |> Jason.encode!()
+      |> Jason.decode!()
+
+    hints["provenance"] == provenance and
+      CandidateAssembler.validate_result(
+        candidate,
+        Map.merge(CandidateAssembler.identity(candidate), %{
+          commit: bound["commit"],
+          tree: bound["tree"]
+        })
+      ) == :ok
+  end
+
+  defp collision_binding_current?(candidate, commit, evidence) do
+    live = Repo.get(BorsNG.Database.Batch, candidate.batch_id)
+
+    normalized =
+      Map.merge(normalize_evidence(evidence), %{
+        diagnostic: evidence["diagnostic"],
+        conclusion: evidence["conclusion"],
+        workflow: evidence["workflow"],
+        identity: evidence["identity"],
+        run_id: evidence["run_id"],
+        run_attempt: evidence["run_attempt"],
+        run_created_at: evidence["run_created_at"]
+      })
+
+    not is_nil(live) and live.commit == commit and live.base_sha == candidate.snapshot["base_sha"] and
+      eligible?(live, normalized) and fresh_run?(candidate, normalized)
+  end
+
+  defp collision_lookup(candidate, batch, evidence, hints, result, conn, sources) do
+    with {:ok, pair} <- collision_paths(hints, result),
+         true <- current_collision_context?(candidate, hints),
+         true <- batch.base_sha == candidate.snapshot["base_sha"],
+         true <- Enum.map(result["jobs"], & &1["job_id"]) == job_ids(evidence) do
+      lookup =
+        sources.(batch.project, conn, binding(candidate, batch.commit, evidence), pair.paths)
+
+      if is_map(lookup) and byte_size(Jason.encode!(lookup)) <= 64 * 1024,
+        do: lookup,
+        else: %{"complete" => false, "reason" => "source_output_limit"}
+    else
+      _ -> %{"complete" => false, "reason" => "ineligible_collision"}
+    end
+  rescue
+    _ -> %{"complete" => false, "reason" => "source_unavailable"}
+  end
+
+  defp bound_observation(candidate, strict? \\ false) do
     with false <- is_nil(candidate),
          event when not is_nil(event) <-
            Repo.one(
@@ -179,6 +263,7 @@ defmodule BorsNG.Worker.FailureDiagnostics do
            event.details,
          true <- evidence["diagnostic"] == nil,
          true <- CandidateJournal.commit_binding(candidate)["commit"] == commit,
+         true <- not strict? or collision_binding_current?(candidate, commit, evidence),
          observation when not is_nil(observation) <-
            observation(candidate, binding(candidate, commit, evidence)) do
       {:ok, observation}
@@ -457,6 +542,110 @@ defmodule BorsNG.Worker.FailureDiagnostics do
   end
 
   def map_paths(_, _), do: :unavailable
+
+  @doc "Exact one-owner collision paths, excluding imports and mixed diagnostics."
+  def collision_paths(hints, %{"complete" => true, "jobs" => jobs}) when is_list(jobs) do
+    with true <-
+           hints["ownership_complete"] == true and hints["complete"] == true and
+             hints["dependencies_complete"] == true and hints["missing_imports"] == [],
+         true <- length(jobs) in 1..2,
+         true <-
+           Enum.all?(
+             jobs,
+             &(is_integer(&1["job_id"]) and &1["job_id"] > 0 and
+                 is_integer(&1["bytes"]) and &1["bytes"] in 1..16_777_216)
+           ),
+         true <- length(Enum.uniq_by(jobs, & &1["job_id"])) == length(jobs),
+         true <- Enum.all?(jobs, &(is_list(&1["observations"]) and &1["observations"] != [])),
+         observations <- Enum.flat_map(jobs, & &1["observations"]),
+         true <- Enum.all?(observations, &(&1["kind"] == "duplicate_declaration")),
+         [paths] <- observations |> Enum.map(&Enum.sort(&1["paths"])) |> Enum.uniq(),
+         true <- length(paths) == 2 and length(Enum.uniq(paths)) == 2,
+         true <- Enum.all?(paths, &project_path?/1),
+         owners <-
+           Enum.map(paths, fn path ->
+             {path, for(m <- hints["changed_files"], path in m["paths"], do: m["pr"])}
+           end),
+         [{changed, [pr]}] <- Enum.filter(owners, fn {_, owners} -> owners != [] end),
+         [{unchanged, []}] <- Enum.filter(owners, fn {_, owners} -> owners == [] end),
+         true <-
+           Enum.all?(hints["changed_files"], &(unchanged not in (&1["dependency_paths"] || []))) do
+      {:ok, %{pr: pr, paths: paths, changed: changed, unchanged: unchanged}}
+    else
+      _ -> :unavailable
+    end
+  rescue
+    _ -> :unavailable
+  end
+
+  def collision_paths(_, _), do: :unavailable
+
+  @doc "Pure base collision mapping; caller verifies current candidate/classifier provenance."
+  def map_base_collision(
+        hints,
+        %{"jobs" => jobs} = logs,
+        binding,
+        %{
+          "complete" => true,
+          "policy" => "collision-source-identity-v1",
+          "binding" => binding,
+          "authority" => "retry_only",
+          "proof_authority" => false,
+          "files" => files
+        } = sources
+      ) do
+    fields = ~w(candidate_id generation base_sha members_digest commit)
+    provenance = hints["provenance"]
+
+    with {:ok, pair} <- collision_paths(hints, logs),
+         true <- is_map(provenance) and Enum.all?(fields, &(not is_nil(binding[&1]))),
+         true <- Map.take(provenance, fields) == Map.take(binding, fields),
+         true <- is_binary(provenance["tree"]) and provenance["tree"] != "",
+         true <-
+           provenance["members"] ==
+             Enum.map(hints["changed_files"], &Map.take(&1, ["pr", "head_sha"])),
+         true <- binding["workflow"] == ".github/workflows/pr-build.yml",
+         true <-
+           Enum.all?([binding["run_id"], binding["run_attempt"]], &(is_integer(&1) and &1 > 0)),
+         true <- Enum.map(jobs, & &1["job_id"]) == binding["job_ids"],
+         true <-
+           Enum.all?(
+             jobs,
+             &(is_integer(&1["job_id"]) and &1["job_id"] > 0 and
+                 is_integer(&1["bytes"]) and &1["bytes"] in 1..16_777_216)
+           ),
+         true <- byte_size(Jason.encode!(sources)) <= 64 * 1024,
+         true <- Enum.map(files, & &1["path"]) == pair.paths,
+         true <-
+           Enum.all?(
+             files,
+             &(source_entry?(&1["candidate"]) and
+                 (is_nil(&1["base"]) or source_entry?(&1["base"])))
+           ),
+         unchanged <- Enum.find(files, &(&1["path"] == pair.unchanged)),
+         true <- unchanged["base"] == unchanged["candidate"],
+         changed <- Enum.find(files, &(&1["path"] == pair.changed)),
+         true <-
+           is_nil(changed["base"]) or changed["base"]["blob"] != changed["candidate"]["blob"],
+         entries <-
+           Enum.flat_map(files, &[&1["base"], &1["candidate"]])
+           |> Enum.reject(&is_nil/1)
+           |> Enum.uniq(),
+         true <- Enum.sum(Enum.map(entries, & &1["bytes"])) <= 512 * 1024 do
+      {:ok, pair.pr}
+    else
+      _ -> :unavailable
+    end
+  rescue
+    _ -> :unavailable
+  end
+
+  def map_base_collision(_, _, _, _), do: :unavailable
+
+  defp source_entry?(%{"blob" => blob, "bytes" => bytes}),
+    do: sha?(blob) and is_integer(bytes) and bytes in 0..262_144
+
+  defp source_entry?(_), do: false
 
   defp collect(conn, jobs) do
     input =
