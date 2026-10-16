@@ -669,6 +669,7 @@ defmodule BorsNG.Worker.SourceCompatibility do
              current = Repo.one!(from(p in Patch, where: p.id == ^patch.id, lock: "FOR UPDATE"))
 
              if current.commit != suspect.head_sha or requested?(current, suspect.head_sha) or
+                  not is_nil(current.manual_approval) or not is_nil(current.bundle_id) or
                   parent.state != :running or
                   parent.commit != batch.commit or parent.base_sha != batch.base_sha or
                   BorsNG.Worker.CandidateJournal.current(parent) != candidate,
