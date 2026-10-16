@@ -13,6 +13,15 @@ spec.loader.exec_module(diagnostics)
 
 
 class DiagnosticsTest(unittest.TestCase):
+    # Actual primary diagnostics from batch827/run38835437044/job116763406898.
+    RIEMANN_ROCH = 'TauCeti/FieldTheory/FunctionField/ConstantExtension/RiemannRoch.lean'
+    PRIMARY = (
+        '2026-10-16T01:44:30.9389087Z error: ' + RIEMANN_ROCH + ':320:0: '
+        "`[FiniteDimensional F F']` did not match any variables in the current scope\n"
+        '2026-10-16T01:44:30.9418784Z error: ' + RIEMANN_ROCH + ':327:0: '
+        'automatically included section variable(s) unused in theorem '
+        '`TauCeti.Divisor.dim_nsmul_poles_le_of_linearDisjoint`:\n')
+
     def target_block(self, *modules):
         return '\n'.join([diagnostics.FAILED_TARGETS_HEADER,
                           *('- ' + module for module in modules), 'error: build failed'])
@@ -51,6 +60,58 @@ class DiagnosticsTest(unittest.TestCase):
         self.assertEqual(diagnostics.parse('- TauCeti.Provider\nerror: build failed'), [])
         self.assertEqual(diagnostics.parse('echo ' + good.replace('\n', '\\n')), [])
         self.assertEqual(diagnostics.parse('warning: ' + good.replace('\n', '\\n')), [])
+
+    def test_batch827_primary_error_survives_cascading_oversized_target_summary(self):
+        # The native log has >1300 failed targets after these exact two errors.
+        # Distinct fixture targets exercise the bound without shipping an 8MB log.
+        cascade = self.target_block(*(f'TauCeti.Cascade{i}' for i in range(1400)))
+        self.assertEqual(diagnostics.parse(cascade + '\n' + self.envelope()),
+                         diagnostics.parse(self.envelope()))
+        expected = [dict(kind='compiler_error', paths=[self.RIEMANN_ROCH])]
+        for text in [self.PRIMARY + cascade, cascade + '\n' + self.PRIMARY]:
+            self.assertEqual(diagnostics.parse(text), expected)
+        # Collection stays available for the primary path without extra downloads.
+        text = self.PRIMARY + cascade
+        with patch.object(diagnostics, 'read_log', return_value=(text, len(text))), \
+                patch.dict(diagnostics.os.environ, BORS_DIAGNOSTICS_TOKEN='test-only'):
+            result = diagnostics.collect(dict(repository_id=1, job_ids=[2]))
+        self.assertTrue(result['complete'])
+        self.assertEqual(result['jobs'][0]['observations'], expected)
+
+    def test_target_summary_is_only_fallback_and_cannot_erase_source_or_audit_findings(self):
+        audit = ("audit-driver: import TauCeti.Left failed, environment already contains "
+                 "'TauCeti.name' from TauCeti.Right")
+        summaries = [self.target_block('TauCeti.Unrelated'), self.target_block(),
+                     self.target_block('Mathlib.Unsupported'),
+                     self.target_block('TauCeti.Provider').rsplit('\n', 1)[0],
+                     self.target_block('TauCeti.Provider') * 2,
+                     diagnostics.FAILED_TARGETS_HEADER + '\n' + 'x' * 9000]
+        for summary in summaries:
+            for primary in [self.PRIMARY, audit]:
+                expected = diagnostics.parse(primary)
+                self.assertEqual(diagnostics.parse(primary + '\n' + summary), expected)
+                self.assertEqual(diagnostics.parse(summary + '\n' + primary), expected)
+
+    def test_environment_unknowns_and_invalid_records_are_never_hidden_by_precise_errors(self):
+        unknown = dict(linter='simpNF', declaration='_private.Probe', unknown='missing_range')
+        cascade = self.target_block(*(f'TauCeti.Cascade{i}' for i in range(1400)))
+        for summary in [cascade, diagnostics.FAILED_TARGETS_HEADER + '\ninvalid']:
+            text = self.PRIMARY + summary + '\n' + self.envelope([unknown])
+            result = diagnostics.parse(text)
+            self.assertEqual(result[0]['paths'], [self.RIEMANN_ROCH])
+            self.assertEqual(result[1]['paths'], [])
+            self.assertEqual(result[1]['unknown'], 'missing_range')
+            # An unknown alone must not be replaced by apparently located targets.
+            result = diagnostics.parse(summary + '\n' + self.envelope([unknown]))
+            self.assertEqual(len(result), 1)
+            self.assertEqual(result[0]['paths'], [])
+        for envelope in [self.envelope(complete=False), self.envelope()[:-2],
+                         self.envelope() + '\n' + self.envelope()]:
+            with self.assertRaises(ValueError):
+                diagnostics.parse(self.PRIMARY + cascade + '\n' + envelope)
+        with self.assertRaises(ValueError):
+            diagnostics.parse(self.PRIMARY * 65 + self.target_block('TauCeti.Provider'))
+
 
     def envelope(self, findings=None, **changes):
         finding = dict(linter='simpNF', declaration='TauCeti.element_annihilator_flat_baseChange',

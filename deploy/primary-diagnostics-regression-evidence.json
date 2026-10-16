@@ -1,0 +1,264 @@
+{
+  "schema": 1,
+  "verification": "frozen_fixture_replay_only",
+  "production_benefit_verified": false,
+  "native_log": {
+    "run_url": "https://github.com/TauCetiProject/TauCeti/actions/runs/38835437044",
+    "job_id": 116763406898,
+    "bytes": 7869800,
+    "sha256": "db5c7799de98fc7a88d6a1906e07f504a41315ce231a2b9e7b00eb0f8f7d8b8b",
+    "failed_target_count": 1378
+  },
+  "authoritative_binding": {
+    "base_sha": "03de080239e2f6ccee2f6e054e65c5445c50cf1e",
+    "candidate_id": 219,
+    "commit": "4a74e5fedf2c7cdadc072dd2659d1707d602aa36",
+    "generation": 1,
+    "job_ids": [
+      116763406898
+    ],
+    "members_digest": "ddc98f5362033002705d6c9afe5864f94eb44acbbd4c0ce1995f3828bae0fd7b",
+    "run_attempt": 1,
+    "run_id": 38835437044,
+    "workflow": ".github/workflows/pr-build.yml"
+  },
+  "assembly_tree": "76681b0c98a3a09602fe7672c30841e81d61d727",
+  "ordered_heads": [
+    {
+      "pr": 16801,
+      "head_sha": "b49617eab7a721dbeaab0daa31b6676eec73f5e9"
+    },
+    {
+      "pr": 16804,
+      "head_sha": "d1695e85a03174b9db96180e0dd45633ba6e4bd5"
+    },
+    {
+      "pr": 16805,
+      "head_sha": "77d4167ced0fbde0d28eac32c10feed869dd1c53"
+    },
+    {
+      "pr": 16810,
+      "head_sha": "8a6ca681d57b65cf37c2ad09b062e47844b987ac"
+    },
+    {
+      "pr": 16812,
+      "head_sha": "329f2185bf90db1ee6a091bd500c2a78c688f9dd"
+    },
+    {
+      "pr": 16814,
+      "head_sha": "f30e8c8e3a02e9ce45f293afd37f4e9feb64cd40"
+    },
+    {
+      "pr": 16815,
+      "head_sha": "2d6efdfdda4544d3f5701df99065db15ec2f796d"
+    },
+    {
+      "pr": 16816,
+      "head_sha": "1f4509a7d71c1c7614ea478d898ab9fc1eea323c"
+    },
+    {
+      "pr": 16819,
+      "head_sha": "53688accc72db95418debca72e197f5c8310e521"
+    },
+    {
+      "pr": 16820,
+      "head_sha": "ea27d0c93b7e4a57bdaf279eaf23b07eb7f7fd8c"
+    },
+    {
+      "pr": 16821,
+      "head_sha": "5ecde9207488bfd4a3e143c14d28a1f905a8c5c5"
+    },
+    {
+      "pr": 16822,
+      "head_sha": "603b7fa690a57bb7d1a7afd6b5f06cb76e341d94"
+    },
+    {
+      "pr": 16823,
+      "head_sha": "850b7c8adfd3751094abe5d70cb6462df396b004"
+    },
+    {
+      "pr": 16824,
+      "head_sha": "5cab44e844dafc2c43a710b68f93c8ae8c3b45e9"
+    },
+    {
+      "pr": 16825,
+      "head_sha": "74b9db54a486b4ec68a436000928747966f1299a"
+    },
+    {
+      "pr": 16827,
+      "head_sha": "5054578fdba6afea803bca7b58d75bcdc23cf044"
+    },
+    {
+      "pr": 16828,
+      "head_sha": "a37f3545dc58fd844571f22edf2c48364063a297"
+    },
+    {
+      "pr": 16829,
+      "head_sha": "1725b70cf8eaecd5b80e6c3bbad3392e1ca56422"
+    },
+    {
+      "pr": 16830,
+      "head_sha": "c20a6a7dc50dddcd76c67b5e401afc73e03b2812"
+    },
+    {
+      "pr": 16834,
+      "head_sha": "fde7354d7e6e14cee0c04967681949ea071f57ef"
+    },
+    {
+      "pr": 16835,
+      "head_sha": "347c521b9ccfda773873132de86b996bd256c49c"
+    },
+    {
+      "pr": 16838,
+      "head_sha": "4515c6a3d9426cc1002544d7bf82544b782d737c"
+    },
+    {
+      "pr": 16839,
+      "head_sha": "4800873e183756f62055b00d48c4fb9a10f309b0"
+    },
+    {
+      "pr": 16840,
+      "head_sha": "54a30b4a9ef09afc6bd8dabba37916b1353f8ed9"
+    },
+    {
+      "pr": 16842,
+      "head_sha": "e6e8ed2bd94a3ebf5e0e72356cbefd3c864cd9e6"
+    },
+    {
+      "pr": 16844,
+      "head_sha": "a2242b9e92b2065e4186bbe7ff9a8edc07abf180"
+    },
+    {
+      "pr": 16845,
+      "head_sha": "df9c58e3eb839e1363b1d1650dfa4f9d01e2fa15"
+    },
+    {
+      "pr": 16849,
+      "head_sha": "866c656aa04d8d5edd24538552c78a7dbc929e27"
+    },
+    {
+      "pr": 16850,
+      "head_sha": "f0962a81ad16b190cad98ebf95ec61a12c75f194"
+    },
+    {
+      "pr": 16852,
+      "head_sha": "021deee042c7d505959a55ff4076d614ad08882d"
+    },
+    {
+      "pr": 16853,
+      "head_sha": "dfd5344bf5df77600f2d4799843765c83b5b702c"
+    },
+    {
+      "pr": 16854,
+      "head_sha": "78d5a4f8b9acc5bf46e329a1d6ddfcdd6b2d1b3c"
+    },
+    {
+      "pr": 16856,
+      "head_sha": "c31b30f1d84c51b401d6018aa7ac2ac40ff4f7c6"
+    },
+    {
+      "pr": 16857,
+      "head_sha": "ee39ed048e7f703c7446a0763b25ec7cbc26fa99"
+    },
+    {
+      "pr": 16858,
+      "head_sha": "d15f5d04b866005c2ffac78c000b88fe45044816"
+    },
+    {
+      "pr": 16859,
+      "head_sha": "abed795544d3804951f4720eb29a0382442e47a1"
+    }
+  ],
+  "old_journal_events": {
+    "unavailable_diagnostics": 2981,
+    "dependency_component_partition": 2983
+  },
+  "parser_comparison": {
+    "before47": {
+      "elapsed_ms": 68,
+      "observations": [
+        {
+          "kind": "compiler_error",
+          "paths": [
+            "TauCeti/FieldTheory/FunctionField/ConstantExtension/RiemannRoch.lean"
+          ]
+        }
+      ]
+    },
+    "deployed47": {
+      "elapsed_ms": 66,
+      "error": "observation_limit"
+    },
+    "fixed": {
+      "elapsed_ms": 63,
+      "observations": [
+        {
+          "kind": "compiler_error",
+          "paths": [
+            "TauCeti/FieldTheory/FunctionField/ConstantExtension/RiemannRoch.lean"
+          ]
+        }
+      ]
+    }
+  },
+  "ownership_replay": {
+    "ownership_complete": true,
+    "dependencies_complete": true,
+    "ownership_elapsed_ms": 196,
+    "elapsed_ms": 404
+  },
+  "planner": {
+    "strategy": "compiler_diagnostics",
+    "groups": [
+      [
+        16812
+      ],
+      [
+        16801,
+        16804,
+        16805,
+        16810,
+        16814,
+        16815,
+        16816,
+        16819,
+        16820,
+        16821,
+        16822,
+        16823,
+        16824,
+        16825,
+        16827,
+        16828,
+        16829,
+        16830,
+        16834,
+        16835,
+        16838,
+        16839,
+        16840,
+        16842,
+        16844,
+        16845,
+        16849,
+        16850,
+        16852,
+        16853,
+        16854,
+        16856,
+        16857,
+        16858,
+        16859
+      ]
+    ],
+    "members_preserved": 36,
+    "authority": "diagnostic_replay_only",
+    "proof_authority": false
+  },
+  "limitations": [
+    "All original member snapshots compare equal in the existing pure planner replay.",
+    "No historical journal is modified; no replay retry is dispatched.",
+    "The source path can only prioritize a conservative retry, not prove individual guilt.",
+    "A natural fully checked retry and passing remainder remain mandatory."
+  ]
+}

@@ -77,16 +77,12 @@ def environment_locations(payload):
     return observations
 
 
-def parse(text):
+def failed_targets(lines):
+    """Fallback only: never let a cascading Lake summary erase precise findings."""
     observations = []
-    environment_seen = False
     targets_seen = False
     targets = None
-    if len(text.encode('utf-8')) > MAX_BYTES:
-        raise ValueError('log_limit')
-    for raw in text.splitlines():
-        # The single envelope is bounded independently of ordinary log lines.
-        # Duplicate, malformed or incomplete records invalidate optional evidence.
+    for raw in lines:
         line = STAMP.sub('', ANSI.sub('', raw))
         if targets is not None:
             target = FAILED_TARGET.fullmatch(line) if len(raw) <= 8192 else None
@@ -108,6 +104,21 @@ def parse(text):
             targets_seen = True
             targets = []
             continue
+    if targets is not None:
+        raise ValueError('truncated_failed_targets')
+    return observations
+
+
+def parse(text):
+    observations = []
+    environment_seen = False
+    if len(text.encode('utf-8')) > MAX_BYTES:
+        raise ValueError('log_limit')
+    lines = text.splitlines()
+    for raw in lines:
+        # Scan the entire log for precise diagnostics and environment unknowns,
+        # independently of the optional final failed-target block's grammar/size.
+        line = STAMP.sub('', ANSI.sub('', raw))
         if line.startswith(ENV_LOCATIONS):
             if environment_seen or len(line.encode('utf-8')) > 1024 * 1024:
                 raise ValueError('environment_location_limit')
@@ -127,8 +138,11 @@ def parse(text):
             observations.append(dict(kind='compiler_error', paths=[source[1]]))
         if len(observations) > MAX_OBSERVATIONS:
             raise ValueError('observation_limit')
-    if targets is not None:
-        raise ValueError('truncated_failed_targets')
+    # Even an unknown environment origin is authoritative about diagnostic
+    # incompleteness: preserve its empty paths so the mapper retains fallback.
+    # Failed targets are useful only when no primary observations were found.
+    if not observations:
+        observations = failed_targets(lines)
     # Deduplicate repeated Lake diagnostics without losing distinct offenders.
     return list({json.dumps(o, sort_keys=True): o for o in observations}.values())
 
