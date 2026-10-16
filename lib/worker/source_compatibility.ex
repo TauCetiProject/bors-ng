@@ -7,6 +7,7 @@ defmodule BorsNG.Worker.SourceCompatibility do
   alias BorsNG.Worker.Orchestration.Outbox
   @policy "local-source-v3"
   @keep ~w(keep hold wip human do-not-close)
+  @background_heads 4
 
   def enabled?, do: System.get_env("BORS_SOURCE_COMPATIBILITY", "on") != "off"
 
@@ -72,7 +73,7 @@ defmodule BorsNG.Worker.SourceCompatibility do
         # Compare decoded identities in Elixir: SQL JSON string casts have
         # different quoting/collation semantics on PostgreSQL and MySQL 8.4.
         # Inspect bounded lightweight metadata and perform source work for only
-        # one stale head before yielding the repository's mutator lane.
+        # up to four stale heads in one helper call before yielding the mutator lane.
         newer = Repo.all(from(p in metadata, where: p.id > ^cursor, limit: 16))
 
         page =
@@ -85,10 +86,12 @@ defmodule BorsNG.Worker.SourceCompatibility do
             )
 
         epoch = latest_warm_epoch(project_id)
-        next = Enum.find(page, &stale?(&1, base, epoch))
-        selected = if next, do: [Repo.get!(Patch, next.id)], else: []
-        visited = if next, do: next.id, else: if(page == [], do: cursor, else: List.last(page).id)
-        more = if next, do: Enum.any?(newer, &(&1.id == next.id)), else: length(newer) == 16
+        pending = page |> Enum.filter(&stale?(&1, base, epoch)) |> Enum.take(@background_heads)
+        selected = Enum.map(pending, &Repo.get!(Patch, &1.id))
+        first = List.first(pending)
+        last = List.last(pending) || List.last(page)
+        visited = if last, do: last.id, else: cursor
+        more = if first, do: Enum.any?(newer, &(&1.id == first.id)), else: length(newer) == 16
 
         check_with_epoch(project, conn, base, selected, checker, epoch)
 
