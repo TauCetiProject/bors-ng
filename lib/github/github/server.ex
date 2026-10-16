@@ -380,20 +380,32 @@ defmodule BorsNG.GitHub.Server do
       {"scripts/cancel_bors_candidate.py", "37d3be366812dd8377f70c125b512c08827b7fd0"}
     ]
 
-    Enum.reduce_while(blobs, :ok, fn {path, sha}, _ ->
-      case get!(conn, "contents/#{path}?ref=main") do
-        %{status: 200, body: raw} ->
-          if Jason.decode!(raw)["sha"] == sha,
-            do: {:cont, :ok},
-            else: {:halt, {:error, :cancellation_capability_mismatch}}
+    with %{status: 200, body: raw} <- get!(conn, "actions/workflows/cancel-bors-candidate.yml"),
+         %{
+           "path" => ".github/workflows/cancel-bors-candidate.yml",
+           "state" => "active",
+           "id" => id
+         }
+         when is_integer(id) and id > 0 <- Jason.decode!(raw) do
+      Enum.reduce_while(blobs, :ok, fn {path, sha}, _ ->
+        case get!(conn, "contents/#{path}?ref=main") do
+          %{status: 200, body: raw} ->
+            if Jason.decode!(raw)["sha"] == sha,
+              do: {:cont, :ok},
+              else: {:halt, {:error, :cancellation_capability_mismatch}}
 
-        %{status: 404} ->
-          {:halt, {:error, :cancellation_sink_not_landed}}
+          %{status: 404} ->
+            {:halt, {:error, :cancellation_sink_not_landed}}
 
-        %{status: status} ->
-          {:halt, {:error, :cancellation_capability, status}}
-      end
-    end)
+          %{status: status} ->
+            {:halt, {:error, :cancellation_capability, status}}
+        end
+      end)
+    else
+      %{status: 404} -> {:error, :cancellation_sink_not_landed}
+      %{status: status} -> {:error, :cancellation_capability, status}
+      _ -> {:error, :cancellation_sink_inactive}
+    end
   end
 
   def do_handle_call(:cancellation_lookup, conn, {p}) do

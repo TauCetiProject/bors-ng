@@ -578,8 +578,7 @@ defmodule BorsNG.Worker.Batcher do
 
     Enum.each(waiting, &Repo.delete!/1)
 
-    Enum.map(running, &Batch.changeset(&1, %{state: :canceled}))
-    |> Enum.each(&Repo.update!/1)
+    Enum.each(running, &cancel_running_candidate/1)
 
     Enum.each(running, &send_zulip(&1, :canceled))
 
@@ -4485,6 +4484,19 @@ defmodule BorsNG.Worker.Batcher do
     Labeler.reconcile_queue(repo_conn, batch.into_branch, patches)
   end
 
+  # Both member withdrawal and queue-wide cancellation retain the exact intent
+  # atomically. Notification and GitHub I/O happen after this transaction returns.
+  defp cancel_running_candidate(batch) do
+    Repo.transaction(fn ->
+      batch |> Batch.changeset(%{state: :canceled}) |> Repo.update!()
+      BorsNG.Worker.CandidateCancellation.enqueue(batch)
+    end)
+    |> case do
+      {:ok, _} -> :ok
+      {:error, reason} -> raise "candidate cancellation transaction failed: #{inspect(reason)}"
+    end
+  end
+
   defp cancel_patch(nil, _, _), do: :ok
 
   defp cancel_patch(batch, patch_id, reason) do
@@ -4515,11 +4527,7 @@ defmodule BorsNG.Worker.Batcher do
         _ -> :retrying
       end
 
-    {:ok, _} =
-      Repo.transaction(fn ->
-        batch |> Batch.changeset(%{state: :canceled}) |> Repo.update!()
-        BorsNG.Worker.CandidateCancellation.enqueue(batch)
-      end)
+    cancel_running_candidate(batch)
 
     Train.invalidate_descendants(batch)
     send_zulip(batch, :canceled)

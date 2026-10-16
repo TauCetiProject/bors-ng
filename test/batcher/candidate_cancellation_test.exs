@@ -173,6 +173,66 @@ defmodule BorsNG.Worker.CandidateCancellationTest do
     refute ServerMock.get_state()[:cancellations]
   end
 
+  test "real queue-wide cancellation binds running work once and never cancels waiting work",
+       ctx do
+    alias BorsNG.Database.{LinkPatchBatch, Patch}
+    Repo.delete!(ctx.job)
+    ctx.batch |> Batch.changeset(%{state: :running}) |> Repo.update!()
+    waiting = Repo.insert!(Batch.new(ctx.project.id, "main", 0))
+
+    for {batch, number} <- [{ctx.batch, 1}, {waiting, 2}] do
+      patch =
+        Repo.insert!(%Patch{
+          project_id: ctx.project.id,
+          pr_xref: number,
+          open: true,
+          commit: @head,
+          into_branch: "main",
+          queue_pending: true,
+          queue_approval: %{"state" => "approved", "head_sha" => @head, "reviewer" => "rvr"}
+        })
+
+      CandidateJournal.insert_member(
+        LinkPatchBatch.changeset(
+          %LinkPatchBatch{},
+          %{batch_id: batch.id, patch_id: patch.id, head_sha: @head, reviewer: "rvr"}
+        )
+      )
+    end
+
+    state =
+      update_in(
+        ServerMock.get_state(),
+        [@conn],
+        &Map.merge(
+          &1,
+          %{comments: %{1 => [], 2 => []}, labels: %{1 => [], 2 => []}, statuses: %{@head => %{}}}
+        )
+      )
+
+    ServerMock.put_state(state)
+    System.put_env("BORS_ASYNC_ORCHESTRATION", "true")
+    BorsNG.Worker.Batcher.handle_cast({:cancel_all}, ctx.project.id)
+    BorsNG.Worker.Batcher.handle_cast({:cancel_all}, ctx.project.id)
+    System.put_env("BORS_ASYNC_ORCHESTRATION", "false")
+    assert Repo.get!(Batch, ctx.batch.id).state == :canceled
+    refute Repo.get(Batch, waiting.id)
+    assert Repo.all(Batch.all_for_project(ctx.project.id, :incomplete)) == []
+    [intent] = Repo.all(from(j in OrchestrationJob, where: j.kind == "cancel_run"))
+
+    assert {:ok, %{"batch_id" => batch_id, "candidate_id" => candidate_id}} =
+             CandidateCancellation.authority(intent.id)
+
+    assert batch_id == ctx.batch.id and candidate_id == ctx.candidate.id
+
+    assert Enum.all?(
+             Repo.all(from(p in Patch, where: p.project_id == ^ctx.project.id)),
+             &(not &1.queue_pending and &1.queue_approval["state"] != "approved")
+           )
+
+    refute ServerMock.get_state()[:cancellations]
+  end
+
   test "public authority is read-only, uncached and revokes on terminal job", ctx do
     conn = get(build_conn(), "/api/candidate-cancellations/#{ctx.job.id}")
     assert conn.status == 200

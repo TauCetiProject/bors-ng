@@ -13,12 +13,15 @@ no candidate code, and no publication credentials. Its human-owned paths require
 human review before landing. Deploying Bors alone cannot exercise that workflow;
 a new genuine cancellation dispatch after the companion lands is required.
 Before dispatch Bors reads both reviewed workflow/helper blobs from main and
-requires their exact Git blob IDs. An absent or changed sink retries within the
+requires their exact Git blob IDs and an active workflow record. An absent,
+disabled or changed sink retries within the
 same expiry without emitting a dispatch. Update the pins with reviewed companion
 changes; mismatches disable dispatch rather than silently trusting new code.
 
 Bors persists `cancel_run` in the existing durable outbox in the transaction that
-marks an explicitly withdrawn running batch canceled. It captures the repository,
+marks an explicitly withdrawn running batch canceled, for either a member
+withdrawal or the existing queue-wide cancel_all handler. Waiting work never
+grants an Actions cancellation intent. It captures the repository,
 batch, immutable candidate ID/generation, staged head, tested base, branch and
 recorded dispatch time. Permanent deduplication survives completion and restart.
 Only explicit membership withdrawal queues this operation; CI failure, backend
