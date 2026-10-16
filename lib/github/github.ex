@@ -255,6 +255,12 @@ defmodule BorsNG.GitHub do
     )
   end
 
+  @doc "One bounded cancellation API attempt; durable orchestration owns retries."
+  def cancellation_call(type, conn, args)
+      when type in [:cancellation_lookup, :cancellation_dispatch, :cancellation_capability] do
+    bounded_cleanup_call(type, conn, args, System.monotonic_time(:millisecond) + 8_000)
+  end
+
   def active_staging_count(conn), do: safe_genserver_call(:active_staging_count, conn, {}, 30_000)
 
   def staging_run(conn, head, base, batch, branch, since) do

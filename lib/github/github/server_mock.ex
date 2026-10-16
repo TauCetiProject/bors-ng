@@ -802,6 +802,30 @@ defmodule BorsNG.GitHub.ServerMock do
     {{:ok, get_in(state, [conn, :active_staging_count]) || 0}, state}
   end
 
+  def do_handle_call(:cancellation_capability, _conn, {}, state),
+    do: {state[:cancellation_capability_error] || :ok, state}
+
+  def do_handle_call(:cancellation_lookup, conn, {p}, state) do
+    if state[:cancellation_lookup_error] do
+      {state[:cancellation_lookup_error], state}
+    else
+      {{:ok, get_in(state, [conn, :staging_runs, {p["head_sha"], p["batch_id"]}])}, state}
+    end
+  end
+
+  def do_handle_call(:cancellation_dispatch, _conn, args, state) do
+    if hook = state[:cancellation_hook], do: hook.()
+
+    case BorsNG.Worker.CandidateCancellation.authority(elem(args, 0)) do
+      {:ok, _} ->
+        {state[:cancellation_dispatch_error] || :ok,
+         Map.update(state, :cancellations, [args], &[args | &1])}
+
+      error ->
+        {error, state}
+    end
+  end
+
   def do_handle_call(:staging_run, conn, {head, _base, batch, _branch, _since}, state) do
     {{:ok, get_in(state, [conn, :staging_runs, {head, batch}])}, state}
   end

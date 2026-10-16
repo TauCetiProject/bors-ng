@@ -4515,9 +4515,11 @@ defmodule BorsNG.Worker.Batcher do
         _ -> :retrying
       end
 
-    batch
-    |> Batch.changeset(%{state: :canceled})
-    |> Repo.update!()
+    {:ok, _} =
+      Repo.transaction(fn ->
+        batch |> Batch.changeset(%{state: :canceled}) |> Repo.update!()
+        BorsNG.Worker.CandidateCancellation.enqueue(batch)
+      end)
 
     Train.invalidate_descendants(batch)
     send_zulip(batch, :canceled)

@@ -140,6 +140,45 @@ defmodule BorsNG.OrchestrationHttpTest do
     refute_receive {:request, _}, 10
   end
 
+  test "cancellation capability requires exact reviewed blobs on main before dispatch" do
+    assert {:error, :cancellation_sink_not_landed} ==
+             response(404, %{}, fn ->
+               Server.do_handle_call(:cancellation_capability, {{:raw, "test-token"}, 14}, {})
+             end)
+
+    assert_receive {:request, request}
+    assert request =~ "/contents/.github/workflows/cancel-bors-candidate.yml?ref=main"
+    refute_receive {:request, _}, 10
+
+    assert {:error, :cancellation_capability_mismatch} ==
+             response(200, %{"sha" => "other"}, fn ->
+               Server.do_handle_call(:cancellation_capability, {{:raw, "test-token"}, 14}, {})
+             end)
+
+    assert_receive {:request, _}
+    refute_receive {:request, _}, 10
+  end
+
+  test "cancellation discovery uses the actual dispatch window without candidate head_sha filtering" do
+    p = %{
+      "head_sha" => "head",
+      "base_sha" => "base",
+      "batch_id" => 7,
+      "branch" => "main",
+      "dispatch_at" => @since
+    }
+
+    assert {:ok, nil} ==
+             response(200, %{"total_count" => 0, "workflow_runs" => []}, fn ->
+               Server.do_handle_call(:cancellation_lookup, {{:raw, "test-token"}, 14}, {p})
+             end)
+
+    assert_receive {:request, request}
+    assert request =~ "event=repository_dispatch"
+    refute request =~ "head_sha="
+    assert request =~ "per_page=100"
+  end
+
   test "notice replay searches only comments updated in its request window" do
     since = "2026-10-14T04:00:00Z"
 
