@@ -13,7 +13,7 @@ defmodule BorsNG.Worker.OrchestrationTest do
   }
 
   alias BorsNG.Worker.{Batcher, CandidateJournal}
-  alias BorsNG.Worker.Orchestration.{Outbox, Worker}
+  alias BorsNG.Worker.Orchestration.{Dispatcher, Outbox, Worker}
   alias BorsNG.GitHub
   alias BorsNG.GitHub.Pr
 
@@ -117,6 +117,213 @@ defmodule BorsNG.Worker.OrchestrationTest do
   defp construct(ctx) do
     assert :ok == execute(ctx.worker, Outbox.enqueue(ctx.project.id, "info", {:poll, :once}))
     Repo.get_by!(OrchestrationJob, kind: "dispatch", project_id: ctx.project.id)
+  end
+
+  defp dispatcher do
+    {:ok, pid} = GenServer.start_link(Dispatcher, [])
+    Process.unlink(pid)
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+    pid
+  end
+
+  defp await_condition(fun, attempts \\ 500)
+  defp await_condition(_fun, 0), do: flunk("condition did not become true")
+
+  defp await_condition(fun, attempts) do
+    unless fun.() do
+      Process.sleep(10)
+      await_condition(fun, attempts - 1)
+    end
+  end
+
+  defp await_shutdown(pid) do
+    await_condition(fn ->
+      Process.info(pid, :current_function) ==
+        {:current_function, {Dispatcher, :await_shutdown, 3}}
+    end)
+  end
+
+  defp stale_messages(pid, worker, claimed) do
+    if Process.alive?(pid) do
+      send(pid, {:finished, worker, %{claimed | token: "stale"}, :ok})
+      Process.sleep(1)
+      stale_messages(pid, worker, claimed)
+    end
+  end
+
+  test "normal shutdown drains accepted dispatch while a second dispatcher preserves cancellation",
+       ctx do
+    System.put_env("BORS_STAGE_DISPATCH_PROJECT", ctx.project.name)
+    job = construct(ctx)
+
+    GitHub.ServerMock.put_state(
+      Map.put(GitHub.ServerMock.get_state(), :dispatch_after_accept_hook, self())
+    )
+
+    # Reverse supervisor stop order leaves the worker alive during the drain.
+    stop_supervised!(Worker)
+
+    {:ok, supervisor} =
+      Supervisor.start_link(
+        [
+          {Worker, ctx.project.id},
+          %{id: Dispatcher, start: {GenServer, :start_link, [Dispatcher, []]}}
+        ],
+        strategy: :one_for_all
+      )
+
+    Process.unlink(supervisor)
+    on_exit(fn -> if Process.alive?(supervisor), do: Supervisor.stop(supervisor) end)
+    {Dispatcher, first, _, _} = List.keyfind(Supervisor.which_children(supervisor), Dispatcher, 0)
+    [{worker, _}] = Registry.lookup(BorsNG.Worker.Orchestration.Registry, ctx.project.id)
+    send(first, :tick)
+    assert_receive {:dispatch_accepted, github}, 5000
+    claimed = Repo.get!(OrchestrationJob, job.id)
+    cancel = Outbox.enqueue(ctx.project.id, "cast", {:cancel, ctx.patch.id})
+    second = dispatcher()
+    send(second, :tick)
+    assert :sys.get_state(second).active == %{}
+    assert Repo.get!(OrchestrationJob, cancel.id).state == "pending"
+
+    started = System.monotonic_time(:millisecond)
+    stopping = Task.async(fn -> Supervisor.stop(supervisor, :shutdown, 5000) end)
+    await_shutdown(first)
+    # A stale result cannot free the lane during shutdown.
+    send(first, {:finished, worker, %{claimed | token: "stale"}, :ok})
+    assert Repo.get!(OrchestrationJob, job.id).state == "running"
+    assert {:ok, nil} == Outbox.claim(cancel.id)
+    send(github, :release_dispatch)
+    assert Task.await(stopping, 5000) == :ok
+    elapsed = System.monotonic_time(:millisecond) - started
+    assert elapsed < 4000
+    refute Process.alive?(worker)
+    assert Repo.get!(OrchestrationJob, job.id).state == "done"
+    assert Repo.get!(OrchestrationJob, job.id).attempts == 1
+
+    assert Enum.any?(
+             Repo.get!(OrchestrationJob, job.id).attempt_timing["recent"],
+             &(&1["event"] == "shutdown_result")
+           )
+
+    assert claimed.lease_until > Outbox.now() + 250
+
+    # Restart/another process can now claim without waiting for lease expiry.
+    # A completion delivered to the wrong dispatcher still cannot change it.
+    send(second, {:finished, ctx.worker, claimed, :ok})
+    send(second, :tick)
+    await_condition(fn -> Repo.get!(OrchestrationJob, cancel.id).state == "done" end)
+    assert length(get_in(GitHub.ServerMock.get_state(), [ctx.conn, :dispatches])) == 1
+    assert Repo.get!(Batch, ctx.batch.id).state == :canceled
+    assert {0, _} = Outbox.finish(claimed)
+    assert {0, _} = Outbox.renew(claimed)
+  end
+
+  test "shutdown deadline retains unfinished lease and fences late completion after recovery",
+       ctx do
+    :sys.suspend(GitHub)
+    on_exit(fn -> :sys.resume(GitHub) end)
+    job = Outbox.enqueue(ctx.project.id, "info", {:poll, :once})
+    first = dispatcher()
+    send(first, :tick)
+    await_github_call(ctx.worker)
+    claimed = Repo.get!(OrchestrationJob, job.id)
+    next = Outbox.enqueue(ctx.project.id, "cast", {:cancel, ctx.patch.id})
+
+    # Continuing stale completions cannot extend the absolute deadline.
+    spawn(fn -> stale_messages(first, ctx.worker, claimed) end)
+    started = System.monotonic_time(:millisecond)
+    assert :ok == GenServer.stop(first, :shutdown, 5000)
+    assert System.monotonic_time(:millisecond) - started < 5000
+    assert Repo.get!(OrchestrationJob, job.id).token == claimed.token
+    second = dispatcher()
+    send(second, :tick)
+    assert :sys.get_state(second).active == %{}
+    assert {:ok, nil} == Outbox.claim(next.id)
+
+    # Model the supervisor stopping the old executor after the drain deadline.
+    # Only expiry can recover it; a late old result cannot complete a new claim.
+    ref = Process.monitor(ctx.worker)
+    Process.exit(ctx.worker, :kill)
+    assert_receive {:DOWN, ^ref, :process, _, :killed}, 1000
+    :sys.resume(GitHub)
+    claimed |> Ecto.Changeset.change(lease_until: 0) |> Repo.update!()
+    assert {1, _} = Outbox.recover_expired()
+    {:ok, current} = Outbox.claim(job.id)
+    assert current.token != claimed.token
+    send(second, {:finished, ctx.worker, claimed, :ok})
+    :sys.get_state(second)
+    assert {0, _} = Outbox.finish(claimed)
+    assert {0, _} = Outbox.fail(claimed, :late)
+    assert {0, _} = Outbox.renew(claimed)
+    assert Repo.get!(OrchestrationJob, job.id).token == current.token
+    assert nil == Outbox.record_shutdown_result(claimed)
+
+    refute Enum.any?(
+             Repo.get!(OrchestrationJob, job.id).attempt_timing["recent"],
+             &(&1["event"] == "shutdown_result")
+           )
+
+    Outbox.finish(current)
+  end
+
+  test "abrupt dispatcher death does not free an accepted external mutation", ctx do
+    System.put_env("BORS_STAGE_DISPATCH_PROJECT", ctx.project.name)
+    job = construct(ctx)
+
+    GitHub.ServerMock.put_state(
+      Map.put(GitHub.ServerMock.get_state(), :dispatch_after_accept_hook, self())
+    )
+
+    first = dispatcher()
+    Process.unlink(first)
+    send(first, :tick)
+    assert_receive {:dispatch_accepted, github}, 5000
+    claimed = Repo.get!(OrchestrationJob, job.id)
+    ref = Process.monitor(first)
+    Process.exit(first, :kill)
+    assert_receive {:DOWN, ^ref, :process, _, :killed}, 1000
+    assert {0, _} = Outbox.recover_expired()
+    assert {:ok, nil} == Outbox.claim(job.id)
+    send(github, :release_dispatch)
+    # Ensure the first command returned before simulating lease expiry.
+    :sys.get_state(ctx.worker)
+
+    GitHub.ServerMock.put_state(
+      Map.delete(GitHub.ServerMock.get_state(), :dispatch_after_accept_hook)
+    )
+
+    claimed |> Ecto.Changeset.change(lease_until: 0) |> Repo.update!()
+    assert {1, _} = Outbox.recover_expired()
+    assert :ok == execute(ctx.worker, Repo.get!(OrchestrationJob, job.id))
+    assert length(get_in(GitHub.ServerMock.get_state(), [ctx.conn, :dispatches])) == 1
+  end
+
+  test "attempt timing preserves overwritten service and recovery evidence within a fixed bound",
+       ctx do
+    job = Outbox.enqueue(ctx.project.id, "info", :restore_rechecks)
+    {:ok, first} = Outbox.claim(job.id)
+    Outbox.fail(first, :retry)
+    finished = Repo.get!(OrchestrationJob, job.id)
+    finished |> Ecto.Changeset.change(available_at: 0) |> Repo.update!()
+    {:ok, second} = Outbox.claim(job.id)
+    [event | _] = second.attempt_timing["recent"]
+    assert event["previous_claimed_at_ms"] == first.claimed_at_ms
+    assert event["previous_completed_at_ms"] == finished.completed_at_ms
+    assert second.completed_at_ms == nil
+
+    for _ <- 1..6 do
+      Repo.get!(OrchestrationJob, job.id)
+      |> Ecto.Changeset.change(lease_until: 0)
+      |> Repo.update!()
+
+      assert {1, _} = Outbox.recover_expired()
+      assert {:ok, %OrchestrationJob{}} = Outbox.claim(job.id)
+    end
+
+    history = Repo.get!(OrchestrationJob, job.id).attempt_timing["recent"]
+    assert length(history) == 8
+    assert Enum.any?(history, &(&1["event"] == "lease_expired" and is_integer(&1["at_ms"])))
+    refute Jason.encode!(history) =~ first.token
   end
 
   test "one dispatcher turn locks one job per repository despite hundreds of due rows", ctx do
