@@ -582,7 +582,7 @@ defmodule BorsNG.Worker.SourceCompatibilityTest do
     SourceCompatibility.chunk(c.project.id, fn _, _, base, members ->
       assert base == @base
       send(self(), {:request, Enum.map(members, & &1.pr)})
-      %{"status" => "error", "details" => %{"kind" => "timeout"}}
+      %{"status" => "error", "details" => %{"kind" => "cold_mirror_unavailable"}}
     end)
 
     assert_received {:request, [1, 2, 3, 4]}
@@ -591,6 +591,7 @@ defmodule BorsNG.Worker.SourceCompatibilityTest do
     for n <- 1..4 do
       patch = Repo.get_by!(Patch, project_id: c.project.id, pr_xref: n)
       assert patch.source_compatibility["status"] == "unknown"
+      assert patch.source_compatibility["reason"] == "source_helper_cold_mirror_unavailable"
       refute SourceCompatibility.requested?(patch, @head)
     end
 
@@ -621,6 +622,63 @@ defmodule BorsNG.Worker.SourceCompatibilityTest do
           assert(
             Repo.get_by!(Patch, project_id: c.project.id, pr_xref: n).source_compatibility == nil
           )
+
+    assert Repo.aggregate(OrchestrationJob |> where([j], j.kind == "notice"), :count, :id) == 0
+    assert Repo.aggregate(Status, :count, :id) == 0
+  end
+
+  test "partial background results preserve unknowns and discard a moved head", c do
+    for n <- 3..4 do
+      Repo.insert!(%Patch{
+        project_id: c.project.id,
+        pr_xref: n,
+        commit: @head,
+        into_branch: "main",
+        queue_pending: true
+      })
+    end
+
+    pulls =
+      Map.new(
+        1..4,
+        &{&1, %GitHub.Pr{number: &1, state: :open, base_ref: "main", head_sha: @head}}
+      )
+
+    update_mock(:pulls, pulls)
+
+    SourceCompatibility.chunk(c.project.id, fn _, _, _, members ->
+      assert Enum.map(members, & &1.pr) == [1, 2, 3, 4]
+      update_mock(:pulls, put_in(pulls, [2, Access.key(:head_sha)], String.duplicate("c", 40)))
+
+      %{
+        "status" => "ok",
+        "results" =>
+          Enum.map(members, fn member ->
+            if member.pr <= 2 do
+              result(member.pr, "pass")
+            else
+              result(member.pr, "unknown")
+              |> Map.merge(%{
+                "reason" => "timeout",
+                "phase" => "candidate_headers",
+                "operation" => "cat-file"
+              })
+            end
+          end)
+      }
+    end)
+
+    assert Repo.get_by!(Patch, project_id: c.project.id, pr_xref: 1).source_compatibility[
+             "status"
+           ] == "pass"
+
+    assert Repo.get_by!(Patch, project_id: c.project.id, pr_xref: 2).source_compatibility == nil
+
+    for n <- 3..4 do
+      patch = Repo.get_by!(Patch, project_id: c.project.id, pr_xref: n)
+      assert patch.source_compatibility["status"] == "unknown"
+      refute SourceCompatibility.requested?(patch, @head)
+    end
 
     assert Repo.aggregate(OrchestrationJob |> where([j], j.kind == "notice"), :count, :id) == 0
     assert Repo.aggregate(Status, :count, :id) == 0
