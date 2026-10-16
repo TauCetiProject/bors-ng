@@ -92,7 +92,7 @@ confirmation run. The request says **provisional suspect**, not individual build
 failure. It includes the actual candidate, generation, run/attempt, diagnostic
 paths, exact head and original tested main, under `provisional-diagnostic-v1`.
 No existing head-CI status is changed. Generic bisection, multiple/unmapped
-suspects, connected multi-member components, tracked train reservations, manual
+suspects, connected multi-member components, speculative predecessor/successor topology, manual
 scope approvals, pause labels, stale main/head, withdrawals and unavailable API
 bindings retain the conservative retry path.
 

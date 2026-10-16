@@ -958,9 +958,11 @@ defmodule BorsNG.Worker.FailureIsolationTest do
 
     test "one bound owner skips singleton CI, preserves remainder and deduplicates restart", c do
       {batch, conn} = provisional_candidate(c)
+      assert BorsNG.Worker.SpeculativeTrain.tracked?(c.candidate)
       before = Map.new(c.links, &{&1.patch_id, CandidateJournal.admission(&1.id).snapshot})
       assert :retrying = FailureIsolation.split(c.links, batch, nil, conn)
       assert Repo.get!(Batch, batch.id).state == :error
+      refute BorsNG.Worker.SpeculativeTrain.event?(c.candidate, "train_released")
       children = Repo.all(from(b in Batch, where: b.id != ^batch.id))
       assert [child] = children
       assert child.sealed
@@ -1060,6 +1062,26 @@ defmodule BorsNG.Worker.FailureIsolationTest do
       assert Repo.get!(Patch, suspect.patch_id).queue_approval["state"] == "approved"
     end
 
+    test "a genuine speculative predecessor keeps conservative retries", c do
+      CandidateJournal.bind(
+        c.candidate,
+        "base",
+        "parent-tree",
+        "base",
+        %BorsToml{status: ["build"]},
+        %{}
+      )
+
+      successor = CandidateJournal.begin(c.batch, c.links, "base", c.candidate.id)
+      c = %{c | candidate: successor}
+      {batch, conn} = provisional_candidate(c)
+      assert successor.snapshot["speculative_predecessor_id"] != nil
+      assert :retrying = FailureIsolation.split(c.links, batch, nil, conn)
+      assert Repo.aggregate(BorsNG.Database.OrchestrationJob, :count, :id) == 0
+      refute Repo.exists?(from(e in CandidateEvent, where: e.kind == "provisional_repair"))
+      refute BorsNG.Worker.SpeculativeTrain.event?(successor, "train_released")
+    end
+
     for variant <- [
           :multiple,
           :unowned,
@@ -1070,7 +1092,7 @@ defmodule BorsNG.Worker.FailureIsolationTest do
           :held,
           :manual,
           :api_outage,
-          :tracked,
+          :successor,
           :component
         ] do
       @variant variant
@@ -1117,8 +1139,10 @@ defmodule BorsNG.Worker.FailureIsolationTest do
             |> Ecto.Changeset.change(manual_approval: %{"head_sha" => "head3"})
             |> Repo.update!()
 
-          :tracked ->
-            CandidateJournal.event(c.candidate, "train_reserved", "bors.train", %{})
+          :successor ->
+            CandidateJournal.event(c.candidate, "successor_reserved", "bors.train", %{
+              candidate_id: 999
+            })
 
           :component ->
             hints =
@@ -1333,6 +1357,7 @@ defmodule BorsNG.Worker.FailureIsolationTest do
              end)
 
     FailureIsolation.classified(batch, "candidate_failure", evidence)
+    CandidateJournal.event(c.candidate, "train_reserved", "bors.train", %{cap: 3})
     conn = {{:installation, 91}, 14}
 
     GitHub.ServerMock.put_state(%{

@@ -543,34 +543,7 @@ defmodule BorsNG.Worker.SourceCompatibility do
     with {:ok, labels} <- GitHub.get_labels(conn, patch.pr_xref),
          true <- MapSet.disjoint?(MapSet.new(labels, &String.downcase/1), MapSet.new(@keep)),
          true <- is_nil(patch.bundle_id) do
-      result = Map.drop(result, ["hold_head", "action"])
-
-      unless requested?(patch, patch.commit) do
-        body = request(patch.commit, result)
-        # Reuse durable notices, including crash/API-outage retry and dedup.
-        marker = "<!--tauceti-rebase:v1 #{patch.commit}-->"
-
-        Outbox.enqueue(
-          project.id,
-          "notice",
-          {conn, patch.pr_xref, body, marker},
-          "source-repair:#{project.id}:#{patch.pr_xref}:#{patch.commit}:#{result["base_sha"]}"
-        )
-
-        patch
-        |> Ecto.Changeset.change(
-          source_compatibility:
-            Map.merge(result, %{
-              "repair_head" => patch.commit,
-              "repair_base" => result["base_sha"],
-              "repair_policy" => result["policy"],
-              "projection_pending" => true
-            })
-        )
-        |> Repo.update!()
-      else
-        patch |> Ecto.Changeset.change(source_compatibility: result) |> Repo.update!()
-      end
+      persist_request(project, conn, patch, result)
 
       # A label is a projection, never a passing compatibility status. Its
       # current head is withdrawn through the existing serialized cancellation.
@@ -587,6 +560,38 @@ defmodule BorsNG.Worker.SourceCompatibility do
 
       _ ->
         :ok
+    end
+  end
+
+  # Database/outbox writes only; callers perform live guards before this step.
+  defp persist_request(project, conn, patch, result) do
+    result = Map.drop(result, ["hold_head", "action"])
+
+    unless requested?(patch, patch.commit) do
+      body = request(patch.commit, result)
+      # Reuse durable notices, including crash/API-outage retry and dedup.
+      marker = "<!--tauceti-rebase:v1 #{patch.commit}-->"
+
+      Outbox.enqueue(
+        project.id,
+        "notice",
+        {conn, patch.pr_xref, body, marker},
+        "source-repair:#{project.id}:#{patch.pr_xref}:#{patch.commit}:#{result["base_sha"]}"
+      )
+
+      patch
+      |> Ecto.Changeset.change(
+        source_compatibility:
+          Map.merge(result, %{
+            "repair_head" => patch.commit,
+            "repair_base" => result["base_sha"],
+            "repair_policy" => result["policy"],
+            "projection_pending" => true
+          })
+      )
+      |> Repo.update!()
+    else
+      patch |> Ecto.Changeset.change(source_compatibility: result) |> Repo.update!()
     end
   end
 
@@ -614,7 +619,8 @@ defmodule BorsNG.Worker.SourceCompatibility do
          "main" <- batch.into_branch,
          true <- hints["ownership_complete"] == true,
          true <- not is_nil(candidate),
-         false <- BorsNG.Worker.SpeculativeTrain.tracked?(candidate),
+         nil <- candidate.snapshot["speculative_predecessor_id"],
+         false <- BorsNG.Worker.SpeculativeTrain.event?(candidate, "successor_reserved"),
          nil <- patch.bundle_id,
          nil <- patch.manual_approval,
          nil <- suspect.manual_approval,
@@ -662,7 +668,8 @@ defmodule BorsNG.Worker.SourceCompatibility do
              parent = Repo.one!(from(b in Batch, where: b.id == ^batch.id, lock: "FOR UPDATE"))
              current = Repo.one!(from(p in Patch, where: p.id == ^patch.id, lock: "FOR UPDATE"))
 
-             if current.commit != suspect.head_sha or parent.state != :running or
+             if current.commit != suspect.head_sha or requested?(current, suspect.head_sha) or
+                  parent.state != :running or
                   parent.commit != batch.commit or parent.base_sha != batch.base_sha or
                   BorsNG.Worker.CandidateJournal.current(parent) != candidate,
                 do: Repo.rollback(:stale_provisional_binding)
@@ -681,7 +688,7 @@ defmodule BorsNG.Worker.SourceCompatibility do
                   do: Repo.rollback(:retry_membership_unavailable)
              end)
 
-             handoff(project, conn, current, result)
+             persist_request(project, conn, current, result)
              current = Repo.get!(Patch, current.id)
              unless requested?(current, suspect.head_sha), do: Repo.rollback(:repair_unavailable)
              BorsNG.Worker.QueueApproval.stop([current], :source_compatibility)
@@ -703,8 +710,12 @@ defmodule BorsNG.Worker.SourceCompatibility do
                }
              )
            end) do
-        {:ok, _} -> :handed_off
-        _ -> :unavailable
+        {:ok, _} ->
+          project_request(conn, Repo.get!(Patch, patch.id))
+          :handed_off
+
+        _ ->
+          :unavailable
       end
     else
       _ -> :unavailable
