@@ -44,6 +44,27 @@ defmodule BorsNG.Worker.ManualApproval do
          true <- sha?(head) and sha?(base) do
       {:ok, patch} =
         Repo.transaction(fn ->
+          batch_ids =
+            Repo.all(
+              from(l in LinkPatchBatch,
+                where: l.patch_id == ^patch.id and l.head_sha == ^head,
+                select: l.batch_id
+              )
+            )
+
+          # Match construction/recovery lock order: batches, then patch, then
+          # links. In particular, avoid a MySQL UPDATE JOIN acquiring a batch
+          # lock after the patch write while recovery holds the inverse pair.
+          active_ids =
+            Repo.all(
+              from(b in Batch,
+                where: b.id in ^batch_ids and b.state in ^[:waiting, :running],
+                order_by: b.id,
+                lock: "FOR UPDATE",
+                select: b.id
+              )
+            )
+
           patch =
             patch
             |> Patch.changeset(%{
@@ -60,11 +81,9 @@ defmodule BorsNG.Worker.ManualApproval do
           # must not mistake a partially persisted takeover for revocation.
           Repo.update_all(
             from(l in LinkPatchBatch,
-              join: b in Batch,
-              on: b.id == l.batch_id,
               where:
                 l.patch_id == ^patch.id and l.head_sha == ^head and
-                  b.state in ^[:waiting, :running]
+                  l.batch_id in ^active_ids
             ),
             set: [manual_approval: patch.manual_approval]
           )
