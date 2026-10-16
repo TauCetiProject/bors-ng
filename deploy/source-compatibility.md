@@ -138,9 +138,11 @@ Production background turns exhausted the original 30-second helper budget
 Background turns now use an 8-second helper budget, including Git and root-lock
 waits, to yield the mutator sooner. GitHub/token/metadata overhead is additional;
 this is not a claim of a hard 8-second total operation deadline. Selected-head
-admission retains its separate 30-second budget when source work is needed. An
-exact cached unknown falls back to authoritative CI without a costlier cheap
-retry. Held evidence waits for re-admission or changed main/head inputs; simply
+admission retains its separate 30-second budget when source work is needed. A
+same-event cached unknown falls back to authoritative CI without a costlier cheap
+retry. A known transient unknown can get one fresh attempt after newer completed
+local Git work, as described below; that hint cannot turn it into a pass. Held
+evidence waits for re-admission or changed main/head inputs; simply
 removing a hold does not start a new Git scan. Cold cache timeouts stay unknown
 and use authoritative validation; ordinary candidate assembly may warm the same
 Git mirror. Validated immutable header entries are also retained atomically after
@@ -153,3 +155,21 @@ Acceptance is still pending: genuine deployed request, actual tending-worker
 pickup and validated changed-head outcome, normal new-head CI/review/re-admission,
 production latency/cost and exact innocent membership comparison. Do not claim
 rollout-verified or close #16813 on fixture/PR/CI evidence alone.
+
+## Retrying a transient unknown after Git data becomes available
+
+The existing candidate journal supplies a bounded retry hint: completed local
+assembly, a local merge conflict reached after fetching, or successful local
+staging publication/reconstruction. A known fetch/lock/deadline/bootstrap unknown
+may be checked once after a newer such event for this repository and main branch.
+The result records the event ID it attempted, so restarting the consumer or
+observing that same old event does not repeat the check. Ambiguous headers,
+fixed limits and other undemonstrated coverage remain cached for identical inputs.
+Passing results and actionable repair requests do not change merely because Git
+work completed. The hint is never a compatibility pass or individual blame.
+
+This uses the same fair cursor, one-head background chunk and bounded selected
+admission. It adds no wakeup, per-PR queue, polling loop, build or branch mutation.
+All retries still use live main/head guards and authoritative CI remains required.
+Older transient records without a saved event ID may take one bounded attempt
+against the latest existing hint, then retain that consumed ID across restart.

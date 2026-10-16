@@ -268,6 +268,209 @@ defmodule BorsNG.Worker.SourceCompatibilityTest do
            |> length() == 2
   end
 
+  test "a completed local assembly permits one retry of a same-input transient unknown", c do
+    checker = fn _, _, _, _ ->
+      %{
+        "status" => "error",
+        "details" => %{"kind" => "timeout", "phase" => "fetch", "operation" => "fetch"}
+      }
+    end
+
+    SourceCompatibility.check(c.project, @conn, @base, c.patches, checker)
+    cached = Enum.map(c.patches, &Repo.get!(Patch, &1.id))
+
+    SourceCompatibility.check(c.project, @conn, @base, cached, fn _, _, _, _ ->
+      flunk("same evidence must stay cached before a new Git readiness hint")
+    end)
+
+    links = Repo.all(LinkPatchBatch.from_batch(c.batch.id))
+    candidate = CandidateJournal.begin(c.batch, links, @base)
+    CandidateJournal.event(candidate, "local_assembled", "bors.local_git", %{commit: @head})
+
+    SourceCompatibility.check(c.project, @conn, @base, cached, fn _, _, base, members ->
+      assert base == @base
+      send(self(), {:retried, Enum.map(members, &{&1.pr, &1.head_sha})})
+      checker.(nil, nil, nil, nil)
+    end)
+
+    assert_received {:retried, [{1, @head}, {2, @head}]}
+    still_unknown = Enum.map(c.patches, &Repo.get!(Patch, &1.id))
+
+    SourceCompatibility.check(c.project, @conn, @base, still_unknown, fn _, _, _, _ ->
+      flunk("a single assembly hint must not create an endless retry loop")
+    end)
+
+    for patch <- still_unknown do
+      assert patch.source_compatibility["status"] == "unknown"
+      refute SourceCompatibility.requested?(patch, @head)
+    end
+
+    # Reconstructing and publishing an exact local candidate can warm the mirror
+    # without another main commit or a new PR head.
+    CandidateJournal.event(candidate, "staging_pushed", "bors.local_git", %{commit: @head})
+
+    SourceCompatibility.check(c.project, @conn, @base, still_unknown, fn _, _, base, members ->
+      assert base == @base
+      %{"status" => "ok", "results" => Enum.map(members, &result(&1.pr, "pass"))}
+    end)
+
+    passed = Enum.map(c.patches, &Repo.get!(Patch, &1.id))
+    assert Enum.all?(passed, &(&1.source_compatibility["status"] == "pass"))
+    CandidateJournal.event(candidate, "local_assembled", "bors.local_git", %{commit: @head})
+
+    SourceCompatibility.check(c.project, @conn, @base, passed, fn _, _, _, _ ->
+      flunk("a cache hint must not repeat passing validation for identical inputs")
+    end)
+  end
+
+  test "old readiness hints stay consumed across restart and other events do not retrigger", c do
+    candidate =
+      CandidateJournal.begin(c.batch, Repo.all(LinkPatchBatch.from_batch(c.batch.id)), @base)
+
+    CandidateJournal.event(candidate, "local_assembled", "bors.local_git", %{commit: @head})
+
+    SourceCompatibility.check(c.project, @conn, @base, c.patches, fn _, _, _, _ ->
+      %{"status" => "error", "details" => %{"kind" => "timeout"}}
+    end)
+
+    cached = Enum.map(c.patches, &Repo.get!(Patch, &1.id))
+    CandidateJournal.event(candidate, "local_assembled", "bors.github", %{})
+    CandidateJournal.event(candidate, "source_compatibility_checked", "bors.local_git", %{})
+
+    SourceCompatibility.check(Repo.get!(Project, c.project.id), @conn, @base, cached, fn _,
+                                                                                         _,
+                                                                                         _,
+                                                                                         _ ->
+      flunk("a restarted consumer must not retry from an old or unrelated readiness hint")
+    end)
+  end
+
+  test "ambiguous or bounded non-transient unknowns are not blanket retried after assembly", c do
+    SourceCompatibility.check(c.project, @conn, @base, c.patches, fn _, _, _, members ->
+      %{
+        "status" => "ok",
+        "results" =>
+          Enum.map(members, fn m ->
+            result(m.pr, "unknown")
+            |> Map.put(
+              "reason",
+              if(m.pr == 1, do: "ambiguous_header", else: "source_helper_output_limit")
+            )
+          end)
+      }
+    end)
+
+    candidate =
+      CandidateJournal.begin(c.batch, Repo.all(LinkPatchBatch.from_batch(c.batch.id)), @base)
+
+    CandidateJournal.event(candidate, "local_assembled", "bors.local_git", %{commit: @head})
+
+    SourceCompatibility.check(
+      c.project,
+      @conn,
+      @base,
+      Enum.map(c.patches, &Repo.get!(Patch, &1.id)),
+      fn _, _, _, _ ->
+        flunk("assembly cannot resolve ambiguous syntax or change fixed limits")
+      end
+    )
+  end
+
+  test "a fetched local conflict can unblock a bootstrap unknown without becoming guilt itself",
+       c do
+    SourceCompatibility.check(c.project, @conn, @base, c.patches, fn _, _, _, _ ->
+      %{"status" => "error", "details" => %{"kind" => "cold_mirror_unavailable"}}
+    end)
+
+    cached = Enum.map(c.patches, &Repo.get!(Patch, &1.id))
+
+    candidate =
+      CandidateJournal.begin(c.batch, Repo.all(LinkPatchBatch.from_batch(c.batch.id)), @base)
+
+    CandidateJournal.event(candidate, "local_conflict", "bors.local_git", %{})
+    assert Enum.all?(cached, &(not SourceCompatibility.requested?(&1, @head)))
+
+    SourceCompatibility.check(c.project, @conn, @base, cached, fn _, _, _, members ->
+      %{"status" => "ok", "results" => Enum.map(members, &result(&1.pr))}
+    end)
+
+    assert Enum.all?(c.patches, &SourceCompatibility.requested?(Repo.get!(Patch, &1.id), @head))
+  end
+
+  test "Git work for another repository cannot consume this repository retry budget", c do
+    SourceCompatibility.check(c.project, @conn, @base, c.patches, fn _, _, _, _ ->
+      %{"status" => "error", "details" => %{"kind" => "timeout"}}
+    end)
+
+    other =
+      Repo.insert!(%Project{
+        name: "Other/Project",
+        installation_id: c.project.installation_id,
+        repo_xref: 15
+      })
+
+    batch = Repo.insert!(Batch.new(other.id, "main"))
+    candidate = CandidateJournal.begin(batch, [], @base)
+    CandidateJournal.event(candidate, "local_assembled", "bors.local_git", %{})
+
+    SourceCompatibility.check(
+      c.project,
+      @conn,
+      @base,
+      Enum.map(c.patches, &Repo.get!(Patch, &1.id)),
+      fn _, _, _, _ ->
+        flunk("unrelated repository work is not a readiness hint")
+      end
+    )
+  end
+
+  test "the bounded background cursor retries a transient once after a new Git hint", c do
+    [first, second] = c.patches
+    second |> Ecto.Changeset.change(open: false) |> Repo.update!()
+
+    expire = fn ->
+      project = Repo.get!(Project, c.project.id)
+      state = Map.put(project.source_compatibility || %{}, "checked_at", 0)
+      project |> Ecto.Changeset.change(source_compatibility: state) |> Repo.update!()
+    end
+
+    fail = fn _, _, _, _ ->
+      %{"status" => "error", "details" => %{"kind" => "timeout"}}
+    end
+
+    SourceCompatibility.chunk(c.project.id, fail)
+    old = Repo.get!(Patch, first.id)
+    assert old.source_compatibility["status"] == "unknown"
+    # Legacy records are also bounded, rather than retried on every restart.
+    old
+    |> Ecto.Changeset.change(
+      source_compatibility: Map.delete(old.source_compatibility, "source_retry_epoch")
+    )
+    |> Repo.update!()
+
+    expire.()
+    SourceCompatibility.chunk(c.project.id, fn _, _, _, _ -> flunk("no new Git hint") end)
+
+    links =
+      Repo.all(LinkPatchBatch.from_batch(c.batch.id)) |> Enum.filter(&(&1.patch_id == first.id))
+
+    candidate = CandidateJournal.begin(c.batch, links, @base)
+    CandidateJournal.event(candidate, "staging_pushed", "bors.local_git", %{commit: @head})
+    expire.()
+
+    SourceCompatibility.chunk(c.project.id, fn _, _, base, members ->
+      assert base == @base
+      assert Enum.map(members, &{&1.pr, &1.head_sha}) == [{1, @head}]
+      send(self(), :background_retry)
+      fail.(nil, nil, nil, nil)
+    end)
+
+    assert_received :background_retry
+    expire.()
+    SourceCompatibility.chunk(c.project.id, fn _, _, _, _ -> flunk("old consumed hint") end)
+    assert Repo.get!(Patch, first.id).source_compatibility["status"] == "unknown"
+  end
+
   test "helper failure cannot overwrite a result after main moves", c do
     SourceCompatibility.check(c.project, @conn, @base, c.patches, fn _, _, _, _ ->
       update_mock(:branches, %{"main" => String.duplicate("d", 40)})
