@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import importlib.util
 import io
+import json
 import time
 import unittest
 from pathlib import Path
@@ -12,6 +13,102 @@ spec.loader.exec_module(diagnostics)
 
 
 class DiagnosticsTest(unittest.TestCase):
+    def target_block(self, *modules):
+        return '\n'.join([diagnostics.FAILED_TARGETS_HEADER,
+                          *('- ' + module for module in modules), 'error: build failed'])
+
+    def test_iofail_warning_only_failure_uses_final_exact_target_not_warning(self):
+        warning = ('warning: TauCeti/Combinatorics/Young/KnuthCorrespondence.lean:9:0: '
+                   "'Mathlib.Data.Prod.Lex' has been deprecated")
+        self.assertEqual(diagnostics.parse(warning), [])
+        module = 'TauCeti.Combinatorics.Young.KnuthCorrespondence'
+        result = diagnostics.parse(warning + '\n' + self.target_block(module))
+        self.assertEqual(result, [dict(kind='lake_failed_target', module=module,
+            paths=['TauCeti/Combinatorics/Young/KnuthCorrespondence.lean'])])
+        # Unrelated warnings are not added as owners or range guesses.
+        self.assertEqual(result, diagnostics.parse('warning: TauCeti/Unrelated.lean:1:1: warning\n'
+                                                  + self.target_block(module)))
+        self.assertNotIn('line', result[0])
+
+    def test_failed_targets_retain_multiple_global_targets_with_ansi_timestamps(self):
+        block = self.target_block('TauCeti.Provider', "TauCeti.Consumer'")
+        text = '\n'.join('2026-10-16T00:42:44.123Z \x1b[31m' + line + '\x1b[0m'
+                         for line in block.splitlines())
+        self.assertEqual([o['paths'] for o in diagnostics.parse(text)],
+                         [['TauCeti/Provider.lean'], ["TauCeti/Consumer'.lean"]])
+
+    def test_failed_targets_missing_malformed_truncated_mixed_and_overflow_fall_back(self):
+        good = self.target_block('TauCeti.Provider')
+        bad = [self.target_block(), good.rsplit('\n', 1)[0],
+               good + '\n' + good, self.target_block('TauCeti.Provider', 'Mathlib.Other'),
+               self.target_block('TauCeti.Provider', 'TauCeti../Other'),
+               self.target_block('TauCeti.Provider:olean'), self.target_block('TauCeti.' + 'A' * 512),
+               self.target_block(*['TauCeti.Provider'] * 129),
+               good.replace('error: build failed', 'error: unrelated failure')]
+        for text in bad:
+            with self.subTest(text=text[:120]), self.assertRaises(ValueError):
+                diagnostics.parse(text)
+        self.assertEqual(diagnostics.parse('- TauCeti.Provider\nerror: build failed'), [])
+        self.assertEqual(diagnostics.parse('echo ' + good.replace('\n', '\\n')), [])
+        self.assertEqual(diagnostics.parse('warning: ' + good.replace('\n', '\\n')), [])
+
+    def envelope(self, findings=None, **changes):
+        finding = dict(linter='simpNF', declaration='TauCeti.element_annihilator_flat_baseChange',
+                       path='TauCeti/RingTheory/Flat/Annihilator.lean', line=77, column=9)
+        data = dict(version=1, complete=True, findings=[finding] if findings is None else findings)
+        data.update(changes)
+        return diagnostics.ENV_LOCATIONS + json.dumps(data, ensure_ascii=True)
+
+    def test_real_simpnf_origin_and_escaped_unicode_names(self):
+        for name in ['TauCeti.element_annihilator_flat_baseChange', 'TauCeti.λ雪',
+                     'TauCeti.«quoted.name»', 'TauCeti.«a\\b"c»']:
+            finding = dict(linter='simpNF', declaration=name,
+                           path='TauCeti/RingTheory/Flat/Annihilator.lean', line=77, column=9)
+            result = diagnostics.parse('2026-10-16T00:19:22.123Z ' + self.envelope([finding]))
+            self.assertEqual(result, [dict(kind='environment_linter', linter='simpNF',
+                declaration=name, paths=[finding['path']], line=77, column=9)])
+
+    def test_unknown_and_multiple_global_findings_are_not_silently_dropped(self):
+        finding = dict(linter='simpNF', declaration='TauCeti.Probe',
+                       path='TauCeti/Other.lean', line=1, column=2)
+        for reason in ['private_or_generated', 'missing_origin', 'missing_range']:
+            unknown = dict(linter='checkType', declaration='_private.Probe', unknown=reason)
+            result = diagnostics.parse(self.envelope([finding, unknown]))
+            self.assertEqual(len(result), 2)
+            self.assertEqual(result[1]['paths'], [])
+            self.assertEqual(result[1]['unknown'], reason)
+        second = {**finding, 'declaration': 'TauCeti.Other', 'path': 'TauCeti/Provider.lean'}
+        self.assertEqual(len(diagnostics.parse(self.envelope([finding, second]))), 2)
+
+    def test_malformed_truncated_duplicate_oversized_and_external_environment_records(self):
+        good = self.envelope()
+        data = json.loads(good[len(diagnostics.ENV_LOCATIONS):])
+        finding = data['findings'][0]
+        bad = [good[:-2], diagnostics.ENV_LOCATIONS + '{', good + '\n' + good,
+               good.replace('"version": 1', '"version": 1, "version": 1'),
+               self.envelope(run_id=38827433841),
+               self.envelope(complete=False), self.envelope(version=True), self.envelope([]),
+               self.envelope([finding] * 129), diagnostics.ENV_LOCATIONS + 'x' * (1024 * 1024)]
+        for change in [dict(path='../TauCeti/Other.lean'), dict(path='TauCeti/../Other.lean'),
+                       dict(path='Mathlib/Other.lean'), dict(path='TauCeti/Probe.lean\nforged'),
+                       dict(line=True), dict(line=0), dict(column='9'), dict(unknown='missing_range')]:
+            bad.append(self.envelope([{**finding, **change}]))
+        for text in bad:
+            with self.subTest(text=text[:120]), self.assertRaises((ValueError, TypeError)):
+                diagnostics.parse(text)
+
+    def test_candidate_forgery_has_only_the_existing_untrusted_observation_shape(self):
+        text = self.envelope()
+        self.assertEqual(diagnostics.parse('echo ' + text), [])
+        self.assertEqual(diagnostics.parse('+ ' + text), [])
+        self.assertEqual(diagnostics.parse('LINT-ENV-ORIGINS {"records":[]}'), [])
+        # A well-formed forged final record can prioritize a retry, just like a
+        # forged Lean error. No claimed run/head/authority field is consumed.
+        finding = json.loads(text[len(diagnostics.ENV_LOCATIONS):])['findings'][0]
+        with self.assertRaises(ValueError):
+            diagnostics.parse(self.envelope([{**finding, 'proof_authority': True}]))
+        self.assertNotIn('proof_authority', diagnostics.parse(text)[0])
+
     def test_ansi_lake_and_multiline_errors(self):
         text = ('2026-10-14T21:00:01.1234567Z \x1b[31merror: TauCeti/Reflection.lean:12:3: unknown constant\x1b[0m\n'
                 '2026-10-14T21:00:01.1234567Z   TestFunction.laplacianCLM_apply\n'

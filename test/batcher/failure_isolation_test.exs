@@ -128,6 +128,128 @@ defmodule BorsNG.Worker.FailureIsolationTest do
     }
   end
 
+  defp parsed_log_result(text) do
+    script = """
+    import importlib.util, json, sys
+    spec = importlib.util.spec_from_file_location('diagnostics', 'priv/failure_diagnostics.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    print(json.dumps(module.parse(sys.argv[1])))
+    """
+
+    {output, 0} =
+      System.cmd("python3", [
+        "-c",
+        script,
+        text
+      ])
+
+    %{"complete" => true, "jobs" => [%{"job_id" => 200, "observations" => Jason.decode!(output)}]}
+  end
+
+  defp environment_result(findings) do
+    parsed_log_result(
+      "LINT-ENV-LOCATIONS " <> Jason.encode!(%{version: 1, complete: true, findings: findings})
+    )
+  end
+
+  test "iofail failed-target hints retain authoritative run binding and full retry checks", c do
+    alias BorsNG.Worker.FailureDiagnostics
+    {batch, evidence} = terminal(c)
+
+    result =
+      parsed_log_result("""
+      warning: TauCeti/Unrelated.lean:9:0: deprecated import
+      Some required targets logged failures:
+      - TauCeti.File2
+      - TauCeti.File3
+      error: build failed
+      """)
+
+    assert {:ok, [2, 3]} = FailureDiagnostics.map_paths(c.hints, result)
+    assert :ok = FailureDiagnostics.observe(batch, evidence, :conn, fn _, [200] -> result end)
+    FailureIsolation.classified(batch, "candidate_failure", %{evidence | run_id: 101})
+    assert :unavailable = FailureDiagnostics.suspects(c.candidate, c.hints)
+    FailureIsolation.classified(batch, "candidate_failure", evidence)
+    assert :retrying = FailureIsolation.split(c.links, batch)
+    children = Repo.all(from(b in Batch, where: b.id != ^batch.id, order_by: b.id))
+    assert prs(Enum.map(children, &stored_links(&1.id))) == [[2, 3], [1, 4]]
+    assert Enum.all?(children, &(&1.sealed and &1.state == :waiting))
+    assert Enum.all?(Repo.all(Patch), &(&1.open and &1.queue_approval["state"] == "approved"))
+  end
+
+  test "environment origins only schedule fully checked immutable retries", c do
+    alias BorsNG.Worker.FailureDiagnostics
+    {batch, evidence} = terminal(c)
+
+    finding = %{
+      linter: "simpNF",
+      declaration: "TauCeti.λ雪",
+      path: "TauCeti/File3.lean",
+      line: 77,
+      column: 9
+    }
+
+    result = environment_result([finding])
+    assert :ok = FailureDiagnostics.observe(batch, evidence, :conn, fn _, [200] -> result end)
+    FailureIsolation.classified(batch, "candidate_failure", evidence)
+    assert {:ok, [3]} = FailureDiagnostics.suspects(c.candidate, c.hints)
+
+    for changed <- [
+          %{c.candidate | generation: c.candidate.generation + 1},
+          %{c.candidate | snapshot: Map.put(c.candidate.snapshot, "base_sha", "other")},
+          %{c.candidate | snapshot: Map.update!(c.candidate.snapshot, "members", &Enum.reverse/1)}
+        ] do
+      assert :unavailable = FailureDiagnostics.suspects(changed, c.hints)
+    end
+
+    FailureIsolation.classified(batch, "candidate_failure", %{evidence | run_attempt: 2})
+    assert :unavailable = FailureDiagnostics.suspects(c.candidate, c.hints)
+    FailureIsolation.classified(batch, "candidate_failure", evidence)
+    assert :retrying = FailureIsolation.split(c.links, batch)
+    children = Repo.all(from(b in Batch, where: b.id != ^batch.id, order_by: b.id))
+    assert prs(Enum.map(children, &stored_links(&1.id))) == [[3], [1, 2, 4]]
+    assert Enum.all?(children, &(&1.sealed and &1.state == :waiting))
+    assert Enum.all?(Repo.all(Patch), &(&1.open and &1.queue_approval["state"] == "approved"))
+    [event] = Repo.all(from(e in CandidateEvent, where: e.kind == "failure_diagnostics"))
+    assert event.details["authority"] == "retry_only"
+    refute event.details["proof_authority"]
+  end
+
+  test "global and unknown environment findings retain every owner or fall back", c do
+    alias BorsNG.Worker.FailureDiagnostics
+
+    finding = %{
+      linter: "simpNF",
+      declaration: "TauCeti.Probe",
+      path: "TauCeti/File2.lean",
+      line: 1,
+      column: 1
+    }
+
+    other = %{finding | path: "TauCeti/File3.lean", declaration: "TauCeti.Other"}
+
+    assert {:ok, [2, 3]} =
+             FailureDiagnostics.map_paths(c.hints, environment_result([finding, other]))
+
+    unknown = %{linter: "checkType", declaration: "_private.Probe", unknown: "missing_range"}
+
+    assert :unavailable =
+             FailureDiagnostics.map_paths(c.hints, environment_result([finding, unknown]))
+
+    unchanged = %{finding | path: "TauCeti/Provider.lean"}
+    assert :unavailable = FailureDiagnostics.map_paths(c.hints, environment_result([unchanged]))
+
+    [first | rest] = c.hints["changed_files"]
+
+    hints =
+      Map.put(c.hints, "changed_files", [
+        Map.put(first, "dependency_paths", ["TauCeti/Provider.lean"]) | rest
+      ])
+
+    assert {:ok, [1]} = FailureDiagnostics.map_paths(hints, environment_result([unchanged]))
+  end
+
   defp ownership_hints(c) do
     provenance =
       BorsNG.Worker.CandidateAssembler.identity(c.candidate)

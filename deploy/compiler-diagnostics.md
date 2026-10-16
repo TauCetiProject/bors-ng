@@ -78,3 +78,77 @@ full passing remainder are required before marking rollout verified.
 Rollback: `BORS_FAILURE_DIAGNOSTICS=off` disables collection, diagnostic partitions
 and the missing-import dispatch shortcut using the existing feature switch.
 There is no migration, backfill, continuous PR revalidation or moving-main rebase.
+
+## Environment-linter locations
+
+Refs TauCetiProject/TauCeti#17037. The TauCeti reporter can now emit one
+`LINT-ENV-LOCATIONS` version-1 JSON envelope after its existing report, nonce and
+NEW-versus-baseline validation. Findings contain `linter`, `declaration`, a
+project-local `path` and positive `line`/`column`, or an explicit `unknown` reason.
+The reporter obtains locations from declaration origin/range metadata in the
+existing exact candidate linter environment. It never infers an owner from the
+declaration's name. The raw `LINT-ENV-ORIGINS` driver output is not consumed here.
+
+The optional envelope is capped at 1 MiB and 128 findings, within the existing
+16 MiB log/128 observation/time bounds. Duplicate envelopes or JSON keys,
+malformed/incomplete/truncated records, unsupported fields/versions, unsafe paths
+and invalid ranges make log evidence unavailable. Unknown findings retain empty
+paths, forcing the existing mapper to retain deterministic fallback rather than
+drop a potentially global interaction. Older logs remain supported.
+
+These remain candidate-generated, untrusted scheduling observations, including
+when a well-formed record is forged. No identity or authority is accepted from the
+envelope: the existing authoritative failed workflow/run/attempt/job and immutable
+candidate/generation/base/ordered-head digest/commit bindings select the logs.
+Unchanged dependency paths still need existing complete attribution; bundles,
+multiple owners and provider/importer groups stay intact. Every retry and its
+remainder require full authoritative CI; a hint cannot convict, hold, close,
+revoke approval, skip a check, merge or grant cache authority.
+
+Validation includes the actual batch-816 `simpNF` explanation for
+`TauCeti.element_annihilator_flat_baseChange`. A bounded exact-source replay
+imports its module together with `Mathlib.Algebra.Module.Torsion.Basic`, reproduces
+the failure, and emits `TauCeti/RingTheory/Flat/Annihilator.lean:77:9`. Appending that
+locally collected record to the frozen original native job log lets the production
+pure planner select #16385 and the remaining 34 original snapshots. Ownership and
+dependency replay took 442 ms locally. This is fixture replay, not individual
+guilt, a deployed partition or a passing remainder. The unchanged source/metadata
+join took 0.109 ms per local call, 17.195 ms including Python startup; native
+one-finding origin collection measured 0 ms at millisecond resolution. These are
+bounded-fixture measurements, not whole-library benchmarks.
+
+The companion has Python parsing and parser-to-Elixir/DB retry tests, including
+Unicode/escaped names, unknown/private/generated origins, multiple findings,
+unchanged dependencies, forged/malformed/truncated records and stale bindings.
+The production producer is workflow-pinned: after it lands with required human
+review and full CI, a NEW ordinary dispatch must exercise it. A naturally occurring
+failed audit and fully passing remainder are still needed to claim real diagnostic
+partition benefit. Do not manufacture a failed production run or mark the issue
+verified while review/deployment/production evidence remains outstanding.
+
+### Lake failures reported only as failed targets
+
+The same retry-only parser recognizes Lake's final, anchored
+`Some required targets logged failures:` block, followed by one or more exact
+`- TauCeti.Module` targets and the closing `error: build failed`. It maps those
+module targets to project source paths without guessing warning positions or
+declaration origins. Warnings alone produce no observations. Missing/duplicate
+headers, truncated or empty blocks, unsupported/mixed external targets, facets,
+unsafe paths or more than 128 combined observations invalidate optional evidence.
+
+This covers the real batch82548 failure in
+[run38829250757](https://github.com/TauCetiProject/TauCeti/actions/runs/38829250757),
+job116743924558. `lake build --iofail` failed after a deprecated import warning;
+the final block names `TauCeti.Combinatorics.Young.KnuthCorrespondence` without a
+source error diagnostic. The original 7,287,202-byte native log now yields that
+single exact failed-module path in 61 ms locally. The unrelated warning text and
+line9 are not used. This is parsing of a genuine frozen failure, not a new
+production partition or proof that a PR independently fails.
+
+Failed-target observations use the identical authoritative run/candidate and
+ownership path. They cannot revoke approval or change holds, source branches,
+checks or cache trust. This consumer improvement can deploy before the TauCeti
+reporter: it needs no new producer. Root still owns deployment and new natural
+production verification; the reporter separately requires a NEW dispatch pinned
+to its merged trusted code. Run38831374735 was dispatched on older trusted code
+and cannot demonstrate reporter rollout.
