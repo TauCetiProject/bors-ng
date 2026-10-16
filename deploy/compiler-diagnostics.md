@@ -125,3 +125,30 @@ review and full CI, a NEW ordinary dispatch must exercise it. A naturally occurr
 failed audit and fully passing remainder are still needed to claim real diagnostic
 partition benefit. Do not manufacture a failed production run or mark the issue
 verified while review/deployment/production evidence remains outstanding.
+
+### Lake failures reported only as failed targets
+
+The same retry-only parser recognizes Lake's final, anchored
+`Some required targets logged failures:` block, followed by one or more exact
+`- TauCeti.Module` targets and the closing `error: build failed`. It maps those
+module targets to project source paths without guessing warning positions or
+declaration origins. Warnings alone produce no observations. Missing/duplicate
+headers, truncated or empty blocks, unsupported/mixed external targets, facets,
+unsafe paths or more than 128 combined observations invalidate optional evidence.
+
+This covers the real batch82548 failure in
+[run38829250757](https://github.com/TauCetiProject/TauCeti/actions/runs/38829250757),
+job116743924558. `lake build --iofail` failed after a deprecated import warning;
+the final block names `TauCeti.Combinatorics.Young.KnuthCorrespondence` without a
+source error diagnostic. The original 7,287,202-byte native log now yields that
+single exact failed-module path in 61 ms locally. The unrelated warning text and
+line9 are not used. This is parsing of a genuine frozen failure, not a new
+production partition or proof that a PR independently fails.
+
+Failed-target observations use the identical authoritative run/candidate and
+ownership path. They cannot revoke approval or change holds, source branches,
+checks or cache trust. This consumer improvement can deploy before the TauCeti
+reporter: it needs no new producer. Root still owns deployment and new natural
+production verification; the reporter separately requires a NEW dispatch pinned
+to its merged trusted code. Run38831374735 was dispatched on older trusted code
+and cannot demonstrate reporter rollout.

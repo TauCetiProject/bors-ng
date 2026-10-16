@@ -13,6 +13,45 @@ spec.loader.exec_module(diagnostics)
 
 
 class DiagnosticsTest(unittest.TestCase):
+    def target_block(self, *modules):
+        return '\n'.join([diagnostics.FAILED_TARGETS_HEADER,
+                          *('- ' + module for module in modules), 'error: build failed'])
+
+    def test_iofail_warning_only_failure_uses_final_exact_target_not_warning(self):
+        warning = ('warning: TauCeti/Combinatorics/Young/KnuthCorrespondence.lean:9:0: '
+                   "'Mathlib.Data.Prod.Lex' has been deprecated")
+        self.assertEqual(diagnostics.parse(warning), [])
+        module = 'TauCeti.Combinatorics.Young.KnuthCorrespondence'
+        result = diagnostics.parse(warning + '\n' + self.target_block(module))
+        self.assertEqual(result, [dict(kind='lake_failed_target', module=module,
+            paths=['TauCeti/Combinatorics/Young/KnuthCorrespondence.lean'])])
+        # Unrelated warnings are not added as owners or range guesses.
+        self.assertEqual(result, diagnostics.parse('warning: TauCeti/Unrelated.lean:1:1: warning\n'
+                                                  + self.target_block(module)))
+        self.assertNotIn('line', result[0])
+
+    def test_failed_targets_retain_multiple_global_targets_with_ansi_timestamps(self):
+        block = self.target_block('TauCeti.Provider', "TauCeti.Consumer'")
+        text = '\n'.join('2026-10-16T00:42:44.123Z \x1b[31m' + line + '\x1b[0m'
+                         for line in block.splitlines())
+        self.assertEqual([o['paths'] for o in diagnostics.parse(text)],
+                         [['TauCeti/Provider.lean'], ["TauCeti/Consumer'.lean"]])
+
+    def test_failed_targets_missing_malformed_truncated_mixed_and_overflow_fall_back(self):
+        good = self.target_block('TauCeti.Provider')
+        bad = [self.target_block(), good.rsplit('\n', 1)[0],
+               good + '\n' + good, self.target_block('TauCeti.Provider', 'Mathlib.Other'),
+               self.target_block('TauCeti.Provider', 'TauCeti../Other'),
+               self.target_block('TauCeti.Provider:olean'), self.target_block('TauCeti.' + 'A' * 512),
+               self.target_block(*['TauCeti.Provider'] * 129),
+               good.replace('error: build failed', 'error: unrelated failure')]
+        for text in bad:
+            with self.subTest(text=text[:120]), self.assertRaises(ValueError):
+                diagnostics.parse(text)
+        self.assertEqual(diagnostics.parse('- TauCeti.Provider\nerror: build failed'), [])
+        self.assertEqual(diagnostics.parse('echo ' + good.replace('\n', '\\n')), [])
+        self.assertEqual(diagnostics.parse('warning: ' + good.replace('\n', '\\n')), [])
+
     def envelope(self, findings=None, **changes):
         finding = dict(linter='simpNF', declaration='TauCeti.element_annihilator_flat_baseChange',
                        path='TauCeti/RingTheory/Flat/Annihilator.lean', line=77, column=9)

@@ -128,23 +128,54 @@ defmodule BorsNG.Worker.FailureIsolationTest do
     }
   end
 
-  defp environment_result(findings) do
+  defp parsed_log_result(text) do
     script = """
     import importlib.util, json, sys
     spec = importlib.util.spec_from_file_location('diagnostics', 'priv/failure_diagnostics.py')
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    print(json.dumps(module.parse('LINT-ENV-LOCATIONS ' + sys.argv[1])))
+    print(json.dumps(module.parse(sys.argv[1])))
     """
 
     {output, 0} =
       System.cmd("python3", [
         "-c",
         script,
-        Jason.encode!(%{version: 1, complete: true, findings: findings})
+        text
       ])
 
     %{"complete" => true, "jobs" => [%{"job_id" => 200, "observations" => Jason.decode!(output)}]}
+  end
+
+  defp environment_result(findings) do
+    parsed_log_result(
+      "LINT-ENV-LOCATIONS " <> Jason.encode!(%{version: 1, complete: true, findings: findings})
+    )
+  end
+
+  test "iofail failed-target hints retain authoritative run binding and full retry checks", c do
+    alias BorsNG.Worker.FailureDiagnostics
+    {batch, evidence} = terminal(c)
+
+    result =
+      parsed_log_result("""
+      warning: TauCeti/Unrelated.lean:9:0: deprecated import
+      Some required targets logged failures:
+      - TauCeti.File2
+      - TauCeti.File3
+      error: build failed
+      """)
+
+    assert {:ok, [2, 3]} = FailureDiagnostics.map_paths(c.hints, result)
+    assert :ok = FailureDiagnostics.observe(batch, evidence, :conn, fn _, [200] -> result end)
+    FailureIsolation.classified(batch, "candidate_failure", %{evidence | run_id: 101})
+    assert :unavailable = FailureDiagnostics.suspects(c.candidate, c.hints)
+    FailureIsolation.classified(batch, "candidate_failure", evidence)
+    assert :retrying = FailureIsolation.split(c.links, batch)
+    children = Repo.all(from(b in Batch, where: b.id != ^batch.id, order_by: b.id))
+    assert prs(Enum.map(children, &stored_links(&1.id))) == [[2, 3], [1, 4]]
+    assert Enum.all?(children, &(&1.sealed and &1.state == :waiting))
+    assert Enum.all?(Repo.all(Patch), &(&1.open and &1.queue_approval["state"] == "approved"))
   end
 
   test "environment origins only schedule fully checked immutable retries", c do

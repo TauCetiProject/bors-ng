@@ -23,6 +23,8 @@ AUDIT = re.compile(r"^audit-driver: import (" + MODULE +
                    r") failed, environment already contains '[^'\r\n]{1,512}' from (" + MODULE + r')$')
 ENV_LOCATIONS = 'LINT-ENV-LOCATIONS '
 ENV_PATH = re.compile(r"TauCeti(?:/[A-Za-z_][A-Za-z0-9_']*)+\.lean")
+FAILED_TARGET = re.compile(r"- (TauCeti(?:\.[A-Za-z_][A-Za-z0-9_']*)+)")
+FAILED_TARGETS_HEADER = 'Some required targets logged failures:'
 
 
 def unique_object(pairs):
@@ -78,12 +80,34 @@ def environment_locations(payload):
 def parse(text):
     observations = []
     environment_seen = False
+    targets_seen = False
+    targets = None
     if len(text.encode('utf-8')) > MAX_BYTES:
         raise ValueError('log_limit')
     for raw in text.splitlines():
         # The single envelope is bounded independently of ordinary log lines.
         # Duplicate, malformed or incomplete records invalidate optional evidence.
         line = STAMP.sub('', ANSI.sub('', raw))
+        if targets is not None:
+            target = FAILED_TARGET.fullmatch(line) if len(raw) <= 8192 else None
+            if target and len(target[1].replace('.', '/') + '.lean') <= 512:
+                targets.append(dict(kind='lake_failed_target', module=target[1],
+                                    paths=[target[1].replace('.', '/') + '.lean']))
+                if len(observations) + len(targets) > MAX_OBSERVATIONS:
+                    raise ValueError('observation_limit')
+            elif line == 'error: build failed' and targets:
+                observations.extend(targets)
+                targets = None
+            else:
+                # Never keep only the supported subset of a failed-target list.
+                raise ValueError('unsupported_or_incomplete_failed_targets')
+            continue
+        if line == FAILED_TARGETS_HEADER:
+            if targets_seen:
+                raise ValueError('duplicate_failed_targets')
+            targets_seen = True
+            targets = []
+            continue
         if line.startswith(ENV_LOCATIONS):
             if environment_seen or len(line.encode('utf-8')) > 1024 * 1024:
                 raise ValueError('environment_location_limit')
@@ -103,6 +127,8 @@ def parse(text):
             observations.append(dict(kind='compiler_error', paths=[source[1]]))
         if len(observations) > MAX_OBSERVATIONS:
             raise ValueError('observation_limit')
+    if targets is not None:
+        raise ValueError('truncated_failed_targets')
     # Deduplicate repeated Lake diagnostics without losing distinct offenders.
     return list({json.dumps(o, sort_keys=True): o for o in observations}.values())
 
