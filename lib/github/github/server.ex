@@ -377,7 +377,7 @@ defmodule BorsNG.GitHub.Server do
   def do_handle_call(:cancellation_capability, conn, {}) do
     blobs = [
       {".github/workflows/cancel-bors-candidate.yml", "42f163d30052a1285bae4cdef41770c5bc857b42"},
-      {"scripts/cancel_bors_candidate.py", "37d3be366812dd8377f70c125b512c08827b7fd0"}
+      {"scripts/cancel_bors_candidate.py", "be518d2f27d8e2757977a566b70bf4e9943a06ff"}
     ]
 
     with %{status: 200, body: raw} <- get!(conn, "actions/workflows/cancel-bors-candidate.yml"),
