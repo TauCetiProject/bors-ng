@@ -36,14 +36,36 @@ unusual syntax, resource limits or read errors produce unknown diagnostics. The
 workflow-pinned Lean preflight remains the source validity authority. For
 successful construction, header/provider reads use the exact assembled tree,
 so a provider supplied by another member is present and one removed by the base
-is absent. Conflicting construction has no assembled tree and uses exact member
-heads. These are interaction hints, not failure verdicts.
+is absent. Successful assembly reuses the exact ordered squash chain to validate
+each parent/tree with one batched commit read. Ownership compares each immutable
+head with its fork point against the frozen base, retaining inherited stacked and
+identical edits that reappear when heads are retried separately. Git lacks a
+pairwise merge-base batch interface, so ancestry still uses one bounded query per
+member; all head tree diffs run in one process. Conflicting construction has no
+assembled chain and reads optional imports at exact member heads under the same
+total limits, preserving conflict quarantine/reconsideration behavior.
+These are interaction hints, not failure verdicts.
 
 Diagnostics get at most 15 seconds within the existing assembly deadline, 256
-changed paths per member (1,024 total), 256 source reads total, 256 KiB per source
-and 256 KiB of serialized hints. The helper's existing subprocess output/mirror budgets still apply. Unavailable diagnostics
-cannot fail assembly or consume its remaining deadline. Old candidates without
-these fields retain deterministic bisection.
+changed paths per member (1,024 total), 128 KiB of serialized ownership, 256 source
+blobs total, 256 KiB per source, 3 MiB of source content and 256 KiB of total
+serialized hints. Optional dependency collection uses a separate five-second cap
+inside that same 15 seconds, one bounded tree inventory and one batched blob read.
+The helper's existing subprocess output/mirror budgets still apply. Unavailable
+diagnostics cannot fail assembly; the helper restores its outer deadline afterward.
+`ownership_complete` and `dependencies_complete` are independent. Optional limits,
+timeouts and ambiguous headers retain complete owners but publish no partial
+dependency or missing-source findings. Only complete optional data can trigger
+missing-import preflight or automatic quarantine reconsideration. Located compiler
+errors can guide conservative retry partitions using complete ownership alone.
+Their hints must match the journal's exact candidate/generation/base/digest,
+commit/tree and ordered heads. Unknown locations, ownership or log collection keep
+the existing fallback. Old complete journals remain readable; old incomplete
+journals are never upgraded by inference.
+Paths outside the supported ASCII path subset, including non-source paths with
+spaces, conservatively make ownership unknown. Shadow-mode local objects cannot
+guide terminal compiler isolation when the authoritative GitHub commit differs;
+only hints matching the actual constructed commit/tree are consumed.
 
 Retry selection uses atomic bundle units, immutable head identity, import provider
 relationships and shared changed paths. Missing-import components are tested apart
@@ -96,6 +118,30 @@ cache publication authority. No workflow pins, publisher secrets or compiled cac
 producer trust change.
 
 ## Historical source-only rehearsal
+
+Candidate 213 / batch 790 / generation 10 is a 54-member diagnostic replay of
+[run 38824781960](https://github.com/TauCetiProject/TauCeti/actions/runs/38824781960).
+The original helper timed out and used deterministic bisection. With the exact
+recorded assembly chain and heads on a local warm Git repository, ownership took
+141 ms and all hints took 547 ms. The one located primary compiler error maps to PR #16883;
+the known direct-import component keeps #16897 with it, yielding groups of 2 and
+52. All 54 original snapshots are preserved. Bad-import/cancellation cascade lines
+do not establish additional missing-source findings. With optional dependencies
+unknown the direct owner still permits a retry-only 1/53 partition. Neither replay
+proves individual guilt, a live CI outcome, or improved accepted throughput.
+
+To reproduce using a single-candidate journal capture, a local bare repository
+containing its objects, and the captured job log:
+
+```sh
+python3 scripts/replay_diagnostic_ownership.py candidate.json replay.git job.log replay.json
+MIX_ENV=test BORS_DATABASE=postgresql mix run --no-start scripts/replay_diagnostic_partition.exs replay.json partition.json
+```
+
+Use `--gh-log` for a `gh run view --log-failed` capture with presentation columns.
+The replay only reads Git objects and writes the named report files; it never
+fetches, starts the application, changes the queue or dispatches CI. Measured
+timings are local warm-repository results, not production latency promises.
 
 [Recorded immutable inputs and results](failure-isolation-evidence.json) cover
 batches 639 (15 PRs), 634 (9), 631 (52) and 622 (2). Direct diagnostics completed

@@ -6,10 +6,44 @@ defmodule BorsNG.Worker.FailureIsolation do
 
   def enabled?, do: System.get_env("BORS_FAILURE_DIAGNOSTICS") != "off"
 
+  # Legacy journals used one completeness flag. New helpers can retain exact
+  # ownership when optional imports are unknown; only retry planning uses it.
+  def ownership_complete?(%{"ownership_complete" => value}), do: value == true
+  def ownership_complete?(%{"complete" => true}), do: true
+  def ownership_complete?(_), do: false
+
+  defp validated_hints(nil, _, %{"ownership_complete" => true}), do: nil
+
+  defp validated_hints(candidate, result, %{"ownership_complete" => true} = hints) do
+    identity =
+      BorsNG.Worker.CandidateAssembler.identity(candidate) |> Jason.encode!() |> Jason.decode!()
+
+    members = Enum.map(candidate.snapshot["members"], &Map.take(&1, ["pr", "head_sha"]))
+
+    provenance =
+      identity
+      |> Map.merge(%{
+        "commit" => result["commit"] || result[:commit],
+        "tree" => result["tree"] || result[:tree],
+        "members" => members
+      })
+
+    binding = CandidateJournal.commit_binding(candidate)
+
+    if hints["provenance"] == provenance and
+         (binding == %{} or
+            Map.take(binding, ["commit", "tree"]) == Map.take(provenance, ["commit", "tree"])) and
+         Enum.map(hints["changed_files"] || [], &Map.take(&1, ["pr", "head_sha"])) == members,
+       do: hints
+  end
+
+  defp validated_hints(_, _, hints), do: hints
+
   # Only a strict multi-unit retry is eligible for this shortcut. A singleton
   # still goes to authoritative CI; source inventory alone never quarantines.
   def preflight(links, batch, result) do
-    hints = get_in(result, [:evidence, "diagnostic_hints"])
+    candidate = CandidateJournal.latest(batch.id)
+    hints = validated_hints(candidate, result, get_in(result, [:evidence, "diagnostic_hints"]))
 
     if enabled?() and is_map(hints) and hints["complete"] == true and
          (hints["missing_imports"] || []) != [] and
@@ -52,13 +86,24 @@ defmodule BorsNG.Worker.FailureIsolation do
           order_by: [desc: e.id]
         )
       )
-      |> Enum.find_value(fn e ->
-        case e.kind do
-          "local_assembled" -> get_in(e.details, ["evidence", "diagnostic_hints"])
-          "local_conflict" -> e.details["hints"]
-          _ -> nil
-        end
-      end)
+      |> Enum.find(&(&1.kind in ["local_assembled", "local_conflict"]))
+      |> case do
+        nil ->
+          nil
+
+        e ->
+          case e.kind do
+            "local_assembled" ->
+              validated_hints(
+                candidate,
+                e.details,
+                get_in(e.details, ["evidence", "diagnostic_hints"])
+              )
+
+            "local_conflict" ->
+              e.details["hints"]
+          end
+      end
     end
   end
 
@@ -81,6 +126,8 @@ defmodule BorsNG.Worker.FailureIsolation do
         CandidateJournal.event(candidate, "failure_partition", "bors.failure_isolation", %{
           strategy: reason,
           groups: Enum.map(groups, fn group -> Enum.map(group, & &1.patch.pr_xref) end),
+          ownership_complete: ownership_complete?(hints),
+          dependencies_complete: Map.get(hints, "dependencies_complete", hints["complete"]),
           authority: "retry_only"
         })
 
@@ -135,20 +182,22 @@ defmodule BorsNG.Worker.FailureIsolation do
 
   # Pure planner. Every result is a strict partition of atomic bundle units.
   # No diagnostic can discard a member or prove that an individual is failing.
-  def partition(links, %{"complete" => true} = hints, conflict) do
+  def partition(links, hints, conflict) when is_map(hints) do
     units = Divider.group_units(links)
     changed = hints["changed_files"] || []
     heads = Map.new(links, &{&1.patch.pr_xref, &1.head_sha})
     evidence_heads = Map.new(changed, &{&1["pr"], &1["head_sha"]})
 
-    if length(units) > 1 and heads == evidence_heads and
+    if ownership_complete?(hints) and length(changed) == length(links) and
+         length(units) > 1 and heads == evidence_heads and
          Enum.all?(links, &(&1.head_sha == &1.patch.commit)) do
       numbered = Enum.with_index(units)
 
       owner =
         Map.new(numbered |> Enum.flat_map(fn {u, i} -> Enum.map(u, &{&1.patch.pr_xref, i}) end))
 
-      edges = hints["import_edges"] || []
+      dependencies_complete = Map.get(hints, "dependencies_complete", hints["complete"]) == true
+      edges = if dependencies_complete, do: hints["import_edges"] || [], else: []
 
       # Shared changed paths and imports identify possible interacting PRs.
       path_owners =
@@ -165,7 +214,10 @@ defmodule BorsNG.Worker.FailureIsolation do
         if conflict do
           [owner[conflict["pr"]]]
         else
-          Enum.map(hints["missing_imports"] || [], &owner[&1["pr"]]) ++
+          Enum.map(
+            if(dependencies_complete, do: hints["missing_imports"] || [], else: []),
+            &owner[&1["pr"]]
+          ) ++
             Enum.map(hints["compiler_suspects"] || [], &owner[&1])
         end
         |> Enum.reject(&is_nil/1)
@@ -191,7 +243,8 @@ defmodule BorsNG.Worker.FailureIsolation do
           hints["compiler_suspects"] != nil ->
             {[], nil}
 
-          length(components) > 1 and Enum.any?(components, &(length(&1) > 1)) ->
+          dependencies_complete and length(components) > 1 and
+              Enum.any?(components, &(length(&1) > 1)) ->
             [first | rest] = Enum.sort_by(components, &{-length(&1), hd(&1)})
             {[first, List.flatten(rest)], "dependency_component"}
 

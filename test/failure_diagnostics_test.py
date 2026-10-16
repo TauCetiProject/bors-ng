@@ -27,6 +27,16 @@ class DiagnosticsTest(unittest.TestCase):
         self.assertEqual(diagnostics.parse(text), [dict(kind='duplicate_declaration', paths=[
             'TauCeti/Laurent/Collisions.lean', 'TauCeti/Nonmonic/Multiplicity.lean'])])
 
+    def test_primary_located_error_survives_downstream_import_and_cancellation_noise(self):
+        text = ('2026-10-15T23:48:42.9385318Z error: TauCeti/Geometry/RealAlgebraic/CAD/McCallum.lean:192:43: '
+                '`MvPolynomial.X_prime` has been deprecated: Use `MvPolynomial.prime_X` instead\n'
+                "error: TauCeti/MeasureTheory/Measure/ProductKernel.lean: bad import 'Mathlib.Probability.ProductMeasure'\n"
+                "error: TauCeti/Probability/Exchangeability/Family.lean: bad import 'TauCeti.Other'\n"
+                '✖ [123/456] Building TauCeti.Other (cancelled)\n'
+                'error: build failed\n')
+        self.assertEqual(diagnostics.parse(text), [dict(kind='compiler_error', paths=[
+            'TauCeti/Geometry/RealAlgebraic/CAD/McCallum.lean'])])
+
     def test_error_looking_commands_annotations_traversal_and_external_paths(self):
         text = '\n'.join([
             'echo "error: TauCeti/Fake.lean:1:2: bad"',
