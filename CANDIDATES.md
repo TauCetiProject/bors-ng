@@ -44,8 +44,12 @@ Speculation remains disabled; recording a predecessor does not enable it.
    `CandidateAssembler.Rejected`. The scheduler records `construction_rejected`
    and retries only the latest still-waiting generation after at least sixty
    seconds, preserving longer recovery/promotion holds. Invalid head, reviewer
-   or revoked approval uses ordinary whole-bundle withdrawal. An older result
-   cannot reset statuses or overwrite a newer generation's state.
+   or revoked approval queues a separate serialized reconciliation step using
+   ordinary whole-bundle withdrawal. No database locks span that handler's
+   GitHub I/O. Reconciliation rechecks the generation and exact observed member,
+   approval and intent token; a newer grant/intent/generation supersedes it.
+   Ambiguous active parent/child overlaps defer until their normal transition
+   settles. An older result cannot reset statuses or overwrite newer state.
 5. Append sourced lifecycle events. Record dispatch request before workflow
    dispatch and its acknowledgement afterwards. Staging push acknowledgement is
    recorded separately by source when push-triggered CI is used. Promotion is

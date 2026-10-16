@@ -743,6 +743,43 @@ defmodule BorsNG.Worker.Batcher do
   def handle_info({:completion_poll, _batch_id}, project_id),
     do: handle_info({:poll, :once}, project_id)
 
+  def handle_info({:reconcile_construction, candidate_id, members}, project_id) do
+    candidate = Repo.get(BorsNG.Database.Candidate, candidate_id)
+
+    if candidate && candidate.project_id == project_id do
+      Enum.each(members, fn expected ->
+        batch = Repo.get(Batch, candidate.batch_id)
+        latest = CandidateJournal.latest(candidate.batch_id)
+
+        if batch && batch.state == :waiting && latest && latest.id == candidate.id do
+          link =
+            Repo.all(LinkPatchBatch.from_batch(batch.id))
+            |> Enum.find(&(&1.id == expected.link.id))
+
+          if link && construction_member(link) == expected && invalid_construction_member?(link) do
+            # Never route cancellation through an ambiguous parent/child
+            # overlap. Its normal transition must settle before reconciliation.
+            active = Repo.all(Batch.all_for_patch(link.patch_id, :incomplete))
+
+            if Enum.map(active, & &1.id) == [batch.id] do
+              # No DB transaction/locks span this existing handler's GitHub
+              # reads/writes. The intent generation fences commands received
+              # since the snapshot; changed approval/member metadata also skips
+              # stale recovery, even for the same head.
+              do_handle_cast(
+                {:cancel_generation, link.patch_id, expected.patch.commit,
+                 expected.patch.orchestration_approval_token, :eligibility_changed},
+                project_id
+              )
+            end
+          end
+        end
+      end)
+    end
+
+    {:noreply, project_id}
+  end
+
   def handle_info({:poll, repetition}, project_id) do
     check_self(project_id)
 
@@ -1923,30 +1960,24 @@ defmodule BorsNG.Worker.Batcher do
 
         if batch && batch.state == :waiting and
              CandidateJournal.latest(batch.id).id == candidate.id do
-          ids =
-            Repo.all(
-              from(l in LinkPatchBatch, where: l.batch_id == ^batch.id, select: l.patch_id)
-            )
+          members =
+            Repo.all(LinkPatchBatch.from_batch(batch.id))
+            |> Enum.filter(&invalid_construction_member?/1)
+            |> Enum.map(&construction_member/1)
 
-          # A grant atomically updates the patch then its memberships. Lock the
-          # patches before re-reading links so a legitimate in-flight grant is
-          # never mistaken for a revoked approval by recovery.
-          Repo.all(from(p in Patch, where: p.id in ^ids, order_by: p.id, lock: "FOR UPDATE"))
-          links = Repo.all(LinkPatchBatch.from_batch(batch.id))
+          if members != [] do
+            message = {:reconcile_construction, candidate.id, members}
 
-          Enum.each(links, fn link ->
-            admission = CandidateJournal.admission(link.id)
-
-            if link.head_sha != link.patch.commit or
-                 link.manual_approval != link.patch.manual_approval or
-                 (admission &&
-                    (admission.snapshot["head_sha"] != link.head_sha or
-                       admission.snapshot["reviewer"] != link.reviewer or
-                       admission.snapshot["patch_id"] != link.patch_id)) do
-              # Reuse whole-bundle withdrawal and survivor retry semantics.
-              do_handle_cast({:cancel, link.patch_id, :eligibility_changed}, batch.project_id)
-            end
-          end)
+            if Process.get(:orchestration_executor, false),
+              do:
+                Outbox.enqueue(
+                  batch.project_id,
+                  "info",
+                  message,
+                  "construction_reconcile:#{candidate.id}"
+                ),
+              else: send(self(), message)
+          end
 
           deadline = max(batch.recovery_after || 0, DateTime.to_unix(DateTime.utc_now()) + 60)
 
@@ -1970,6 +2001,23 @@ defmodule BorsNG.Worker.Batcher do
       end)
 
     :waiting
+  end
+
+  defp construction_member(link) do
+    %{
+      link: Map.take(link, [:id, :batch_id, :patch_id, :head_sha, :reviewer, :manual_approval]),
+      patch: Map.take(link.patch, [:commit, :manual_approval, :orchestration_approval_token])
+    }
+  end
+
+  defp invalid_construction_member?(link) do
+    admission = CandidateJournal.admission(link.id)
+
+    link.head_sha != link.patch.commit or link.manual_approval != link.patch.manual_approval or
+      (not is_nil(admission) and
+         (admission.snapshot["head_sha"] != link.head_sha or
+            admission.snapshot["reviewer"] != link.reviewer or
+            admission.snapshot["patch_id"] != link.patch_id))
   end
 
   defp local_import_preflight(batch, links, candidate, result) do

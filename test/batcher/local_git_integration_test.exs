@@ -289,6 +289,24 @@ defmodule BorsNG.Worker.LocalGitIntegrationTest do
     on_exit(fn -> :telemetry.detach(handler) end)
   end
 
+  defp reconcile_construction(ctx, async \\ true) do
+    candidate = CandidateJournal.latest(ctx.batch.id)
+
+    if async do
+      job =
+        Repo.get_by!(BorsNG.Database.OrchestrationJob,
+          dedup_key: "construction_reconcile:#{candidate.id}"
+        )
+
+      Batcher.handle_info(BorsNG.Worker.Orchestration.Outbox.payload(job), ctx.project.id)
+      job
+    else
+      id = candidate.id
+      assert_receive {:reconcile_construction, ^id, _} = message
+      Batcher.handle_info(message, ctx.project.id)
+    end
+  end
+
   for mode <- ["off", "local"], async <- [false, true] do
     test "real queued takeover reaches running with frozen approval (#{mode}, async=#{async})",
          ctx do
@@ -425,6 +443,7 @@ defmodule BorsNG.Worker.LocalGitIntegrationTest do
 
     after_begin(fn -> ManualApproval.revoke(ctx.patch.id) end)
     Batcher.handle_info({:poll, :once}, ctx.project.id)
+    reconcile_construction(ctx)
     first = CandidateJournal.latest(ctx.batch.id)
     assert CandidateJournal.commit_binding(first) == %{}
     [kept] = Repo.all(LinkPatchBatch.from_batch(ctx.batch.id))
@@ -513,10 +532,136 @@ defmodule BorsNG.Worker.LocalGitIntegrationTest do
     Process.delete(:orchestration_executor)
   end
 
-  for mutation <- [:revoke, :reviewer, :head, :remove] do
-    test "post-begin #{mutation} fails closed without publication or permanent replay", ctx do
+  test "deferred reconciliation cannot revoke a later valid same-head grant", ctx do
+    ctx = automatic_member(ctx)
+    scheduler_mode("local", true, ctx.project.id)
+    assert {:ok, _} = ManualApproval.grant(@conn, ctx.project, ctx.patch, 7, @head)
+    after_begin(fn -> ManualApproval.revoke(ctx.patch.id) end)
+    Batcher.handle_info({:poll, :once}, ctx.project.id)
+    first = CandidateJournal.latest(ctx.batch.id)
+
+    assert {:ok, approved} =
+             ManualApproval.grant(@conn, ctx.project, Repo.get!(Patch, ctx.patch.id), 8, @head)
+
+    reconcile_construction(ctx)
+    assert Repo.get!(Patch, ctx.patch.id).manual_approval == approved.manual_approval
+    assert Repo.get!(LinkPatchBatch, ctx.link.id).manual_approval == approved.manual_approval
+    batch = Repo.get!(Batch, ctx.batch.id)
+    batch |> Batch.changeset(%{last_polled: 0, recovery_after: 0}) |> Repo.update!()
+    Batcher.handle_info({:poll, :once}, ctx.project.id)
+    assert Repo.get!(Batch, ctx.batch.id).state == :running
+    assert CandidateJournal.latest(ctx.batch.id).generation == first.generation + 1
+    Process.delete(:orchestration_executor)
+  end
+
+  test "deferred reconciliation respects newer intent and candidate generations", ctx do
+    ctx = automatic_member(ctx)
+    scheduler_mode("off", true, ctx.project.id)
+    assert {:ok, _} = ManualApproval.grant(@conn, ctx.project, ctx.patch, 7, @head)
+    after_begin(fn -> ManualApproval.revoke(ctx.patch.id) end)
+    Batcher.handle_info({:poll, :once}, ctx.project.id)
+    first = CandidateJournal.latest(ctx.batch.id)
+
+    Repo.get!(Patch, ctx.patch.id)
+    |> Patch.changeset(%{orchestration_approval_token: "new-intent"})
+    |> Repo.update!()
+
+    job = reconcile_construction(ctx)
+    assert Repo.get!(LinkPatchBatch, ctx.link.id)
+
+    newer =
+      CandidateJournal.begin(ctx.batch, Repo.all(LinkPatchBatch.from_batch(ctx.batch.id)), @base)
+
+    Batcher.handle_info(BorsNG.Worker.Orchestration.Outbox.payload(job), ctx.project.id)
+    assert CandidateJournal.latest(ctx.batch.id).id == newer.id
+    assert newer.generation == first.generation + 1
+    assert Repo.get!(LinkPatchBatch, ctx.link.id)
+    assert Repo.get!(Patch, ctx.patch.id).orchestration_approval_token == "new-intent"
+    Process.delete(:orchestration_executor)
+  end
+
+  test "ambiguous active parent-child overlap defers reconciliation without canceling either",
+       ctx do
+    ctx = automatic_member(ctx)
+    scheduler_mode("off", true, ctx.project.id)
+    assert {:ok, approved} = ManualApproval.grant(@conn, ctx.project, ctx.patch, 7, @head)
+
+    after_begin(fn ->
+      Repo.get!(LinkPatchBatch, ctx.link.id)
+      |> LinkPatchBatch.changeset(%{reviewer: "other reviewer"})
+      |> Repo.update!()
+    end)
+
+    Batcher.handle_info({:poll, :once}, ctx.project.id)
+    child = Repo.insert!(Batch.new(ctx.project.id, "main"))
+
+    child_link =
+      CandidateJournal.insert_member(
+        LinkPatchBatch.changeset(%LinkPatchBatch{}, %{
+          batch_id: child.id,
+          patch_id: ctx.patch.id,
+          head_sha: @head,
+          reviewer: "automatic reviewer",
+          manual_approval: approved.manual_approval
+        }),
+        ctx.link
+      )
+
+    job = reconcile_construction(ctx)
+    assert Repo.get!(LinkPatchBatch, ctx.link.id)
+    assert Repo.get!(LinkPatchBatch, child_link.id)
+    assert Repo.get!(Patch, ctx.patch.id).manual_approval == approved.manual_approval
+    child |> Batch.changeset(%{state: :error}) |> Repo.update!()
+    Batcher.handle_info(BorsNG.Worker.Orchestration.Outbox.payload(job), ctx.project.id)
+    refute Repo.get(LinkPatchBatch, ctx.link.id)
+    assert Repo.get!(LinkPatchBatch, child_link.id)
+    Process.delete(:orchestration_executor)
+  end
+
+  test "reconciliation revokes through the ordinary handler outside its rejection transaction",
+       ctx do
+    ctx = automatic_member(ctx)
+    scheduler_mode("off", true, ctx.project.id)
+    assert {:ok, _} = ManualApproval.grant(@conn, ctx.project, ctx.patch, 7, @head)
+
+    after_begin(fn ->
+      Repo.get!(LinkPatchBatch, ctx.link.id)
+      |> LinkPatchBatch.changeset(%{reviewer: "other reviewer"})
+      |> Repo.update!()
+    end)
+
+    Batcher.handle_info({:poll, :once}, ctx.project.id)
+    # Observe the actual revocation UPDATE. Its subsequent reset_scope request
+    # runs in this same caller, after this standalone query has returned.
+    owner = self()
+    ref = make_ref()
+    repo = :persistent_term.get(:db_repo)
+
+    :telemetry.attach(
+      ref,
+      repo.config()[:telemetry_prefix] ++ [:query],
+      fn _, _, meta, _ ->
+        if self() == owner and String.starts_with?(meta.query, "UPDATE") and
+             String.contains?(meta.query, "patches") and
+             String.contains?(meta.query, "manual_approval"),
+           do: send(owner, {:revocation_transaction, Repo.in_transaction?()})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(ref) end)
+    reconcile_construction(ctx)
+    assert_received {:revocation_transaction, false}
+    refute_received {:revocation_transaction, true}
+    refute Repo.get(LinkPatchBatch, ctx.link.id)
+    Process.delete(:orchestration_executor)
+  end
+
+  for mutation <- [:revoke, :reviewer, :head, :remove], async <- [false, true] do
+    test "post-begin #{mutation} fails closed without publication or permanent replay (async=#{async})",
+         ctx do
       ctx = automatic_member(ctx)
-      scheduler_mode("local", true, ctx.project.id)
+      scheduler_mode("local", unquote(async), ctx.project.id)
       assert {:ok, _} = ManualApproval.grant(@conn, ctx.project, ctx.patch, 7, @head)
 
       after_begin(fn ->
@@ -549,6 +694,7 @@ defmodule BorsNG.Worker.LocalGitIntegrationTest do
                "dispatch:#{ctx.batch.id}"
              )
 
+      if unquote(mutation) != :remove, do: reconcile_construction(ctx, unquote(async))
       refute Repo.exists?(LinkPatchBatch.from_batch(ctx.batch.id))
       Process.delete(:orchestration_executor)
     end
