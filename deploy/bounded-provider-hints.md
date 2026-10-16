@@ -1,6 +1,6 @@
 # Bounded import-provider retry coverage
 
-Refs TauCetiProject/TauCeti#17103. Policy `bounded_depth_v1` permits a weak
+Refs TauCetiProject/TauCeti#17103. Policy `bounded_depth_v2` permits a weak
 `bounded_provider_hint` to guide retry grouping after precise, bound compiler
 errors name only unchanged, unmapped project files. It does not establish an
 individual failure. Direct diagnostic ownership remains a separate, stronger
@@ -24,7 +24,9 @@ other owners beyond the boundary. `complete: false` and
 this policy never certifies the entire import closure. `authority: retry_only`
 and `proof_authority: false` accompany the evidence. A depth boundary is distinct
 from a resource limit. Time, byte, header, path, output, missing-object or parser
-failures never earn bounded coverage, even if an owner was already found.
+failures never earn bounded coverage, even if an owner was already found. The
+original `bounded_depth_v1` observations retain their existing semantics and are
+never retroactively given a direct checkpoint.
 
 The structured lookup records the versioned limits, roots, ordered graph nodes
 with depths/blob identities/sizes, candidate/base blob equality for each expanded
@@ -38,6 +40,46 @@ previous observation, including UNKNOWN, is never rerun or backfilled after a
 policy change. Ownership/provenance/current frozen membership are checked before
 reading Git. The consumer reconstructs the graph to reject partial or inconsistent
 coverage before intersecting with complete frozen ownership.
+
+## Complete direct checkpoint before deeper expansion
+
+The v2 helper first parses **every** diagnostic root, verifies its exact base
+identity, resolves **all** direct project providers and checks their ordinary
+blob type, per-file size and availability. Only then does it record a separately
+versioned `direct_checkpoint` (`direct_depth_v1`, `complete: true`) with the same
+full candidate/run binding. It includes every root, sorted providers with blob
+identities/sizes, base blob equality, total distinct paths, root header/source
+accounting and completion elapsed time. A missing or malformed second root or
+direct provider prevents completion; a discovered changed owner alone does not
+suffice. The checkpoint itself fits within the combined evidence budget.
+
+The deeper BFS reuses these root parses, queued imports and immutable metadata.
+There is **one** helper/lock/deadline, not a second direct lookup after a cap.
+Roots count once toward source/header limits; cache hits remain charged. Every
+root/direct/provider/deeper path shares the existing 128-path bound. The 64KiB
+limit covers the **combined** envelope, checkpoint and deep progress; partial
+deep progress is explicitly marked truncated if necessary to retain the complete
+checkpoint. No Git read, parse, cache write or fallback helper runs after a cap.
+Error formatting only returns already established evidence. Header/source
+counters record accepted reads, with the rejected next path recorded separately.
+
+If bounded coverage succeeds, the consumer validates the checkpoint against the
+full graph and uses the bounded policy. If v2 explicitly reports a deep error,
+it may independently validate the complete checkpoint through the existing
+direct mapper. Every root must have a changed direct owner, every frozen owner
+is retained, and ordinary component/bundle widening applies. This fallback uses
+`import_provider_hint`, **authority retry_only / proof_authority false**. The
+outer deep result remains `complete: false`, `bounded_complete: false`, and
+`full_closure_complete: false` with its actual error reason. It does not become a
+completed traversal because direct evidence exists. Successful but non-narrowing
+bounded results are not opportunistically downgraded to direct coverage.
+
+Legacy v1 errors, unknown policy versions, mismatched bindings, partial root/
+provider data, a checkpoint completed after the deadline, or an oversized combined
+envelope cannot use this fallback. No checkpoint can enter `diagnosis/2`, the
+provisional singleton branch, automatic repair, approval, withdrawal, bundling,
+component bypass or individual blame. Existing durable observations are final;
+the old capped event is never backfilled and old retries are never rewritten.
 
 ## Limits and trust
 
@@ -105,9 +147,38 @@ MIX_ENV=test BORS_DATABASE=postgresql mix run --no-start scripts/replay_diagnost
 MIX_ENV=test BORS_DATABASE=postgresql mix run --no-start scripts/replay_diagnostic_partition.exs test/fixtures/bounded-providers-candidate232.json partition232.json
 ```
 
+## Natural candidate254 cap regression
+
+Actual candidate254/batch867 (46 frozen inputs, run38873489266) failed in unchanged
+Isogeny/FiniteCenter.lean. Production event3773 under v1 correctly returned
+UNKNOWN/provider_header_limit in616ms,139ms Python CPU; attempted accounting was
+65headers/523204bytes, including the rejected65th header before its parse. Actual
+3775 selected deterministic bisection23/23. This is one supplied natural attempt,
+not an aggregate UNKNOWN-rate or benefit claim.
+
+The root has six direct imports. Center/Functoriality.lean **and** Isogeny/Basic.lean
+are frozen changed paths of PR16848. The existing complete direct helper and v2
+checkpoint replay against original hash-verified candidate/base objects both give
+an eligible **counterfactual1/45** partition, preserving all46 full snapshots. The
+v2 deep walk still returns UNKNOWN at the same header boundary; it records64
+accepted headers/519495bytes and a separately completed one-root4499-byte direct
+checkpoint. No owner is inferred from incomplete deep nodes. Original production
+logs reparse to the same primary compiler diagnostic. Companion exact source
+fixtures exercise this cap in portable minimal Git trees with synthetic commits;
+the captured lookup uses the original production identities.
+
+Bounded immutable read-only API preparation of sparse source objects occurred
+outside the offline helper, with each commit/tree/blob hash verified. No network,
+credentials, project inventory or execution was added to the helper. Local replay
+cost is not production helper cost. The coordinator's independent PR16848
+withdrawal and its retained22-member retry are unrelated recovery, not checkpoint
+or provisional-repair success. NEW post-release natural evidence remains required.
+
 ## Rollout and rollback
 
-The default new-observation policy is bounded_depth_v1. Set
+The default new-observation output policy is bounded_depth_v2. The existing
+`BORS_IMPORT_PROVIDER_POLICY=bounded_depth_v1` selector is retained for deployment
+compatibility; it selects the current bounded implementation. Set
 `BORS_IMPORT_PROVIDER_POLICY=direct` to restore depth-one lookups for new
 observations; any unrecognized value also selects direct. The Cloudflare Worker
 explicitly forwards this variable into the Container environment, defaulting to
