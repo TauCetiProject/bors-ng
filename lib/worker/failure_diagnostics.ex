@@ -17,7 +17,7 @@ defmodule BorsNG.Worker.FailureDiagnostics do
         evidence,
         conn,
         collector \\ &collect/2,
-        providers \\ &LocalGit.import_providers/4
+        providers \\ nil
       ) do
     candidate = CandidateJournal.current(batch)
     hints = FailureIsolation.hints(candidate)
@@ -149,14 +149,14 @@ defmodule BorsNG.Worker.FailureDiagnostics do
 
       _ ->
         with {:ok, observation} <- bound_observation(candidate),
-             {:ok, prs} <-
-               map_providers(
+             {:ok, prs, policy} <-
+               map_retry_providers(
                  hints,
                  observation.details["result"],
                  observation.details["binding"],
                  observation.details["provider_lookup"]
                ) do
-          {:ok, prs, "import_provider_hint"}
+          {:ok, prs, policy}
         else
           _ -> :unavailable
         end
@@ -211,7 +211,12 @@ defmodule BorsNG.Worker.FailureDiagnostics do
              )
            ),
          {:ok, paths} <- provider_paths(hints, result) do
-      lookup = providers.(batch.project, conn, binding(candidate, batch.commit, evidence), paths)
+      bound = binding(candidate, batch.commit, evidence)
+
+      lookup =
+        if is_nil(providers),
+          do: LocalGit.retry_providers(batch.project, conn, bound, paths, hints["changed_files"]),
+          else: providers.(batch.project, conn, bound, paths)
 
       if is_map(lookup) and byte_size(Jason.encode!(lookup)) <= 64 * 1024,
         do: lookup,
@@ -247,6 +252,123 @@ defmodule BorsNG.Worker.FailureDiagnostics do
   end
 
   def provider_paths(_, _), do: :unavailable
+
+  @provider_limits %{
+    "max_depth" => 5,
+    "max_headers" => 64,
+    "max_file_bytes" => 262_144,
+    "max_source_bytes" => 524_288,
+    "max_paths" => 128,
+    "max_evidence_bytes" => 65_536,
+    "total_timeout_ms" => 5000
+  }
+
+  def map_retry_providers(hints, logs, binding, %{"policy" => "bounded_depth_v1"} = lookup) do
+    case map_bounded_providers(hints, logs, binding, lookup) do
+      {:ok, prs} -> {:ok, prs, "bounded_provider_hint"}
+      _ -> :unavailable
+    end
+  end
+
+  def map_retry_providers(_, _, _, %{"policy" => _}), do: :unavailable
+
+  def map_retry_providers(hints, logs, binding, lookup) do
+    case map_providers(hints, logs, binding, lookup) do
+      {:ok, prs} -> {:ok, prs, "import_provider_hint"}
+      _ -> :unavailable
+    end
+  end
+
+  # Validate the entire bounded graph, including every residual branch. No
+  # resource-truncated graph or root without a changed frontier can guide retries.
+  def map_bounded_providers(hints, logs, binding, lookup) do
+    with %{
+           "policy" => "bounded_depth_v1",
+           "complete" => false,
+           "bounded_complete" => true,
+           "full_closure_complete" => false,
+           "binding" => ^binding,
+           "authority" => "retry_only",
+           "proof_authority" => false,
+           "limits" => @provider_limits,
+           "nodes" => nodes
+         }
+         when is_list(nodes) <- lookup,
+         true <- byte_size(Jason.encode!(lookup)) <= 65_536,
+         {:ok, roots} <- provider_paths(hints, logs),
+         true <- lookup["roots"] == roots,
+         true <- length(nodes) in 1..128,
+         changed = hints["changed_files"] |> Enum.flat_map(& &1["paths"]) |> MapSet.new(),
+         :ok <-
+           validate_provider_graph(nodes, Enum.map(roots, &{&1, 0}), MapSet.new(roots), changed),
+         expanded = Enum.filter(nodes, &is_list(&1["providers"])),
+         residual = Enum.filter(nodes, &(&1["stop"] == "depth_limit")),
+         frontier = Enum.filter(nodes, &(&1["stop"] == "changed_frontier")),
+         true <- lookup["residual_frontier"] == Enum.map(residual, & &1["path"]),
+         true <- lookup["changed_frontier"] == Enum.map(frontier, & &1["path"]),
+         true <- lookup["headers"] == length(expanded) and length(expanded) <= 64,
+         bytes = Enum.sum(Enum.map(expanded, & &1["bytes"])),
+         true <- lookup["source_bytes"] == bytes and bytes <= 524_288,
+         true <- is_integer(lookup["elapsed_ms"]) and lookup["elapsed_ms"] in 0..5000,
+         graph = Map.new(nodes, &{&1["path"], &1}),
+         true <- Enum.all?(roots, &reaches_frontier?([&1], graph, MapSet.new())) do
+      paths = MapSet.new(Enum.map(frontier, & &1["path"]))
+
+      owners =
+        hints["changed_files"]
+        |> Enum.filter(fn m -> Enum.any?(m["paths"], &MapSet.member?(paths, &1)) end)
+        |> Enum.map(& &1["pr"])
+        |> Enum.uniq()
+
+      if owners != [], do: {:ok, owners}, else: :unavailable
+    else
+      _ -> :unavailable
+    end
+  rescue
+    _ -> :unavailable
+  end
+
+  defp validate_provider_graph([], [], _, _), do: :ok
+
+  defp validate_provider_graph([node | rest], [{path, depth} | queue], seen, changed) do
+    true = node["path"] == path and node["depth"] == depth and project_path?(path)
+    true = sha?(node["blob"]) and is_integer(node["bytes"]) and node["bytes"] in 0..262_144
+
+    cond do
+      MapSet.member?(changed, path) ->
+        true = depth > 0 and node["stop"] == "changed_frontier" and node["providers"] == nil
+        validate_provider_graph(rest, queue, seen, changed)
+
+      depth == 5 ->
+        true = node["stop"] == "depth_limit" and node["providers"] == nil
+        validate_provider_graph(rest, queue, seen, changed)
+
+      depth in 0..4 ->
+        providers = node["providers"]
+        true = node["stop"] == nil and node["base_blob"] == node["blob"]
+        true = is_list(providers) and providers == Enum.sort(Enum.uniq(providers))
+        true = Enum.all?(providers, &project_path?/1)
+        fresh = Enum.reject(providers, &MapSet.member?(seen, &1))
+        seen = Enum.reduce(fresh, seen, &MapSet.put(&2, &1))
+        true = MapSet.size(seen) <= 128
+        validate_provider_graph(rest, queue ++ Enum.map(fresh, &{&1, depth + 1}), seen, changed)
+    end
+  end
+
+  defp validate_provider_graph(_, _, _, _), do: :unavailable
+
+  defp reaches_frontier?([], _, _), do: false
+
+  defp reaches_frontier?([path | rest], graph, seen) do
+    if MapSet.member?(seen, path) do
+      reaches_frontier?(rest, graph, seen)
+    else
+      node = Map.fetch!(graph, path)
+
+      node["stop"] == "changed_frontier" or
+        reaches_frontier?(rest ++ (node["providers"] || []), graph, MapSet.put(seen, path))
+    end
+  end
 
   def map_providers(
         hints,

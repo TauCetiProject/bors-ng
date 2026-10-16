@@ -5,6 +5,7 @@ The mirror is expendable; immutable candidate identity lives in the database.
 """
 import base64
 import ctypes
+from collections import deque
 import fcntl
 import json
 import os
@@ -22,6 +23,12 @@ REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 OUTPUT_LIMIT = 1024 * 1024
 ASSEMBLY_MEMBER_LIMIT = 128
 COMPATIBILITY_MEMBER_LIMIT = 32
+PROVIDER_OPERATIONS = ('import_providers', 'bounded_import_providers')
+PROVIDER_PATH = re.compile(r"TauCeti(?:/[A-Za-z_][A-Za-z0-9_'\-]*)+\.lean\Z")
+BOUNDED_PROVIDER_POLICY = 'bounded_depth_v1'
+PROVIDER_LIMITS = dict(max_depth=5, max_headers=64, max_file_bytes=256 * 1024,
+                       max_source_bytes=512 * 1024, max_paths=128,
+                       max_evidence_bytes=64 * 1024, total_timeout_ms=5000)
 
 
 class Failure(Exception):
@@ -47,6 +54,7 @@ class Mirror:
         self.root = Path(request['root'])
         self.repo = self.root / (request['repository'].replace('/', '--') + '.git')
         self.started = time.monotonic()
+        self.cpu_started = time.process_time()
         self.deadline = self.started + min(request.get('timeout', 600), 600)
         self.phase = 'lock'
         self.budget = request.get('max_bytes', 2 * 1024 ** 3)
@@ -91,7 +99,7 @@ class Mirror:
                             raise Failure('timeout', operation=args[0], phase=self.phase)
                         if os.fstat(out.fileno()).st_size > output_limit or os.fstat(err.fileno()).st_size > output_limit:
                             raise Failure('output_limit', operation=args[0])
-                        if self.request['operation'] != 'import_providers' and size(self.root) > self.budget:
+                        if self.request['operation'] not in PROVIDER_OPERATIONS and size(self.root) > self.budget:
                             raise Failure('mirror_limit', max_bytes=self.budget)
             except Failure:
                 os.killpg(proc.pid, signal.SIGKILL)
@@ -486,6 +494,128 @@ class Mirror:
             raise Failure('timeout')
         return result
 
+    def bounded_import_providers(self):
+        """Complete the declared depth, not the closure. All limits span all roots.
+
+        Frozen changed paths terminate expansion. Depth-five unowned paths are
+        explicit residuals; missing objects or partial work never earn coverage.
+        """
+        cpu_started = time.process_time()
+        binding, roots = self.request['binding'], sorted(self.request['paths'])
+        changed = set(self.request['changed_paths'])
+        limits = PROVIDER_LIMITS
+        cache = self.repo / 'bors-headers-local-source-v2.json'
+        stored = {}
+        if cache.exists() and cache.stat().st_size <= 4 * 1024 * 1024:
+            try:
+                stored = json.loads(cache.read_text())
+                if not isinstance(stored, dict):
+                    stored = {}
+            except (OSError, ValueError, UnicodeError):
+                pass
+        nodes, seen = [], set(roots)
+        queue = deque((p, 0) for p in roots)
+        source_bytes = header_count = cold_blobs = 0
+        self.provider_progress = dict(nodes=nodes)
+        self.provider_queue = queue
+
+        def check():
+            if time.monotonic() >= self.deadline:
+                raise Failure('timeout')
+            if len(json.dumps(nodes).encode()) > limits['max_evidence_bytes']:
+                raise Failure('provider_output_limit')
+
+        def entry(commit, path):
+            listing = self.git('ls-tree', '-l', '-z', commit, '--', path,
+                               output_limit=2048)[0].split('\0')
+            if len(listing) != 2 or listing[-1] != '' or '\t' not in listing[0]:
+                raise Failure('missing_source')
+            meta, actual = listing[0].split('\t', 1)
+            fields = meta.split()
+            if (actual != path or len(fields) != 4 or fields[:2] != ['100644', 'blob']
+                    or not SHA.fullmatch(fields[2]) or not fields[3].isdigit()):
+                raise Failure('unsupported_source')
+            if int(fields[3]) > limits['max_file_bytes']:
+                raise Failure('provider_byte_limit')
+            return fields[2], int(fields[3])
+
+        while queue:
+            check()
+            path, depth = queue.popleft()
+            self.provider_progress['active_path'] = path
+            blob, length = entry(binding['commit'], path)
+            node = dict(path=path, blob=blob, bytes=length, depth=depth)
+            if path in changed:
+                if depth == 0:
+                    raise Failure('changed_diagnostic_source')
+                node['stop'] = 'changed_frontier'
+            elif depth == limits['max_depth']:
+                node['stop'] = 'depth_limit'
+            else:
+                if (blob, length) != entry(binding['base_sha'], path):
+                    raise Failure('unowned_changed_source')
+                header_count += 1
+                source_bytes += length
+                self.provider_progress.update(headers=header_count, source_bytes=source_bytes)
+                if header_count > limits['max_headers']:
+                    raise Failure('provider_header_limit')
+                if source_bytes > limits['max_source_bytes']:
+                    raise Failure('provider_byte_limit')
+                modules = stored.get(blob)
+                if not (isinstance(modules, list) and len(modules) <= 128
+                        and all(isinstance(m, str) and len(m) <= 512 and
+                                re.fullmatch(r"TauCeti(?:\.[A-Za-z_][A-Za-z0-9_']*)*", m)
+                                for m in modules)):
+                    content = self.diagnostic_objects([blob], 'blob')[0]
+                    if len(content) != length:
+                        raise Failure('incomplete_source')
+                    try:
+                        modules = compatibility_imports(content.decode('utf-8'))
+                    except UnicodeError:
+                        raise Failure('non_text_source')
+                    stored[blob] = modules
+                    cold_blobs += 1
+                    self.provider_progress['cold_blobs'] = cold_blobs
+                providers = sorted({m.replace('.', '/') + '.lean' for m in modules})
+                if any(len(p) > 512 or not PROVIDER_PATH.fullmatch(p) for p in providers):
+                    raise Failure('unsupported_provider')
+                node.update(base_blob=blob, providers=providers)
+                for provider in providers:
+                    if provider not in seen:
+                        seen.add(provider)
+                        if len(seen) > limits['max_paths']:
+                            raise Failure('provider_count_limit')
+                        queue.append((provider, depth + 1))
+            nodes.append(node)
+            self.provider_progress.pop('active_path', None)
+            check()
+        # ls-tree alone cannot establish availability of a terminal blob.
+        oids = list(dict.fromkeys(n['blob'] for n in nodes))
+        checked = self.git('cat-file', '--batch-check', input='\n'.join(oids) + '\n',
+                           output_limit=16 * 1024)[0].splitlines()
+        expected = {n['blob']: n['bytes'] for n in nodes}
+        if checked != [f"{oid} blob {expected[oid]}" for oid in oids]:
+            raise Failure('missing_source')
+        result = dict(complete=False, bounded_complete=True, policy=BOUNDED_PROVIDER_POLICY,
+                      full_closure_complete=False, binding=binding, roots=roots, nodes=nodes,
+                      residual_frontier=[n['path'] for n in nodes if n.get('stop') == 'depth_limit'],
+                      changed_frontier=[n['path'] for n in nodes if n.get('stop') == 'changed_frontier'],
+                      limits=limits, headers=header_count, source_bytes=source_bytes,
+                      cold_blobs=cold_blobs, cpu_ms=round((time.process_time() - cpu_started) * 1000),
+                      authority='retry_only', proof_authority=False)
+        # Cache only validated immutable source headers, never coverage or verdicts.
+        encoded = json.dumps(stored)
+        if cold_blobs and len(encoded.encode()) <= 4 * 1024 * 1024:
+            check()
+            temp = cache.with_suffix('.tmp')
+            temp.write_text(encoded)
+            temp.replace(cache)
+        result['elapsed_ms'] = round((time.monotonic() - self.started) * 1000)
+        if len(json.dumps(result).encode()) > limits['max_evidence_bytes']:
+            raise Failure('provider_output_limit')
+        check()
+        return result
+
     def compatibility(self):
         """Exact singleton trees, source data only; unknown coverage never holds a PR."""
         base = self.request['base_sha']
@@ -626,7 +756,25 @@ class Mirror:
         return dict(status='ok', ref=ref, commit=commit)
 
     def run(self):
-        if self.request['operation'] == 'import_providers':
+        if self.request['operation'] in PROVIDER_OPERATIONS:
+            self.deadline = min(self.deadline, self.started + 5)
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0:
+                raise Failure('timeout')
+            previous_handler = signal.getsignal(signal.SIGALRM)
+            def timeout(signum, frame):
+                raise Failure('timeout')
+            signal.signal(signal.SIGALRM, timeout)
+            signal.setitimer(signal.ITIMER_REAL, remaining)
+            try:
+                return self.run_locked()
+            finally:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+                signal.signal(signal.SIGALRM, previous_handler)
+        return self.run_locked()
+
+    def run_locked(self):
+        if self.request['operation'] in PROVIDER_OPERATIONS:
             self.deadline = min(self.deadline, self.started + 5)
             if not self.repo.is_dir():
                 raise Failure('mirror_unavailable')
@@ -640,7 +788,7 @@ class Mirror:
                     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     break
                 except BlockingIOError:
-                    if self.request['operation'] == 'import_providers':
+                    if self.request['operation'] in PROVIDER_OPERATIONS:
                         raise Failure('mirror_busy')
                     if time.monotonic() >= self.deadline:
                         raise Failure('lock_timeout', phase='lock')
@@ -650,12 +798,25 @@ class Mirror:
                 return getattr(self, self.request['operation'])()
             except Failure as error:
                 error.details.setdefault('phase', self.phase)
+                if self.request['operation'] == 'bounded_import_providers':
+                    progress = getattr(self, 'provider_progress', {}).copy()
+                    progress['pending_paths'] = [p for p, _ in getattr(self, 'provider_queue', [])]
+                    error.details.update(policy=BOUNDED_PROVIDER_POLICY, bounded_complete=False,
+                        full_closure_complete=False, limits=PROVIDER_LIMITS,
+                        elapsed_ms=round((time.monotonic() - self.started) * 1000),
+                        cpu_ms=round((time.process_time() - self.cpu_started) * 1000),
+                        progress=progress)
+                    if len(json.dumps(error.details).encode()) > 60 * 1024:
+                        error.details['progress'] = dict(evidence_truncated=True,
+                            headers=progress.get('headers', 0), source_bytes=progress.get('source_bytes', 0),
+                            nodes_recorded=len(progress.get('nodes', [])),
+                            pending_paths_count=len(progress['pending_paths']))
                 raise
             finally:
                 # A read-only optional lookup never evicts another lane's mirror.
                 # Failed fetches/assembly may leave unreachable objects; bound
                 # retained bytes on both success and failure, under the lock.
-                if self.request['operation'] != 'import_providers':
+                if self.request['operation'] not in PROVIDER_OPERATIONS:
                     mirrors = sorted(self.root.glob('*.git'), key=lambda p: p.stat().st_mtime)
                     total = sum(size(p) for p in mirrors)
                     for mirror in mirrors:
@@ -784,9 +945,9 @@ def local_imports(content):
 def validate(request):
     if not REPO.fullmatch(request['repository']) or '..' in request['repository']:
         raise Failure('invalid_repository')
-    if request['operation'] not in ['assemble', 'publish', 'promote', 'compatibility', 'import_providers']:
+    if request['operation'] not in ['assemble', 'publish', 'promote', 'compatibility', *PROVIDER_OPERATIONS]:
         raise Failure('invalid_operation')
-    if request['operation'] == 'import_providers':
+    if request['operation'] in PROVIDER_OPERATIONS:
         binding, paths = request['binding'], request['paths']
         if (not isinstance(binding, dict)
                 or any(type(binding.get(k)) is not int or binding[k] <= 0
@@ -802,6 +963,13 @@ def validate(request):
                        or not re.fullmatch(r"TauCeti(?:/[A-Za-z_][A-Za-z0-9_'-]*)+\.lean", p)
                        for p in paths)):
             raise Failure('invalid_provider_request')
+        if request['operation'] == 'bounded_import_providers':
+            changed = request.get('changed_paths')
+            if (not isinstance(changed, list) or len(changed) > 1024
+                    or any(not isinstance(p, str) or len(p) > 512
+                           or not PROVIDER_PATH.fullmatch(p) for p in changed)
+                    or changed != sorted(set(changed))):
+                raise Failure('invalid_changed_frontier')
         shas = [binding['commit'], binding['base_sha']]
     elif request['operation'] in ['assemble', 'compatibility']:
         if not request['members']:
@@ -827,11 +995,21 @@ def main():
     try:
         request = json.loads(Path(sys.argv[1]).read_text())
         validate(request)
-        result = Mirror(request).run()
+        mirror = Mirror(request)
+        result = mirror.run()
     except Failure as error:
         result = dict(status='error', details=error.details)
     except Exception:
         result = dict(status='error', details=dict(kind='helper_failed'))
+    if (isinstance(locals().get('request'), dict)
+            and request.get('operation') == 'bounded_import_providers'
+            and result.get('status') == 'error'):
+        result.update(complete=False, bounded_complete=False, full_closure_complete=False,
+                      policy=BOUNDED_PROVIDER_POLICY, limits=PROVIDER_LIMITS,
+                      authority='retry_only', proof_authority=False)
+        if 'mirror' in locals():
+            result.update(elapsed_ms=round((time.monotonic() - mirror.started) * 1000),
+                          cpu_ms=round((time.process_time() - mirror.cpu_started) * 1000))
     print(json.dumps(result))
 
 

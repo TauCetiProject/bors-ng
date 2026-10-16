@@ -30,13 +30,14 @@ hints =
       Map.put(data["hints"], "compiler_suspects", suspects)
 
     _ ->
-      case FailureDiagnostics.map_providers(
+      case FailureDiagnostics.map_retry_providers(
              data["hints"],
              data["logs"],
              data["binding"],
              data["provider_lookup"]
            ) do
-        {:ok, suspects} -> Map.put(data["hints"], "provider_suspects", suspects)
+        {:ok, suspects, "import_provider_hint"} -> Map.put(data["hints"], "provider_suspects", suspects)
+        {:ok, suspects, "bounded_provider_hint"} -> Map.put(data["hints"], "bounded_provider_suspects", suspects)
         _ -> data["hints"]
       end
   end

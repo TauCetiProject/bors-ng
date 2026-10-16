@@ -113,6 +113,27 @@ defmodule BorsNG.Worker.LocalGit do
     })
   end
 
+  def retry_providers(project, conn, binding, paths, changed_files) do
+    if System.get_env("BORS_IMPORT_PROVIDER_POLICY", "bounded_depth_v1") != "bounded_depth_v1" do
+      import_providers(project, conn, binding, paths)
+    else
+      changed_paths =
+        changed_files
+        |> Enum.flat_map(& &1["paths"])
+        |> Enum.filter(&Regex.match?(~r/\ATauCeti(?:\/[A-Za-z_][A-Za-z0-9_'\-]*)+\.lean\z/, &1))
+        |> Enum.uniq()
+        |> Enum.sort()
+
+      run(%{repository: project.name, conn: conn}, %{
+        operation: "bounded_import_providers",
+        binding: binding,
+        paths: paths,
+        changed_paths: changed_paths,
+        timeout: 5
+      })
+    end
+  end
+
   defp run(context, request) do
     input =
       Path.join(
@@ -136,7 +157,7 @@ defmodule BorsNG.Worker.LocalGit do
 
       # This optional offline read needs no publication or API credentials.
       token_result =
-        if request.operation == "import_providers",
+        if request.operation in ["import_providers", "bounded_import_providers"],
           do: {:ok, ""},
           else: GitHub.git_token(context.conn)
 

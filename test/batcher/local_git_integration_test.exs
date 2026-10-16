@@ -101,6 +101,8 @@ defmodule BorsNG.Worker.LocalGitIntegrationTest do
     kind=os.environ.get('BORS_TEST_HELPER_FAILURE','')
     if kind == request['operation']:
         print(json.dumps(dict(status='error',details=dict(kind='network_unavailable'))))
+    elif request['operation'] in ['import_providers', 'bounded_import_providers']:
+        print(json.dumps(dict(operation=request['operation'], token=os.environ.get('BORS_GIT_TOKEN'), changed_paths=request.get('changed_paths'))))
     elif request['operation']=='assemble':
         hints={}
         if os.environ.get('BORS_TEST_MISSING_IMPORT'):
@@ -124,6 +126,50 @@ defmodule BorsNG.Worker.LocalGitIntegrationTest do
     end)
 
     {:ok, project: project, batch: batch, patch: patch, link: link}
+  end
+
+  test "provider policies need no credentials and direct rollback preserves the old operation",
+       ctx do
+    previous = System.get_env("BORS_IMPORT_PROVIDER_POLICY")
+
+    on_exit(fn ->
+      if previous,
+        do: System.put_env("BORS_IMPORT_PROVIDER_POLICY", previous),
+        else: System.delete_env("BORS_IMPORT_PROVIDER_POLICY")
+    end)
+
+    System.delete_env("BORS_IMPORT_PROVIDER_POLICY")
+    changed = [%{"paths" => ["TauCeti/Provider.lean", "README.md", "TauCeti/Provider.lean"]}]
+    # nil connection cannot supply API/publication credentials.
+    result =
+      BorsNG.Worker.LocalGit.retry_providers(
+        ctx.project,
+        nil,
+        %{},
+        ["TauCeti/Root.lean"],
+        changed
+      )
+
+    assert result["operation"] == "bounded_import_providers"
+    assert result["token"] in [nil, ""]
+    assert result["changed_paths"] == ["TauCeti/Provider.lean"]
+
+    for policy <- ["direct", "unknown"] do
+      System.put_env("BORS_IMPORT_PROVIDER_POLICY", policy)
+
+      result =
+        BorsNG.Worker.LocalGit.retry_providers(
+          ctx.project,
+          nil,
+          %{},
+          ["TauCeti/Root.lean"],
+          changed
+        )
+
+      assert result["operation"] == "import_providers"
+      assert result["token"] in [nil, ""]
+      assert result["changed_paths"] == nil
+    end
   end
 
   defp events(batch),
