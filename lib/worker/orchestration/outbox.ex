@@ -176,7 +176,7 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
         {"dispatch", _} ->
           1
 
-        {kind, _} when kind in ["cancel", "cancel_all"] ->
+        {kind, _} when kind in ["cancel", "cancel_all", "cancel_run"] ->
           0
 
         {"cast", {:status, {commit, _, _, _}}} ->
@@ -450,7 +450,7 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
         ])
 
   defp permanent_key?(job),
-    do: job.kind in ["notice", "projection", "dispatch"] or cleanup?(job)
+    do: job.kind in ["notice", "projection", "dispatch", "cancel_run"] or cleanup?(job)
 
   defp wake_deferred(project_id) do
     with_project(project_id, fn ->
@@ -493,6 +493,26 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
   end
 
   def fail(job, reason) do
+    if job.kind == "cancel_run" and job.attempts >= 6 do
+      with_project(job.project_id, fn ->
+        owned(job)
+        |> Repo.update_all(
+          set: [
+            state: "done",
+            token: nil,
+            lease_until: 0,
+            completed_at_ms: System.system_time(:millisecond),
+            last_error:
+              "cancellation_exhausted:" <> inspect(reason, limit: 8, printable_limit: 160)
+          ]
+        )
+      end)
+    else
+      fail_other(job, reason)
+    end
+  end
+
+  defp fail_other(job, reason) do
     if (notification?(job) or cleanup?(job)) and
          (job.attempts >= 6 or match?({:terminal, _}, reason)) do
       category = if cleanup?(job), do: "cleanup", else: "notification"

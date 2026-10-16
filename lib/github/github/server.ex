@@ -59,7 +59,10 @@ defmodule BorsNG.GitHub.Server do
              :close_merged_pr,
              :cleanup_policy,
              :batch_read,
-             :public_user
+             :public_user,
+             :cancellation_lookup,
+             :cancellation_dispatch,
+             :cancellation_capability
            ] do
     # Include time spent behind another API request. Never execute an expired
     # advisory call or hide retries/token refreshes inside its service budget.
@@ -366,6 +369,69 @@ defmodule BorsNG.GitHub.Server do
     |> case do
       %{status: 204} -> :ok
       %{status: status, body: response} -> {:error, :dispatch_staging, status, response}
+    end
+  end
+
+  # Exact reviewed default-branch blobs prove that the sink exists before any
+  # dispatch. A repository_dispatch204 alone does not prove a workflow received it.
+  def do_handle_call(:cancellation_capability, conn, {}) do
+    blobs = [
+      {".github/workflows/cancel-bors-candidate.yml", "42f163d30052a1285bae4cdef41770c5bc857b42"},
+      {"scripts/cancel_bors_candidate.py", "37d3be366812dd8377f70c125b512c08827b7fd0"}
+    ]
+
+    with %{status: 200, body: raw} <- get!(conn, "actions/workflows/cancel-bors-candidate.yml"),
+         %{
+           "path" => ".github/workflows/cancel-bors-candidate.yml",
+           "state" => "active",
+           "id" => id
+         }
+         when is_integer(id) and id > 0 <- Jason.decode!(raw) do
+      Enum.reduce_while(blobs, :ok, fn {path, sha}, _ ->
+        case get!(conn, "contents/#{path}?ref=main") do
+          %{status: 200, body: raw} ->
+            if Jason.decode!(raw)["sha"] == sha,
+              do: {:cont, :ok},
+              else: {:halt, {:error, :cancellation_capability_mismatch}}
+
+          %{status: 404} ->
+            {:halt, {:error, :cancellation_sink_not_landed}}
+
+          %{status: status} ->
+            {:halt, {:error, :cancellation_capability, status}}
+        end
+      end)
+    else
+      %{status: 404} -> {:error, :cancellation_sink_not_landed}
+      %{status: status} -> {:error, :cancellation_capability, status}
+      _ -> {:error, :cancellation_sink_inactive}
+    end
+  end
+
+  def do_handle_call(:cancellation_lookup, conn, {p}) do
+    do_handle_call(
+      :staging_run,
+      conn,
+      {p["head_sha"], p["base_sha"], p["batch_id"], p["branch"], p["dispatch_at"]}
+    )
+  end
+
+  def do_handle_call(:cancellation_dispatch, conn, {id, run_id, attempt}) do
+    # This runs after token acquisition/mailbox wait, immediately before POST.
+    with {:ok, %{"run_id" => ^run_id, "run_attempt" => ^attempt}} <-
+           BorsNG.Worker.CandidateCancellation.authority(id) do
+      body =
+        Jason.encode!(%{
+          event_type: "tauceti-bors-cancel",
+          client_payload: %{intent_id: id, run_id: run_id, run_attempt: attempt}
+        })
+
+      case post!(conn, "dispatches", body) do
+        %{status: 204} -> :ok
+        %{status: code} -> {:error, :cancellation_dispatch, code}
+      end
+    else
+      _ -> {:error, :unauthorized_or_expired}
     end
   end
 

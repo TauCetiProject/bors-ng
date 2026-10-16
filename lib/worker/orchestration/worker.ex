@@ -88,6 +88,9 @@ defmodule BorsNG.Worker.Orchestration.Worker do
             {"dispatch", batch_id} ->
               Batcher.resume_dispatch(batch_id)
 
+            {"cancel_run", _} ->
+              BorsNG.Worker.CandidateCancellation.deliver(job)
+
             {"compatibility", _} ->
               BorsNG.Worker.SourceCompatibility.chunk(project_id)
 
@@ -105,6 +108,7 @@ defmodule BorsNG.Worker.Orchestration.Worker do
       rescue
         error -> {:error, error.__struct__}
       catch
+        :throw, {:cancellation_retry, reason} -> {:error, reason}
         :throw, :withdrawal_pending -> {:defer, :withdrawal_pending}
         :throw, {:notification_terminal, status} -> {:terminal, {:http_status, status}}
         :throw, {:cleanup_terminal, reason} -> {:terminal, reason}
