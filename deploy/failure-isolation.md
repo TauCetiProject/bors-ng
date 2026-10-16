@@ -83,6 +83,49 @@ Retries use the existing sealed clone/admission path, preserve exact heads,
 reviewer/manual approval, requested priority and lineage, and reconcile replayed
 children after restart. Multi-member diagnostic suspicions never revoke approval.
 
+## Sending one suspect to repair before confirmation
+
+When a conclusive failed candidate's complete, immutable diagnostic ownership
+selects exactly one unbundled PR, bors may send that head to the existing
+`needs-rebase` worker path instead of immediately dispatching a singleton
+confirmation run. The request says **provisional suspect**, not individual build
+failure. It includes the actual candidate, generation, run/attempt, diagnostic
+paths, exact head and original tested main, under `provisional-diagnostic-v1`.
+No existing head-CI status is changed. Generic bisection, multiple/unmapped
+suspects, connected multi-member components, speculative predecessor/successor topology, manual
+scope approvals, pause labels, stale main/head, withdrawals and unavailable API
+bindings retain the conservative retry path.
+
+Parent retirement, all remainder admissions, suspect withdrawal and durable
+notice are committed together. The remainder keeps exact heads, approvals,
+original scheduling age and parent lineage. Duplicate notifications/restarts do
+not create a second suspect admission or repair request. A failed notice delivery
+uses the existing outbox retry; labels alone authenticate nothing. Worker ownership,
+fork permissions, claims, per-PR attempt caps, full build/axiom validation and
+compare-and-swap push remain mandatory. This feature grants no ownership exception.
+
+A worker must report attribution **unconfirmed** if this PR passes alone; no-change
+exit or cheap import PASS is not a validation receipt. There is no new worker
+receipt service. If no changed head is observed after the existing default
+90-minute worker round plus five minutes' grace, ordinary bounded source
+reconciliation can clone **one sealed isolated fallback** from the original
+admission. Fresh head/main/open/pause/withdrawal checks and normal dispatch gates
+still apply. This delay is a recovery tradeoff, not a guaranteed completion time;
+fair reconciliation and higher-priority dispatch may defer it further.
+The authenticated request remains active for an in-flight worker; its claim and
+safe push are not invalidated. The fallback cannot combine with the original
+remainder or be renewed as main advances. A clear local conflict or missing-source
+finding still prevents dispatch. Actual isolated failure upgrades provenance to
+individual evidence and publishes its run, without renewing the worker budget;
+success follows normal promotion. A changed head supersedes the old request and
+requires normal fresh CI/review. No confirmation-run saving is claimed until a
+genuine production case demonstrates it.
+
+Inspect `provisional_repair` and `provisional_unconfirmed` in the existing candidate
+journal and the exact-head `provisional` metadata for the consumed fallback batch.
+`BORS_SOURCE_COMPATIBILITY=off` stops new handoffs/reconciliation; already committed
+requests and admissions retain their existing recovery semantics.
+
 A genuinely failed singleton or indivisible bundle retains native terminal failure
 semantics. Its failed queue approval now includes an explainable quarantine record:
 head, immutable failed base, candidate ID, reason, changed/import dependency paths
