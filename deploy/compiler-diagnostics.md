@@ -134,7 +134,17 @@ The same retry-only parser recognizes Lake's final, anchored
 module targets to project source paths without guessing warning positions or
 declaration origins. Warnings alone produce no observations. Missing/duplicate
 headers, truncated or empty blocks, unsupported/mixed external targets, facets,
-unsafe paths or more than 128 combined observations invalidate optional evidence.
+unsafe paths or more than 128 observations invalidate that fallback evidence.
+
+The target summary is a fallback only. The parser first scans the entire bounded
+log for precise source/audit observations and all environment-linter records.
+When any such records exist, it retains those records and does not consume the
+optional summary. A malformed, truncated or oversized cascade cannot erase a
+precise finding or add unrelated retry owners. Unknown environment origins still
+retain empty paths and force the mapper's conservative fallback; malformed or
+duplicate environment envelopes still make evidence unavailable. The 16 MiB log,
+128 observation, path, line and total-time bounds are unchanged. Warning-only
+failures still use the strict complete target-summary fallback.
 
 This covers the real batch82548 failure in
 [run38829250757](https://github.com/TauCetiProject/TauCeti/actions/runs/38829250757),
@@ -152,3 +162,41 @@ reporter: it needs no new producer. Root still owns deployment and new natural
 production verification; the reporter separately requires a NEW dispatch pinned
 to its merged trusted code. Run38831374735 was dispatched on older trusted code
 and cannot demonstrate reporter rollout.
+
+### Batch827 primary-diagnostic regression
+
+The original #47 parser coupled target-summary validation to primary diagnostics.
+In [run38835437044](https://github.com/TauCetiProject/TauCeti/actions/runs/38835437044),
+job116763406898, two exact source errors at
+`TauCeti/FieldTheory/FunctionField/ConstantExtension/RiemannRoch.lean:320:0` and
+`:327:0` precede 1,378 final failed targets. The entire 7,869,800-byte native log
+produces one deduplicated compiler path before #47 (`2210cde`), but #47 raises
+`observation_limit` and discards that useful path. Journal event2981 records
+unavailable diagnostics and event2983 selects a dependency-component retry.
+
+The correction restores the primary path without increasing any limit or
+promoting cascading bad imports into missing-source or stacking evidence. On the
+same complete frozen log, local parsing measured 68 ms before #47, 66 ms before
+failing in deployed #47, and 63 ms after the correction; these are single warm
+local measurements, not production latency claims. The existing #825 warning-only
+fallback and #816 environment-location cases remain covered.
+
+[Frozen replay evidence](primary-diagnostics-regression-evidence.json) binds exact
+candidate219/generation1, base, candidate commit/tree, ordered-head digest, all 36
+heads and the original run/attempt/job. The existing ownership replay verifies
+the exact assembly chain; the production pure planner selects `[16812]` and the
+other 35 original snapshots with every snapshot unchanged. This is fixture replay
+only, not individual guilt, a new production partition or a passing remainder.
+No historical journal row, source branch, hold, approval, queue or lease is
+modified. The one-CPU deployment setting from master6096172 is unchanged.
+
+Reproduce with `scripts/replay_diagnostic_ownership.py` on the frozen candidate219
+journal capture, a local bare mirror containing its exact objects and the complete
+native job log, followed by `scripts/replay_diagnostic_partition.exs`. Python
+regressions combine the exact primary error text with 1,400 distinct cascading
+targets and malformed/truncated summaries in either order. Parser-to-Elixir/DB
+tests verify stale-attempt rejection, immutable checked retry groups, preserved
+approvals and unknown global lint findings retaining fallback. Natural production
+collection/partition verification remains the coordinator's responsibility after
+normal required review, full CI and deployment; the TauCeti reporter's human
+review and new trusted dispatch requirements are separate and unchanged.

@@ -153,6 +153,49 @@ defmodule BorsNG.Worker.FailureIsolationTest do
     )
   end
 
+  test "cascading target overflow preserves precise retry hints but not global unknowns", c do
+    alias BorsNG.Worker.FailureDiagnostics
+    {batch, evidence} = terminal(c)
+    primary = "error: TauCeti/File3.lean:320:0: section variable mismatch\n"
+
+    cascade =
+      "Some required targets logged failures:\n" <>
+        Enum.map_join(1..1400, "\n", &"- TauCeti.Cascade#{&1}") <>
+        "\nerror: build failed\n"
+
+    result = parsed_log_result(primary <> cascade)
+    assert {:ok, [3]} = FailureDiagnostics.map_paths(c.hints, result)
+
+    unknown = %{
+      version: 1,
+      complete: true,
+      findings: [%{linter: "simpNF", declaration: "_private.Probe", unknown: "missing_range"}]
+    }
+
+    assert :unavailable =
+             FailureDiagnostics.map_paths(
+               c.hints,
+               parsed_log_result(
+                 primary <> cascade <> "LINT-ENV-LOCATIONS " <> Jason.encode!(unknown)
+               )
+             )
+
+    assert :ok = FailureDiagnostics.observe(batch, evidence, :conn, fn _, [200] -> result end)
+    FailureIsolation.classified(batch, "candidate_failure", %{evidence | run_attempt: 2})
+    assert :unavailable = FailureDiagnostics.suspects(c.candidate, c.hints)
+    FailureIsolation.classified(batch, "candidate_failure", evidence)
+    assert :retrying = FailureIsolation.split(c.links, batch)
+    children = Repo.all(from(b in Batch, where: b.id != ^batch.id, order_by: b.id))
+    groups = Enum.map(children, &stored_links(&1.id))
+    assert prs(groups) == [[3], [1, 2, 4]]
+    assert Enum.all?(children, &(&1.sealed and &1.state == :waiting))
+
+    assert Enum.sort(Enum.map(List.flatten(groups), &{&1.patch_id, &1.head_sha, &1.reviewer})) ==
+             Enum.sort(Enum.map(c.links, &{&1.patch_id, &1.head_sha, &1.reviewer}))
+
+    assert Enum.all?(Repo.all(Patch), &(&1.open and &1.queue_approval["state"] == "approved"))
+  end
+
   test "iofail failed-target hints retain authoritative run binding and full retry checks", c do
     alias BorsNG.Worker.FailureDiagnostics
     {batch, evidence} = terminal(c)
