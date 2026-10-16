@@ -243,7 +243,8 @@ defmodule BorsNG.Worker.FailureIsolation do
           hints["compiler_suspects"] != nil ->
             {[], nil}
 
-          length(components) > 1 and Enum.any?(components, &(length(&1) > 1)) ->
+          dependencies_complete and length(components) > 1 and
+              Enum.any?(components, &(length(&1) > 1)) ->
             [first | rest] = Enum.sort_by(components, &{-length(&1), hd(&1)})
             {[first, List.flatten(rest)], "dependency_component"}
 

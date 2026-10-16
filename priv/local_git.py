@@ -278,9 +278,7 @@ class Mirror:
 
     def diagnostic_owners(self, base, members, candidate, commits):
         if candidate:
-            # Reuse the squash chain just constructed from these ordered exact
-            # heads. Owners mean actual assembly touches, including shared paths;
-            # inherited/no-op stacked changes are not attributed a second time.
+            # Verify the exact chain just assembled before reusing its provenance.
             if (not commits or len(commits) != len(members)
                     or [(c['pr'], c['head_sha']) for c in commits] !=
                        [(m['pr'], m['head_sha']) for m in members]
@@ -294,35 +292,31 @@ class Mirror:
                         or [h[7:] for h in headers if h.startswith('parent ')] != [parent]):
                     raise Failure('diagnostic_provenance')
                 parent = commit['commit']
-            # One Git walk instead of merge-base + diff processes per member.
-            output = self.git('diff-tree', '--stdin', '--raw', '--no-abbrev', '--no-renames',
-                              '-r', '-z', '--always',
-                              input=''.join(c['commit'] + '\n' for c in commits))[0]
-            fields = output.split('\0')
-            changes, position = [], 0
-            for commit in commits:
-                if position >= len(fields) or fields[position] != commit['commit']:
-                    raise Failure('diagnostic_provenance')
-                position += 1
-                paths = []
-                while position < len(fields) and fields[position].startswith(':'):
-                    if (not re.fullmatch(r':[0-7]{6} [0-7]{6} [0-9a-f]{40} [0-9a-f]{40} [AMDT]', fields[position])
-                            or position + 1 >= len(fields)):
-                        raise Failure('diagnostic_provenance')
-                    paths.append(fields[position + 1])
-                    position += 2
-                changes.append(paths)
-            if position != len(fields) - 1 or fields[-1] != '':
+        # Ownership describes each exact head relative to its fork point, not
+        # just its squash delta: stacked or identical edits reappear on retry.
+        # Git has no pairwise merge-base batch interface. Keep these bounded
+        # ancestry queries, then collect all head diffs in one process.
+        pairs = [(m['head_sha'], self.git('merge-base', base, m['head_sha'])[0].strip())
+                 for m in members]
+        output = self.git('diff-tree', '--stdin', '--raw', '--no-abbrev', '--no-renames',
+                          '-r', '-z', '--always',
+                          input=''.join(head + ' ' + ancestor + '\n' for head, ancestor in pairs))[0]
+        fields = output.split('\0')
+        changes, position = [], 0
+        for head, _ in pairs:
+            if position >= len(fields) or fields[position] != head:
                 raise Failure('diagnostic_provenance')
-        else:
-            # Conflicted construction has no complete assembly chain. Keep the
-            # bounded legacy head comparison; optional dependencies stay unknown.
-            changes = []
-            for member in members:
-                ancestor = self.git('merge-base', base, member['head_sha'])[0].strip()
-                output = self.git('diff', '--name-only', '-z', '--no-renames',
-                                  ancestor, member['head_sha'])[0]
-                changes.append([p for p in output.split('\0') if p])
+            position += 1
+            paths = []
+            while position < len(fields) and fields[position].startswith(':'):
+                if (not re.fullmatch(r':[0-7]{6} [0-7]{6} [0-9a-f]{40} [0-9a-f]{40} [AMDT]', fields[position])
+                        or position + 1 >= len(fields)):
+                    raise Failure('diagnostic_provenance')
+                paths.append(fields[position + 1])
+                position += 2
+            changes.append(paths)
+        if position != len(fields) - 1 or fields[-1] != '':
+            raise Failure('diagnostic_provenance')
         if (any(len(paths) > 256 or any(not re.fullmatch(r'[A-Za-z0-9_./-]{1,512}', p)
                                       for p in paths) for paths in changes)
                 or sum(map(len, changes)) > 1024):
@@ -352,9 +346,26 @@ class Mirror:
             raise Failure('diagnostic_provenance')
         return objects
 
-    def diagnostic_dependencies(self, changed, candidate):
+    def diagnostic_dependencies(self, changed, candidate, owners=None, budget=None):
+        if owners is None:
+            owners = {}
+            for change in changed:
+                for path in change['paths']:
+                    owners.setdefault(path, []).append(change['pr'])
+        if budget is None:
+            budget = dict(reads=0, bytes=0)
         if not candidate:
-            raise Failure('no_assembled_dependencies')
+            # Conflicts have no assembled tree. Preserve the legacy exact-head
+            # import coverage, under the same independent total byte/time caps.
+            result = dict(changed_files=[], import_edges=[], missing_imports=[], dependency_paths=[])
+            for change in changed:
+                part = self.diagnostic_dependencies([change], change['head_sha'], owners, budget)
+                for key in result:
+                    result[key].extend(part[key])
+                if len(json.dumps(result)) > 192 * 1024:
+                    raise Failure('diagnostic_limit')
+            result['dependency_paths'] = sorted(set(result['dependency_paths']))
+            return result
         listing = self.git('ls-tree', '-r', '-l', '-z', candidate,
                            output_limit=4 * 1024 * 1024)[0]
         files = {}
@@ -363,17 +374,15 @@ class Mirror:
                 meta, path = entry.split('\t', 1)
                 files[path] = meta.split()
         paths = sorted({p for c in changed for p in c['paths'] if p.endswith('.lean') and p in files})
-        if (len(paths) > 256 or any(files[p][0] != '100644' or files[p][1] != 'blob'
+        budget['reads'] += len(paths)
+        budget['bytes'] += sum(int(files[p][3]) for p in paths)
+        if (budget['reads'] > 256 or any(files[p][0] != '100644' or files[p][1] != 'blob'
                                    or int(files[p][3]) > 256 * 1024 for p in paths)
-                or sum(int(files[p][3]) for p in paths) > 3 * 1024 * 1024):
+                or budget['bytes'] > 3 * 1024 * 1024):
             raise Failure('diagnostic_limit')
         oids = list(dict.fromkeys(files[p][2] for p in paths))
         imports = {oid: local_imports(blob.decode('utf-8'))
                    for oid, blob in zip(oids, self.diagnostic_objects(oids, 'blob'))}
-        owners = {}
-        for change in changed:
-            for path in change['paths']:
-                owners.setdefault(path, []).append(change['pr'])
         edges, missing, dependencies, per_member = set(), [], set(), []
         for change in changed:
             member_dependencies = set()

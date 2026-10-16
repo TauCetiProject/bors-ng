@@ -388,7 +388,8 @@ class LocalGitTest(unittest.TestCase):
         self.assertTrue(hints['complete'])
         self.assertTrue(hints['ownership_complete'])
         self.assertTrue(hints['dependencies_complete'])
-        self.assertEqual(mirror.calls[:4], ['cat-file', 'diff-tree', 'ls-tree', 'cat-file'])
+        self.assertEqual(mirror.calls[:58], ['cat-file'] + ['merge-base'] * 54 +
+                         ['diff-tree', 'ls-tree', 'cat-file'])
         self.assertLess(hints['elapsed_ms'], 15000)
         self.assertEqual(hints['provenance'], self.request['identity'] | dict(
             commit=result['result']['commit'], tree=result['result']['tree'],
@@ -448,14 +449,33 @@ class LocalGitTest(unittest.TestCase):
         self.assertFalse(hints['ownership_complete'])
         self.assertNotIn('changed_files', hints)
 
-    def test_ownership_framing_accepts_sha_named_paths_and_noop_stacked_touches(self):
+    def test_ownership_framing_accepts_sha_named_paths_and_preserves_stacked_edits(self):
         one = self.commit(self.base, {self.base: 'sha filename', 'TauCeti/Shared.lean': 'def x := 1\n'})
         two = self.commit(one, {'TauCeti/Second.lean': 'def y := 2\n'})
         self.request['members'] = [self.member(1, one), self.member(2, two)]
         hints = self.run_mirror()['diagnostic_hints']
         self.assertTrue(hints['ownership_complete'])
         self.assertIn(self.base, hints['changed_files'][0]['paths'])
-        self.assertEqual(hints['changed_files'][1]['paths'], ['TauCeti/Second.lean'])
+        self.assertEqual(hints['changed_files'][1]['paths'], [self.base, 'TauCeti/Second.lean', 'TauCeti/Shared.lean'])
+
+    def test_identical_edits_in_independent_heads_keep_both_potential_owners(self):
+        one = self.commit(self.base, {'TauCeti/Shared.lean': 'def x := 1\n', 'one': '1'})
+        two = self.commit(self.base, {'TauCeti/Shared.lean': 'def x := 1\n', 'two': '2'})
+        self.request['members'] = [self.member(1, one), self.member(2, two)]
+        hints = self.run_mirror()['diagnostic_hints']
+        self.assertTrue(hints['complete'])
+        self.assertEqual([c['pr'] for c in hints['changed_files'] if 'TauCeti/Shared.lean' in c['paths']], [1, 2])
+
+    def test_conflict_exact_head_import_coverage_remains_complete(self):
+        one = self.commit(self.base, {'file': 'ONE\n'})
+        two = self.commit(self.base, {'file': 'TWO\n'})
+        self.request['members'] = [self.member(1, one), self.member(2, two)]
+        result = self.run_mirror()
+        self.assertEqual(result['status'], 'conflict')
+        hints = result['details']['hints']
+        self.assertTrue(hints['ownership_complete'])
+        self.assertTrue(hints['dependencies_complete'])
+        self.assertTrue(hints['complete'])
 
     def test_provider_removed_by_base_is_checked_at_assembled_tree(self):
         old_base = self.commit(self.base, {'TauCeti/Provider.lean': 'def x := 1\n'})

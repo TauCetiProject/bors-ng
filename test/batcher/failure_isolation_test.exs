@@ -215,6 +215,7 @@ defmodule BorsNG.Worker.FailureIsolationTest do
     # Every possible owner of a shared path stays in the retry; unknown imports
     # cannot create additional ownership or preflight missing-source verdicts.
     hints = put_in(hints, ["changed_files", Access.at(1), "paths"], ["TauCeti/File3.lean"])
+    assert :fallback = FailureIsolation.partition(c.links, hints, nil)
     assert {:ok, [2, 3]} = FailureDiagnostics.map_paths(hints, log_result(["TauCeti/File3.lean"]))
 
     assert {:ok, groups, "compiler_diagnostics"} =
@@ -224,7 +225,13 @@ defmodule BorsNG.Worker.FailureIsolationTest do
   end
 
   test "ownership provenance rejects another base tree commit order or exact head", c do
-    hints = ownership_hints(c)
+    hints =
+      ownership_hints(c)
+      |> Map.merge(%{
+        "complete" => true,
+        "dependencies_complete" => true,
+        "missing_imports" => [%{"pr" => 3}]
+      })
 
     for broken <- [
           put_in(hints, ["provenance", "base_sha"], "other"),
@@ -240,7 +247,7 @@ defmodule BorsNG.Worker.FailureIsolationTest do
       })
 
       assert FailureIsolation.hints(c.candidate) == nil
-      # Incomplete optional data can never skip authoritative CI.
+      # All other evidence is complete: provenance alone must block preflight.
       assert :dispatch =
                FailureIsolation.preflight(c.links, c.batch, %{
                  commit: "staged",
@@ -248,6 +255,22 @@ defmodule BorsNG.Worker.FailureIsolationTest do
                  evidence: %{"diagnostic_hints" => broken}
                })
     end
+  end
+
+  test "complete new ownership provenance permits an exact missing-import retry", c do
+    hints =
+      ownership_hints(c)
+      |> Map.merge(%{
+        "complete" => true,
+        "dependencies_complete" => true,
+        "missing_imports" => [%{"pr" => 3}]
+      })
+
+    result = %{commit: "staged", tree: "tree", evidence: %{"diagnostic_hints" => hints}}
+    CandidateJournal.event(c.candidate, "local_assembled", "bors.local_git", result)
+    assert :partitioned = FailureIsolation.preflight(c.links, c.batch, result)
+    children = Repo.all(from(b in Batch, where: b.id != ^c.batch.id, order_by: b.id))
+    assert prs(Enum.map(children, &stored_links(&1.id))) == [[3], [1, 2, 4]]
   end
 
   test "terminal diagnostics split exact membership with approvals and survive restart", c do

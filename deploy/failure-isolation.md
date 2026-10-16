@@ -29,19 +29,21 @@ A failed offline build includes the required audits; the classification does not
 claim that a particular theorem or proof is wrong.
 
 The trusted local Git helper reads immutable source blobs as data. It records
-per-member assembly changed paths, simple local import edges, missing provider paths and
+per-head changed paths, simple local import edges, missing provider paths and
 direct dependency paths. It never executes a candidate parser. Its deliberately
 limited header reader accepts ordinary imports, module headers and nested comments;
 unusual syntax, resource limits or read errors produce unknown diagnostics. The
 workflow-pinned Lean preflight remains the source validity authority. For
 successful construction, header/provider reads use the exact assembled tree,
 so a provider supplied by another member is present and one removed by the base
-is absent. Successful assembly reuses the exact ordered squash chain: one batched
-commit read verifies each parent/tree, then one batched tree diff collects actual
-member touches. Shared changed paths retain all touching members; an inherited
-stacked change with no additional touch is attributed only to the earlier member.
-Conflicting construction has no assembled chain and retains bounded comparisons
-of exact member heads; optional dependency information remains unknown.
+is absent. Successful assembly reuses the exact ordered squash chain to validate
+each parent/tree with one batched commit read. Ownership compares each immutable
+head with its fork point against the frozen base, retaining inherited stacked and
+identical edits that reappear when heads are retried separately. Git lacks a
+pairwise merge-base batch interface, so ancestry still uses one bounded query per
+member; all head tree diffs run in one process. Conflicting construction has no
+assembled chain and reads optional imports at exact member heads under the same
+total limits, preserving conflict quarantine/reconsideration behavior.
 These are interaction hints, not failure verdicts.
 
 Diagnostics get at most 15 seconds within the existing assembly deadline, 256
@@ -60,6 +62,10 @@ Their hints must match the journal's exact candidate/generation/base/digest,
 commit/tree and ordered heads. Unknown locations, ownership or log collection keep
 the existing fallback. Old complete journals remain readable; old incomplete
 journals are never upgraded by inference.
+Paths outside the supported ASCII path subset, including non-source paths with
+spaces, conservatively make ownership unknown. Shadow-mode local objects cannot
+guide terminal compiler isolation when the authoritative GitHub commit differs;
+only hints matching the actual constructed commit/tree are consumed.
 
 Retry selection uses atomic bundle units, immutable head identity, import provider
 relationships and shared changed paths. Missing-import components are tested apart
@@ -116,8 +122,8 @@ producer trust change.
 Candidate 213 / batch 790 / generation 10 is a 54-member diagnostic replay of
 [run 38824781960](https://github.com/TauCetiProject/TauCeti/actions/runs/38824781960).
 The original helper timed out and used deterministic bisection. With the exact
-recorded assembly chain on a local warm Git repository, ownership took 15 ms and
-all hints took 426 ms. The one located primary compiler error maps to PR #16883;
+recorded assembly chain and heads on a local warm Git repository, ownership took
+141 ms and all hints took 547 ms. The one located primary compiler error maps to PR #16883;
 the known direct-import component keeps #16897 with it, yielding groups of 2 and
 52. All 54 original snapshots are preserved. Bad-import/cancellation cascade lines
 do not establish additional missing-source findings. With optional dependencies

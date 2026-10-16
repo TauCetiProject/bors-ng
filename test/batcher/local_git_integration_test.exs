@@ -105,6 +105,7 @@ defmodule BorsNG.Worker.LocalGitIntegrationTest do
         hints={}
         if os.environ.get('BORS_TEST_MISSING_IMPORT'):
             hints=dict(complete=True,changed_files=[dict(pr=m['pr'],head_sha=m['head_sha'],paths=['TauCeti/File'+str(m['pr'])+'.lean']) for m in request['members']],import_edges=[],missing_imports=[dict(pr=1,path='TauCeti/File1.lean',provider_path='TauCeti/Absent.lean')])
+            hints.update(ownership_complete=True,dependencies_complete=True,provenance=request['identity'] | dict(commit='#{@commit}',tree='#{@tree}',members=[dict(pr=m['pr'],head_sha=m['head_sha']) for m in request['members']]))
         print(json.dumps(dict(status='ok',result=request['identity'] | dict(commit='#{@commit}',tree='#{@tree}'),diagnostic_hints=hints,commits=request['members'],git_version='test',mirror_bytes=1)))
     else:
         print(json.dumps(dict(status='ok')))
