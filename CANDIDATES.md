@@ -19,6 +19,10 @@ Speculation remains disabled; recording a predecessor does not enable it.
    partial construction, allocates another generation; never rewrite an old
    generation. Snapshots retain the ordered member/approval/head inputs even
    after withdrawal, changed heads or deletion of queue links and batches.
+   A same-head manual takeover freezes the queued link's current manual approval
+   in the new generation; the admission's original approval remains historical
+   evidence. All other admitted identity, age, scheduling and lineage fields are
+   preserved. The member digest covers this newly frozen approval.
 3. An optional speculative predecessor must be a recorded candidate in the same
    project and target branch whose bound commit equals the exact assembly base.
    Assemblers must independently enforce scheduling limits and eligibility.
@@ -36,6 +40,16 @@ Speculation remains disabled; recording a predecessor does not enable it.
    effective policy snapshot, rather than that mutable ref, is the durable fact.
    An absent/failed toolchain read is explicitly unknown. Digests establish byte
    identity only, never proof correctness or producer trust.
+   A post-construction approval or membership change raises
+   `CandidateAssembler.Rejected`. The scheduler records `construction_rejected`
+   and retries only the latest still-waiting generation after at least sixty
+   seconds, preserving longer recovery/promotion holds. Invalid head, reviewer
+   or revoked approval queues a separate serialized reconciliation step using
+   ordinary whole-bundle withdrawal. No database locks span that handler's
+   GitHub I/O. Reconciliation rechecks the generation and exact observed member,
+   approval and intent token; a newer grant/intent/generation supersedes it.
+   Ambiguous active parent/child overlaps defer until their normal transition
+   settles. An older result cannot reset statuses or overwrite newer state.
 5. Append sourced lifecycle events. Record dispatch request before workflow
    dispatch and its acknowledgement afterwards. Staging push acknowledgement is
    recorded separately by source when push-triggered CI is used. Promotion is
@@ -55,9 +69,10 @@ processing and queue state are unchanged.
 All `observed_at` and `original_admitted_at` values are Unix microseconds from
 bors's clock. They are receipt/write times with named sources, not inferred
 GitHub or runner event times. Construction starts after base discovery and stops
-or binds after the corresponding API response. The legacy synthesis operation
-creates and pushes together, so `constructed` and push acknowledgement describe
-receipt of that combined operation. If a process dies after an external write
+or binds after the corresponding API response. Staging construction creates an
+unpublished commit object, binds it, then publishes the staging ref; serial local
+Git also binds before its leased publication. Historical legacy synthesis facts
+describe receipt of a combined create/push operation. If a process dies after an external write
 but before journaling, that fact stays unknown; the next attempt gets a new ID.
 
 Status observations bind to the latest generation only when its bound commit

@@ -1578,7 +1578,11 @@ defmodule BorsNG.Worker.FailureIsolationTest do
         refute Repo.exists?(from(e in CandidateEvent, where: e.kind == "provisional_repair"))
         assert Repo.aggregate(BorsNG.Database.OrchestrationJob, :count, :id) == 0
         children = Repo.all(from(b in Batch, where: b.id != ^batch.id, order_by: b.id))
-        assert prs(Enum.map(children, &stored_links(&1.id))) == [[3], [1, 2, 4]]
+        # The manual fixture changes only Patch, leaving its queued approval
+        # unchanged. That now invalidates candidate membership, so historical
+        # diagnostics also fail closed to ordinary deterministic bisection.
+        expected = if @collision_guard == :manual, do: [[2, 3], [1, 4]], else: [[3], [1, 2, 4]]
+        assert prs(Enum.map(children, &stored_links(&1.id))) == expected
         assert Enum.all?(Repo.all(Patch), & &1.queue_pending)
       end
     end

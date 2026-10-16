@@ -650,7 +650,9 @@ defmodule BorsNG.GitHub.ServerMock do
           head -> head
         end
 
-      nsha = base <> head
+      # Fixtures using real-width SHAs can supply a fixed assembled tree;
+      # the default concatenation keeps small symbolic Git graphs readable.
+      nsha = state[:merge_tree] || base <> head
       branches = %{branches | to => nsha}
       repo = %{repo | branches: branches}
       state = %{state | repo_conn => repo}

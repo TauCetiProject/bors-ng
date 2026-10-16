@@ -42,29 +42,49 @@ defmodule BorsNG.Worker.ManualApproval do
            pr.head_sha == head and pr.state == :open and not pr.draft and pr.base_ref == "main",
          {:ok, base} <- GitHub.get_pr_merge_base(conn, patch.pr_xref, head),
          true <- sha?(head) and sha?(base) do
-      patch =
-        patch
-        |> Patch.changeset(%{
-          manual_approval: %{
-            "actor_id" => actor,
-            "head_sha" => head,
-            "merge_base_sha" => base
-          },
-          merge_eligibility: nil
-        })
-        |> Repo.update!()
+      {:ok, patch} =
+        Repo.transaction(fn ->
+          # Snapshot existing active memberships without locking batches. A
+          # later membership/state transition is conservatively reconciled by
+          # candidate validation; historical admissions/candidates stay intact.
+          # Updating links directly also avoids MySQL UPDATE JOIN batch locks.
+          active_ids =
+            Repo.all(
+              from(l in LinkPatchBatch,
+                join: b in Batch,
+                on: b.id == l.batch_id,
+                where:
+                  l.patch_id == ^patch.id and l.head_sha == ^head and
+                    b.state in ^[:waiting, :running],
+                select: b.id
+              )
+            )
 
-      # A human may take ownership of an already queued automatic approval.
-      # Bind its existing memberships to the same human decision for the final gate.
-      Repo.update_all(
-        from(l in LinkPatchBatch,
-          join: b in Batch,
-          on: b.id == l.batch_id,
-          where:
-            l.patch_id == ^patch.id and l.head_sha == ^head and b.state in ^[:waiting, :running]
-        ),
-        set: [manual_approval: patch.manual_approval]
-      )
+          patch =
+            patch
+            |> Patch.changeset(%{
+              manual_approval: %{
+                "actor_id" => actor,
+                "head_sha" => head,
+                "merge_base_sha" => base
+              },
+              merge_eligibility: nil
+            })
+            |> Repo.update!()
+
+          # Publish the patch and its queued memberships atomically. A reader
+          # must not mistake a partially persisted takeover for revocation.
+          Repo.update_all(
+            from(l in LinkPatchBatch,
+              where:
+                l.patch_id == ^patch.id and l.head_sha == ^head and
+                  l.batch_id in ^active_ids
+            ),
+            set: [manual_approval: patch.manual_approval]
+          )
+
+          patch
+        end)
 
       {:ok, patch}
     else
