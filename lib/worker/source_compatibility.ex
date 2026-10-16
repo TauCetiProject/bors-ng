@@ -265,6 +265,9 @@ defmodule BorsNG.Worker.SourceCompatibility do
          {:ok, labels} <- GitHub.get_labels(conn, patch.pr_xref),
          true <- MapSet.disjoint?(MapSet.new(labels, &String.downcase/1), MapSet.new(@keep)) do
       Repo.transaction(fn ->
+        # Match handoff/Divider's parent-before-patch lock order.
+        parent_id = patch.source_compatibility["provisional"]["batch_id"]
+        Repo.one!(from(b in Batch, where: b.id == ^parent_id, lock: "FOR UPDATE"))
         current = Repo.one!(from(p in Patch, where: p.id == ^patch.id, lock: "FOR UPDATE"))
 
         unless current.commit == head and current.queue_approval == patch.queue_approval and
@@ -659,8 +662,10 @@ defmodule BorsNG.Worker.SourceCompatibility do
              parent = Repo.one!(from(b in Batch, where: b.id == ^batch.id, lock: "FOR UPDATE"))
              current = Repo.one!(from(p in Patch, where: p.id == ^patch.id, lock: "FOR UPDATE"))
 
-             if current.commit != suspect.head_sha or parent.state != :running,
-               do: Repo.rollback(:stale_provisional_binding)
+             if current.commit != suspect.head_sha or parent.state != :running or
+                  parent.commit != batch.commit or parent.base_sha != batch.base_sha or
+                  BorsNG.Worker.CandidateJournal.current(parent) != candidate,
+                do: Repo.rollback(:stale_provisional_binding)
 
              # Retire parent together with every remainder admission. A crash
              # cannot resurrect its suspect alongside already-committed children.

@@ -1039,6 +1039,27 @@ defmodule BorsNG.Worker.FailureIsolationTest do
                candidate.id
     end
 
+    test "parent moving after live reads rolls back all provisional children and notice", c do
+      {batch, conn} = provisional_candidate(c)
+      Repo.get!(Batch, batch.id) |> Batch.changeset(%{commit: "replacement"}) |> Repo.update!()
+      suspect = Enum.at(c.links, 2)
+      remainder = [Enum.reject(c.links, &(&1.id == suspect.id))]
+
+      assert :unavailable =
+               BorsNG.Worker.SourceCompatibility.provisional_failure(
+                 batch,
+                 c.links,
+                 suspect,
+                 remainder,
+                 ownership_hints(c),
+                 conn
+               )
+
+      assert Repo.aggregate(Batch, :count, :id) == 1
+      assert Repo.aggregate(BorsNG.Database.OrchestrationJob, :count, :id) == 0
+      assert Repo.get!(Patch, suspect.patch_id).queue_approval["state"] == "approved"
+    end
+
     for variant <- [
           :multiple,
           :unowned,
