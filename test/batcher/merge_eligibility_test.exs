@@ -799,6 +799,38 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
              ManualApproval.grant(@conn, p, patch, actor, @head)
   end
 
+  test "human approval added to an unchanged queued head preserves admission age", %{project: p} do
+    alias BorsNG.Worker.CandidateJournal
+    alias BorsNG.Worker.Batcher.QueueAge
+    MergeEligibility.reconcile(p, 1)
+    patch = Repo.get_by!(Patch, project_id: p.id, pr_xref: 1)
+    batch = Repo.one!(Batch.all_for_project(p.id, :incomplete))
+    link = Repo.one!(LinkPatchBatch.from_batch(batch.id))
+    original = CandidateJournal.admission(link.id)
+
+    before =
+      QueueAge.keys(
+        [batch],
+        CandidateJournal.queue_age_members([batch]),
+        System.system_time(:microsecond)
+      )
+
+    assert elem(before[batch.id], 1) == :original_admission
+    assert link.manual_approval == nil
+    assert {:ok, approved} = ManualApproval.grant(@conn, p, patch, 1001, @head)
+    assert Repo.get!(LinkPatchBatch, link.id).manual_approval == approved.manual_approval
+    assert CandidateJournal.admission(link.id) == original
+
+    after_keys =
+      QueueAge.keys(
+        [batch],
+        CandidateJournal.queue_age_members([batch]),
+        System.system_time(:microsecond)
+      )
+
+    assert before == after_keys
+  end
+
   test "missing role observations defer approval and preflight", %{project: p} do
     patch = manual_review(p)
     # The mock's missing field mirrors an unavailable authenticated GitHub read.

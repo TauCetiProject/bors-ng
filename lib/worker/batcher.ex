@@ -33,7 +33,6 @@ defmodule BorsNG.Worker.Batcher do
   alias BorsNG.Worker.Zulip
   alias BorsNG.Database.Repo
   alias BorsNG.Database.Batch
-  alias BorsNG.Database.BatchState
   alias BorsNG.Database.Patch
   alias BorsNG.Database.Project
   alias BorsNG.Database.Status
@@ -1475,16 +1474,24 @@ defmodule BorsNG.Worker.Batcher do
     "#{root}/#{project.name}/compare/#{parent.commit}...#{child.commit}"
   end
 
-  def sort_batches(batches) do
+  @doc """
+  Sort incomplete work. Serial running polls order running batches only by the
+  operational key; their waiting tail is unused. `:successor` explicitly orders
+  that tail by admission age with the pass's single metadata read.
+  """
+  def sort_batches(batches, purpose \\ :serial) do
+    # A serial pass with running work cannot select waiting work. Defer its one
+    # metadata read to successor selection, if train eligibility permits it.
+    members =
+      if purpose == :successor or not Enum.any?(batches, &(&1.state == :running)),
+        do: CandidateJournal.queue_age_members(batches),
+        else: []
+
+    ages =
+      BorsNG.Worker.Batcher.QueueAge.keys(batches, members, System.system_time(:microsecond))
+
     sorted_batches =
-      Enum.sort_by(
-        batches,
-        &{
-          -BatchState.numberize(&1.state),
-          -&1.priority,
-          &1.last_polled
-        }
-      )
+      Enum.sort_by(batches, &BorsNG.Worker.Batcher.QueueAge.order_key(&1, ages))
 
     new_batches = Enum.dedup_by(sorted_batches, & &1.id)
 
@@ -1499,10 +1506,14 @@ defmodule BorsNG.Worker.Batcher do
     {state, new_batches}
   end
 
+  defp waiting_eligible?(batch, now) do
+    BorsNG.Worker.Batcher.QueueAge.eligible?(batch, now, Batch.next_poll_is_past(batch, now))
+  end
+
   defp poll_batches({:waiting, batches}) do
     now = DateTime.to_unix(DateTime.utc_now())
 
-    case Enum.filter(batches, &(Batch.next_poll_is_past(&1) and (&1.recovery_after || 0) <= now)) do
+    case Enum.filter(batches, &waiting_eligible?(&1, now)) do
       [] -> :ok
       [batch | _] -> start_waiting_batch(batch)
     end
@@ -1528,13 +1539,12 @@ defmodule BorsNG.Worker.Batcher do
     conn = get_repo_conn(project)
 
     if parent = Train.predecessor(project, batches, conn) do
-      {_state, ordered} = sort_batches(batches)
+      {_state, ordered} = sort_batches(batches, :successor)
 
       waiting =
         Enum.find(
           ordered,
-          &(&1.state == :waiting and Batch.next_poll_is_past(%{&1 | project: project}) and
-              (&1.recovery_after || 0) <= DateTime.to_unix(DateTime.utc_now()))
+          &waiting_eligible?(%{&1 | project: project}, DateTime.to_unix(DateTime.utc_now()))
         )
 
       if waiting do

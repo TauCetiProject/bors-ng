@@ -42,6 +42,15 @@ defmodule BorsNG.Worker.CandidateJournal do
         "parent_batch_id" => if(source_link, do: source_link.batch_id),
         "parent_candidate_id" => if(parent, do: parent.id),
         "parent_admission_id" => if(original, do: original.id),
+        "queue_age_retries" =>
+          if(source_link,
+            do:
+              BorsNG.Worker.Batcher.QueueAge.next_retry(
+                if(original, do: original.snapshot),
+                retry_reason
+              ),
+            else: 0
+          ),
         "original_admitted_at" =>
           cond do
             original -> original.snapshot["original_admitted_at"]
@@ -68,6 +77,27 @@ defmodule BorsNG.Worker.CandidateJournal do
   end
 
   def admission(link_id), do: Repo.get_by(CandidateAdmission, link_id: link_id)
+
+  # One read bounded by current waiting membership, including missing admissions.
+  # No historical scan, per-member lookup, JSON SQL or GitHub calls.
+  def queue_age_members(batches) do
+    ids = for b <- batches, b.state == :waiting, do: b.id
+
+    if ids == [] do
+      []
+    else
+      Repo.all(
+        from(l in BorsNG.Database.LinkPatchBatch,
+          join: p in Patch,
+          on: p.id == l.patch_id,
+          left_join: a in CandidateAdmission,
+          on: a.link_id == l.id,
+          where: l.batch_id in ^ids,
+          select: {l, p.commit, a}
+        )
+      )
+    end
+  end
 
   def latest(batch_id) do
     Repo.one(
