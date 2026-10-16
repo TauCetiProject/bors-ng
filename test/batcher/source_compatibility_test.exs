@@ -560,8 +560,8 @@ defmodule BorsNG.Worker.SourceCompatibilityTest do
     assert SourceCompatibility.requested?(Repo.get!(Patch, patch.id), @head)
   end
 
-  test "durable cursor rotates across main advances and stale work cannot publish", c do
-    for n <- 3..6 do
+  test "a background turn drains at most four heads with one helper request", c do
+    for n <- 3..10 do
       Repo.insert!(%Patch{
         project_id: c.project.id,
         pr_xref: n,
@@ -574,7 +574,73 @@ defmodule BorsNG.Worker.SourceCompatibilityTest do
     update_mock(
       :pulls,
       Map.new(
-        1..6,
+        1..10,
+        &{&1, %GitHub.Pr{number: &1, state: :open, base_ref: "main", head_sha: @head}}
+      )
+    )
+
+    SourceCompatibility.chunk(c.project.id, fn _, _, base, members ->
+      assert base == @base
+      send(self(), {:request, Enum.map(members, & &1.pr)})
+      %{"status" => "error", "details" => %{"kind" => "timeout"}}
+    end)
+
+    assert_received {:request, [1, 2, 3, 4]}
+    refute_received {:request, _}
+
+    for n <- 1..4 do
+      patch = Repo.get_by!(Patch, project_id: c.project.id, pr_xref: n)
+      assert patch.source_compatibility["status"] == "unknown"
+      refute SourceCompatibility.requested?(patch, @head)
+    end
+
+    project = Repo.get!(Project, c.project.id)
+
+    assert project.source_compatibility["cursor"] ==
+             Repo.get_by!(Patch, project_id: c.project.id, pr_xref: 4).id
+
+    project
+    |> Ecto.Changeset.change(
+      source_compatibility: Map.put(project.source_compatibility, "checked_at", 0)
+    )
+    |> Repo.update!()
+
+    SourceCompatibility.chunk(c.project.id, fn _, _, _, members ->
+      send(self(), {:request, Enum.map(members, & &1.pr)})
+      %{"status" => "ok", "results" => Enum.map(members, &result(&1.pr, "pass"))}
+    end)
+
+    assert_received {:request, [5, 6, 7, 8]}
+    refute_received {:request, _}
+
+    assert Repo.get!(Project, c.project.id).source_compatibility["cursor"] ==
+             Repo.get_by!(Patch, project_id: c.project.id, pr_xref: 8).id
+
+    for n <- 9..10,
+        do:
+          assert(
+            Repo.get_by!(Patch, project_id: c.project.id, pr_xref: n).source_compatibility == nil
+          )
+
+    assert Repo.aggregate(OrchestrationJob |> where([j], j.kind == "notice"), :count, :id) == 0
+    assert Repo.aggregate(Status, :count, :id) == 0
+  end
+
+  test "durable cursor rotates across main advances and stale work cannot publish", c do
+    for n <- 3..12 do
+      Repo.insert!(%Patch{
+        project_id: c.project.id,
+        pr_xref: n,
+        commit: @head,
+        into_branch: "main",
+        queue_pending: true
+      })
+    end
+
+    update_mock(
+      :pulls,
+      Map.new(
+        1..12,
         &{&1, %GitHub.Pr{number: &1, state: :open, base_ref: "main", head_sha: @head}}
       )
     )
@@ -589,16 +655,16 @@ defmodule BorsNG.Worker.SourceCompatibilityTest do
     end
 
     SourceCompatibility.chunk(c.project.id, checker)
-    assert_receive {:checked, [1]}
+    assert_receive {:checked, [1, 2, 3, 4]}
     cursor = Repo.get!(Project, c.project.id).source_compatibility["cursor"]
-    assert cursor == Repo.get_by!(Patch, project_id: c.project.id, pr_xref: 1).id
+    assert cursor == Repo.get_by!(Patch, project_id: c.project.id, pr_xref: 4).id
     new_main = String.duplicate("c", 40)
     update_mock(:branches, %{"main" => new_main})
     SourceCompatibility.wake(c.project, new_main)
     SourceCompatibility.chunk(c.project.id, checker)
-    assert_receive {:checked, [2]}
+    assert_receive {:checked, [5, 6, 7, 8]}
 
-    assert Repo.get_by!(Patch, project_id: c.project.id, pr_xref: 2).source_compatibility[
+    assert Repo.get_by!(Patch, project_id: c.project.id, pr_xref: 8).source_compatibility[
              "base_sha"
            ] == new_main
 
@@ -619,7 +685,7 @@ defmodule BorsNG.Worker.SourceCompatibilityTest do
     SourceCompatibility.chunk(c.project.id, checker)
     assert Repo.aggregate(OrchestrationJob |> where([j], j.kind == "notice"), :count, :id) == 0
 
-    assert Repo.get_by!(Patch, project_id: c.project.id, pr_xref: 3).source_compatibility == nil
+    assert Repo.get_by!(Patch, project_id: c.project.id, pr_xref: 9).source_compatibility == nil
 
     assert Repo.get!(Project, c.project.id).source_compatibility["cursor"] != cursor
   end

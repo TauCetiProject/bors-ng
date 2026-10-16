@@ -54,9 +54,13 @@ and writes no remote refs.
 
 Successful promotion wakes one deduplicated existing project Outbox operation.
 The existing heartbeat recovers missed/out-of-band main advances (five-minute
-main reconciliation; bounded backlog chunks progress approximately once/minute).
-One queued/ready head per turn uses a durable rotating project cursor, inspecting
-at most 16 lightweight metadata rows before yielding. Stored identities are
+main reconciliation; the nominal heartbeat is 120 seconds and lane contention
+can delay a background turn). Up to four queued/ready heads share one helper
+operation and its unchanged 8-second budget per turn, using a durable rotating
+project cursor and inspecting at most 16 lightweight metadata rows before yielding.
+Cold bootstrap retains its existing one-time 30-second allowance. Live GitHub
+result guards add overhead per selected head; this is not an 8-second total-turn
+limit or a claim of measured fourfold production throughput. Stored identities are
 compared as decoded values, avoiding JSON string quoting/collation differences
 between PostgreSQL and MySQL 8.4. Repeated
 notifications coalesce; latest actual main is read by the executor. Main moving
@@ -168,8 +172,21 @@ fixed limits and other undemonstrated coverage remain cached for identical input
 Passing results and actionable repair requests do not change merely because Git
 work completed. The hint is never a compatibility pass or individual blame.
 
-This uses the same fair cursor, one-head background chunk and bounded selected
-admission. It adds no wakeup, per-PR queue, polling loop, build or branch mutation.
+This uses the same fair cursor, bounded four-head background operation and
+bounded selected admission. It adds no wakeup, per-PR queue, polling loop, build or branch mutation.
 All retries still use live main/head guards and authoritative CI remains required.
 Older transient records without a saved event ID may take one bounded attempt
 against the latest existing hint, then retain that consumed ID across restart.
+
+The [bounded-drain measurements](source-drain-evidence.json) distinguish the
+waiting queue from all open PR metadata. At the frozen observation, 49 of 211
+approved waiting heads had a current local-source pass; 52 were unknown and 110
+had no current result. Admission supplied at least 44 new pass writes in an
+earlier ten-minute warm interval, so background cadence alone is not total
+throughput. A natural same-main/head/policy comparison recovered one pass and
+retained two timeout unknowns; 81 unchanged records were not counted as retries.
+An identical warm local four-head replay passed in 2.214 seconds in one helper
+call under the existing 8-second budget, versus 3.702 seconds for four separate
+calls. The local 25% CPU quota is an assumption, not a production measurement.
+Checking four heads per background operation amortizes that cadence without
+adding source operations, extending deadlines or waiting for a global sweep.

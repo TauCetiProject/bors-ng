@@ -1,0 +1,198 @@
+{
+  "read_only_production_observation": {
+    "observed_at": "2026-10-16T00:34:54.904984+00:00",
+    "main": "85ed0984159b8de1ed8c11541105bb1d89c787e4",
+    "policy": "local-source-v3",
+    "denominator": "distinct open nondraft unbundled main PRs with active waiting/running links matching the current Bors head and approved same-head queue approval; not a new live GitHub eligibility refresh",
+    "waiting": {
+      "heads": 211,
+      "current_pass": 49,
+      "current_unknown": 52,
+      "old_main": 68,
+      "old_policy": 31,
+      "old_head": 1,
+      "none": 10,
+      "current_eligible_metadata": 208,
+      "manual_approval_without_eligibility_record": 3
+    },
+    "running": {
+      "heads": 48,
+      "current_pass": 2,
+      "current_unknown": 30,
+      "none": 16
+    },
+    "repair_requests": 0
+  },
+  "same_identity_natural_retries": {
+    "baseline_at": "2026-10-16T00:27:53.806098+00:00",
+    "observed_at": "2026-10-16T00:34:54.904984+00:00",
+    "unchanged_other_unknown_records": 81,
+    "recoveries": 1,
+    "still_unknown": 2,
+    "warm_event": {
+      "id": 2912,
+      "kind": "staging_pushed",
+      "candidate": 216,
+      "batch": 825
+    },
+    "samples": [
+      {
+        "pr": 16974,
+        "head_sha": "9245617b54b007dbbb5b89ea8094fbd8e7d50c26",
+        "base_sha": "85ed0984159b8de1ed8c11541105bb1d89c787e4",
+        "policy": "local-source-v3",
+        "before": {
+          "pr": 16974,
+          "phase": "fetch",
+          "policy": "local-source-v3",
+          "reason": "source_helper_timeout",
+          "status": "unknown",
+          "base_sha": "85ed0984159b8de1ed8c11541105bb1d89c787e4",
+          "head_sha": "9245617b54b007dbbb5b89ea8094fbd8e7d50c26",
+          "operation": "fetch",
+          "source_retry_epoch": 2888
+        },
+        "after": {
+          "pr": 16974,
+          "phase": "merge_tree",
+          "policy": "local-source-v3",
+          "reason": "timeout",
+          "status": "unknown",
+          "base_sha": "85ed0984159b8de1ed8c11541105bb1d89c787e4",
+          "head_sha": "9245617b54b007dbbb5b89ea8094fbd8e7d50c26",
+          "operation": "merge-tree",
+          "source_retry_epoch": 2912,
+          "base_headers_reason": "timeout",
+          "base_headers_operation": "cat-file"
+        }
+      },
+      {
+        "pr": 16976,
+        "head_sha": "a1fbfe09845075a0261ecadd28d7eef47e1ab804",
+        "base_sha": "85ed0984159b8de1ed8c11541105bb1d89c787e4",
+        "policy": "local-source-v3",
+        "before": {
+          "pr": 16976,
+          "phase": "fetch",
+          "policy": "local-source-v3",
+          "reason": "source_helper_timeout",
+          "status": "unknown",
+          "base_sha": "85ed0984159b8de1ed8c11541105bb1d89c787e4",
+          "head_sha": "a1fbfe09845075a0261ecadd28d7eef47e1ab804",
+          "operation": "fetch",
+          "source_retry_epoch": 2888
+        },
+        "after": {
+          "pr": 16976,
+          "phase": "merge_tree",
+          "policy": "local-source-v3",
+          "reason": "timeout",
+          "status": "unknown",
+          "base_sha": "85ed0984159b8de1ed8c11541105bb1d89c787e4",
+          "head_sha": "a1fbfe09845075a0261ecadd28d7eef47e1ab804",
+          "operation": "merge-tree",
+          "source_retry_epoch": 2912,
+          "base_headers_reason": "timeout",
+          "base_headers_operation": "cat-file"
+        }
+      },
+      {
+        "pr": 16977,
+        "head_sha": "291feddec078c7c4615fd1c086f4843359139e78",
+        "base_sha": "85ed0984159b8de1ed8c11541105bb1d89c787e4",
+        "policy": "local-source-v3",
+        "before": {
+          "pr": 16977,
+          "phase": "fetch",
+          "policy": "local-source-v3",
+          "reason": "source_helper_timeout",
+          "status": "unknown",
+          "base_sha": "85ed0984159b8de1ed8c11541105bb1d89c787e4",
+          "head_sha": "291feddec078c7c4615fd1c086f4843359139e78",
+          "operation": "fetch",
+          "source_retry_epoch": 2888
+        },
+        "after": {
+          "pr": 16977,
+          "tree": "07f73b97f33d5585613cb66def37ffafbbce0ffd",
+          "policy": "local-source-v3",
+          "status": "pass",
+          "base_sha": "85ed0984159b8de1ed8c11541105bb1d89c787e4",
+          "coverage": "all_project_local_headers",
+          "head_sha": "291feddec078c7c4615fd1c086f4843359139e78",
+          "missing_imports": []
+        }
+      }
+    ],
+    "unchanged_records_open": 80,
+    "unchanged_records_closed": 1,
+    "note": "The successful result does not retain source_retry_epoch. Its before/after identity, fair cursor and unchanged latest warm event2912 establish the natural retry context; no separate per-attempt history is claimed."
+  },
+  "measured_admission_contribution": {
+    "from": "2026-10-15T23:54:39.300282+00:00",
+    "to": "2026-10-16T00:04:35.789274+00:00",
+    "stored_passes_before": 1,
+    "stored_passes_after": 49,
+    "overlapping_background_attempts": 4,
+    "minimum_new_pass_writes_from_jit": 44,
+    "journal_pass_observations": {
+      "batch773": 21,
+      "batch816": 27
+    },
+    "journal_identity_overlap": 0,
+    "note": "JIT journals can include cached passes; lower bound comes from net growth minus the maximum one-pass-per-background-attempt contribution."
+  },
+  "recent_background_service": {
+    "observed_at": "2026-10-16T00:41:05.917697+00:00",
+    "post45_completed_jobs": 10,
+    "total_claim_to_completion_seconds": 102.477,
+    "median_claim_to_completion_seconds": 10.1545,
+    "median_start_gap_seconds": 120.011,
+    "note": "Service includes GitHub/startup/cleanup overhead, not pure helper CPU. Reclaimed job uses its final claim. Cadence is not measured total JIT+background throughput. No lock-timeout evidence observed."
+  },
+  "local_warm_replay": {
+    "inputs": {
+      "base_sha": "85ed0984159b8de1ed8c11541105bb1d89c787e4",
+      "members": [
+        {
+          "pr": 16974,
+          "head_sha": "9245617b54b007dbbb5b89ea8094fbd8e7d50c26"
+        },
+        {
+          "pr": 16976,
+          "head_sha": "a1fbfe09845075a0261ecadd28d7eef47e1ab804"
+        },
+        {
+          "pr": 16977,
+          "head_sha": "291feddec078c7c4615fd1c086f4843359139e78"
+        },
+        {
+          "pr": 16978,
+          "head_sha": "afd1ddbaae1e5b5a9d2d45d9705411497cdd9ee1"
+        }
+      ]
+    },
+    "cpu_limit": "CPUQuota=25%; local reproduction assumption, not measured production quota",
+    "source": "existing trusted helper, no candidate code executed",
+    "method": "identical copies of the warmed bare Git/header mirror, same heads/main/parser, each helper budget8s; serial calls and grouped call run sequentially",
+    "serial": {
+      "calls": 4,
+      "wall_seconds": 3.7022494769771583,
+      "per_call_seconds": [
+        1.0043177499901503,
+        0.8875520209840033,
+        0.9025020690169185,
+        0.9078776369860861
+      ],
+      "all_four_pass": true
+    },
+    "one_group": {
+      "calls": 1,
+      "heads": 4,
+      "budget_seconds": 8,
+      "wall_seconds": 2.2141898960107937,
+      "all_four_pass": true
+    },
+    "not_claimed": "No production fourfold throughput claim; live API guards add overhead per head; cold parsing can consume the shared deadline and leave explicit unknown results."
+  }
+}
