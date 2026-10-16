@@ -153,6 +153,283 @@ defmodule BorsNG.Worker.FailureIsolationTest do
     )
   end
 
+  defp provider_terminal(c) do
+    {batch, evidence} = terminal(c)
+    identity = BorsNG.Worker.CandidateAssembler.identity(c.candidate)
+
+    provenance =
+      Map.merge(identity, %{
+        commit: "staged",
+        tree: "tree",
+        members: Enum.map(c.candidate.snapshot["members"], &Map.take(&1, ["pr", "head_sha"]))
+      })
+
+    hints =
+      c.hints
+      |> Map.put("ownership_complete", true)
+      |> Map.put("provenance", provenance)
+      |> Jason.encode!()
+      |> Jason.decode!()
+
+    CandidateJournal.event(c.candidate, "local_assembled", "bors.local_git", %{
+      commit: "staged",
+      tree: "tree",
+      evidence: %{diagnostic_hints: hints}
+    })
+
+    {batch, evidence, hints}
+  end
+
+  defp provider_result(binding, paths, providers \\ ["TauCeti/File3.lean"]) do
+    %{
+      "complete" => true,
+      "binding" => binding,
+      "authority" => "retry_only",
+      "proof_authority" => false,
+      "files" =>
+        Enum.map(paths, fn path ->
+          %{
+            "path" => path,
+            "blob" => String.duplicate("a", 40),
+            "bytes" => 100,
+            "providers" =>
+              Enum.map(providers, &%{"path" => &1, "blob" => String.duplicate("b", 40)})
+          }
+        end)
+    }
+  end
+
+  test "exact candidate225 production replay narrows 1/21 and preserves every frozen snapshot" do
+    alias BorsNG.Worker.FailureDiagnostics
+    data = "test/fixtures/import-providers-candidate225.json" |> File.read!() |> Jason.decode!()
+    assert CandidateJournal.digest(data["members"]) == data["binding"]["members_digest"]
+    assert :unavailable = FailureDiagnostics.map_paths(data["hints"], data["logs"])
+
+    assert {:ok, [16713]} =
+             FailureDiagnostics.map_providers(
+               data["hints"],
+               data["logs"],
+               data["binding"],
+               data["provider_lookup"]
+             )
+
+    links =
+      Enum.map(data["members"], fn m ->
+        %LinkPatchBatch{
+          id: m["link_id"],
+          patch_id: m["patch_id"],
+          head_sha: m["head_sha"],
+          reviewer: m["reviewer"],
+          manual_approval: m["manual_approval"],
+          patch: %Patch{
+            pr_xref: m["pr"],
+            commit: m["head_sha"],
+            bundle_id: m["bundle_id"],
+            is_single: get_in(m, ["scheduling", "singleton"]) == true
+          }
+        }
+      end)
+
+    assert :fallback = FailureIsolation.partition(links, data["hints"], nil)
+
+    assert {:ok, groups, "import_provider_hint"} =
+             FailureIsolation.partition(
+               links,
+               Map.put(data["hints"], "provider_suspects", [16713]),
+               nil
+             )
+
+    assert Enum.map(groups, &length/1) == [1, 21]
+    assert prs(groups) |> hd() == [16713]
+    original = Map.new(data["members"], &{&1["link_id"], &1})
+
+    rebuilt =
+      groups |> List.flatten() |> Enum.map(&original[&1.id]) |> Enum.sort_by(& &1["link_id"])
+
+    assert rebuilt == Enum.sort_by(data["members"], & &1["link_id"])
+    assert length(rebuilt) == 22
+    assert data["recorded_baseline"]["id"] == 3121
+    assert data["recorded_baseline"]["details"]["strategy"] == "deterministic_bisection"
+    # The unchanged production divider bisects 22 atomic singleton units 11/11.
+    assert links |> BorsNG.Worker.Batcher.Divider.group_units() |> length() == 22
+  end
+
+  test "provider hint schedules sealed retries and never authorizes provisional repair", c do
+    alias BorsNG.Worker.FailureDiagnostics
+    {batch, evidence, hints} = provider_terminal(c)
+    result = log_result(["TauCeti/Downstream.lean"])
+    lookup = fn _, :conn, binding, paths -> provider_result(binding, paths) end
+    assert :ok = FailureDiagnostics.observe(batch, evidence, :conn, fn _, _ -> result end, lookup)
+    FailureIsolation.classified(batch, "candidate_failure", evidence)
+    assert :unavailable = FailureDiagnostics.diagnosis(c.candidate, hints)
+
+    assert {:ok, [3], "import_provider_hint"} =
+             FailureDiagnostics.retry_suspects(c.candidate, hints)
+
+    # Any attempt to call the provisional GitHub repair interface fails this test.
+    assert :retrying = FailureIsolation.split(c.links, batch, nil, :conn)
+    children = Repo.all(from(b in Batch, where: b.id != ^batch.id, order_by: b.id))
+    groups = Enum.map(children, &stored_links(&1.id))
+    assert prs(groups) == [[3], [1, 2, 4]]
+    assert Enum.all?(children, & &1.sealed)
+    original = Map.new(c.links, &{&1.patch_id, &1})
+
+    for link <- List.flatten(groups) do
+      before = original[link.patch_id]
+      assert link.head_sha == before.head_sha
+      assert link.reviewer == before.reviewer
+      assert link.manual_approval == before.manual_approval
+      admission = CandidateJournal.admission(link.id).snapshot
+      original_admission = CandidateJournal.admission(before.id)
+
+      assert admission["original_admitted_at"] ==
+               original_admission.snapshot["original_admitted_at"]
+
+      assert admission["parent_candidate_id"] == c.candidate.id
+      assert admission["parent_admission_id"] == original_admission.id
+      assert admission["retry_reason"] == "import_provider_hint"
+      assert link.patch.queue_pending
+      assert link.patch.queue_approval == before.patch.queue_approval
+      assert link.patch.source_compatibility == before.patch.source_compatibility
+    end
+
+    refute Repo.exists?(from(e in CandidateEvent, where: e.kind == "provisional_repair"))
+
+    assert :ok =
+             FailureDiagnostics.observe(
+               batch,
+               evidence,
+               :conn,
+               fn _, _ -> flunk("logs repeated") end,
+               fn _, _, _, _ -> flunk("lookup repeated") end
+             )
+
+    assert :retrying = FailureIsolation.split(c.links, batch, nil, :conn)
+    assert Repo.aggregate(Batch, :count, :id) == 3
+  end
+
+  test "provider mapping requires complete bounded paths and retains all changed providers", c do
+    alias BorsNG.Worker.FailureDiagnostics
+    logs = log_result(["TauCeti/Downstream.lean"])
+    bound = %{"run_id" => 100}
+
+    result =
+      provider_result(bound, ["TauCeti/Downstream.lean"], [
+        "TauCeti/File2.lean",
+        "TauCeti/File3.lean",
+        "TauCeti/Unrelated.lean"
+      ])
+
+    assert {:ok, [2, 3]} = FailureDiagnostics.map_providers(c.hints, logs, bound, result)
+    assert :unavailable = FailureDiagnostics.map_paths(c.hints, logs)
+
+    for bad <- [
+          Map.put(result, "complete", false),
+          Map.put(result, "binding", %{}),
+          Map.put(result, "files", []),
+          Map.put(result, "proof_authority", true),
+          put_in(result, ["files", Access.at(0), "blob"], "--option"),
+          put_in(result, ["files", Access.at(0), "bytes"], 262_145),
+          put_in(result, ["files", Access.at(0), "providers", Access.at(0), "path"], "../secret"),
+          provider_result(bound, ["TauCeti/Downstream.lean"], ["TauCeti/Unrelated.lean"])
+        ] do
+      assert :unavailable = FailureDiagnostics.map_providers(c.hints, logs, bound, bad)
+    end
+
+    for bad_logs <- [
+          log_result(["../secret"]),
+          log_result(["TauCeti/../secret.lean"]),
+          log_result(["TauCeti/A.lean\n"]),
+          log_result(["TauCeti/File3.lean"]),
+          log_result(["TauCeti/Downstream.lean", "TauCeti/File3.lean"]),
+          log_result(Enum.map(1..9, &"TauCeti/Downstream#{&1}.lean")),
+          log_result(["TauCeti/Downstream.lean"], "lake_failed_target"),
+          log_result([], "environment_linter")
+        ] do
+      assert :unavailable = FailureDiagnostics.provider_paths(c.hints, bad_logs)
+    end
+  end
+
+  test "provider planner widens components and bundles, preserves manual approvals and falls back",
+       c do
+    [a, b, d, e] = c.links
+    a = %{a | manual_approval: %{"reviewer" => "human"}, patch: %{a.patch | bundle_id: 7}}
+    b = %{b | patch: %{b.patch | bundle_id: 7}}
+    hints = c.hints |> Map.put("provider_suspects", [2]) |> Map.put("import_edges", [[2, 3]])
+
+    assert {:ok, groups, "import_provider_hint"} =
+             FailureIsolation.partition([a, b, d, e], hints, nil)
+
+    assert prs(groups) == [[1, 2, 3], [4]]
+    assert hd(hd(groups)).manual_approval == %{"reviewer" => "human"}
+
+    assert :fallback =
+             FailureIsolation.partition(
+               [a, b, d, e],
+               Map.put(hints, "import_edges", [[2, 3], [3, 4]]),
+               nil
+             )
+
+    assert FailureIsolation.partition(
+             c.links,
+             Map.put(hints, "provider_suspects", [1, 2, 3, 4]),
+             nil
+           ) ==
+             FailureIsolation.partition(c.links, Map.delete(hints, "provider_suspects"), nil)
+
+    assert :fallback =
+             FailureIsolation.partition(c.links, Map.put(hints, "ownership_complete", false), nil)
+  end
+
+  test "provider lookup rejects stale binding or ownership before reading and persists unavailable",
+       c do
+    alias BorsNG.Worker.FailureDiagnostics
+    {batch, evidence, hints} = provider_terminal(c)
+    logs = log_result(["TauCeti/Downstream.lean"])
+    reject = fn _, _, _, _ -> flunk("ineligible lookup read Git") end
+    bad_batch = %{batch | base_sha: "moved"}
+    bad_evidence = %{evidence | identity: "wrong"}
+    FailureDiagnostics.observe(batch, bad_evidence, :conn, fn _, _ -> logs end, reject)
+    moved = %{evidence | identity: "bors branch=main batch=#{batch.id} head=staged base=moved"}
+    FailureDiagnostics.observe(bad_batch, moved, :conn, fn _, _ -> logs end, reject)
+    FailureIsolation.classified(batch, "candidate_failure", evidence)
+    assert :unavailable = FailureDiagnostics.retry_suspects(c.candidate, hints)
+    # Unavailable is final for this run/attempt, even once optional coverage recovers.
+    FailureDiagnostics.observe(
+      batch,
+      evidence,
+      :conn,
+      fn _, _ -> flunk("logs repeated") end,
+      reject
+    )
+
+    for moved <- [
+          %{c.candidate | generation: 2},
+          %{c.candidate | snapshot: Map.put(c.candidate.snapshot, "base_sha", "other")}
+        ] do
+      assert :unavailable = FailureDiagnostics.retry_suspects(moved, hints)
+    end
+
+    for newer <- [%{evidence | run_id: 101}, %{evidence | run_attempt: 2}] do
+      FailureIsolation.classified(batch, "candidate_failure", newer)
+      assert :unavailable = FailureDiagnostics.retry_suspects(c.candidate, hints)
+    end
+  end
+
+  test "provider lookup does not read when a frozen member head has moved", c do
+    alias BorsNG.Worker.FailureDiagnostics
+    {batch, evidence, _} = provider_terminal(c)
+    hd(c.links).patch |> Patch.changeset(%{commit: "new-head"}) |> Repo.update!()
+
+    FailureDiagnostics.observe(
+      batch,
+      evidence,
+      :conn,
+      fn _, _ -> log_result(["TauCeti/Downstream.lean"]) end,
+      fn _, _, _, _ -> flunk("moved head read Git") end
+    )
+  end
+
   test "cascading target overflow preserves precise retry hints but not global unknowns", c do
     alias BorsNG.Worker.FailureDiagnostics
     {batch, evidence} = terminal(c)

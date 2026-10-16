@@ -131,8 +131,9 @@ defmodule BorsNG.Worker.FailureIsolation do
 
     hints =
       if is_map(hints) do
-        case BorsNG.Worker.FailureDiagnostics.suspects(candidate, hints) do
-          {:ok, prs} -> Map.put(hints, "compiler_suspects", prs)
+        case BorsNG.Worker.FailureDiagnostics.retry_suspects(candidate, hints) do
+          {:ok, prs, "compiler_diagnostics"} -> Map.put(hints, "compiler_suspects", prs)
+          {:ok, prs, "import_provider_hint"} -> Map.put(hints, "provider_suspects", prs)
           _ -> hints
         end
       end
@@ -257,7 +258,7 @@ defmodule BorsNG.Worker.FailureIsolation do
             if(dependencies_complete, do: hints["missing_imports"] || [], else: []),
             &owner[&1["pr"]]
           ) ++
-            Enum.map(hints["compiler_suspects"] || [], &owner[&1])
+            Enum.map(hints["compiler_suspects"] || hints["provider_suspects"] || [], &owner[&1])
         end
         |> Enum.reject(&is_nil/1)
         |> Enum.uniq()
@@ -276,6 +277,7 @@ defmodule BorsNG.Worker.FailureIsolation do
              cond do
                conflict -> "structured_conflict"
                hints["compiler_suspects"] != nil -> "compiler_diagnostics"
+               hints["provider_suspects"] != nil -> "import_provider_hint"
                true -> "missing_import"
              end}
 
