@@ -10,7 +10,7 @@
     "class_name": "BorsContainer",
     "image": "./Dockerfile",
     "max_instances": 1,
-    "instance_type": "basic",
+    "instance_type": "standard-2",
     "constraints": { "regions": ["ENAM"] }
   }],
   "durable_objects": {
