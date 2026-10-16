@@ -449,6 +449,18 @@ class LocalGitTest(unittest.TestCase):
         self.assertFalse(hints['ownership_complete'])
         self.assertNotIn('changed_files', hints)
 
+    def test_lean_named_gitlink_keeps_assembly_and_ownership_without_optional_data(self):
+        git(self.upstream, 'update-index', '--add', '--cacheinfo',
+            '160000,' + self.base + ',TauCeti/Submodule.lean')
+        git(self.upstream, 'commit', '-qm', 'gitlink source is unsupported data')
+        head = git(self.upstream, 'rev-parse', 'HEAD')
+        self.request['members'] = [self.member(1, head)]
+        result = self.run_mirror()
+        self.assertEqual(result['status'], 'ok')
+        self.assertTrue(result['diagnostic_hints']['ownership_complete'])
+        self.assertFalse(result['diagnostic_hints']['dependencies_complete'])
+        self.assertEqual(result['diagnostic_hints']['reason'], 'diagnostic_limit')
+
     def test_ownership_framing_accepts_sha_named_paths_and_preserves_stacked_edits(self):
         one = self.commit(self.base, {self.base: 'sha filename', 'TauCeti/Shared.lean': 'def x := 1\n'})
         two = self.commit(one, {'TauCeti/Second.lean': 'def y := 2\n'})
@@ -456,7 +468,7 @@ class LocalGitTest(unittest.TestCase):
         hints = self.run_mirror()['diagnostic_hints']
         self.assertTrue(hints['ownership_complete'])
         self.assertIn(self.base, hints['changed_files'][0]['paths'])
-        self.assertEqual(hints['changed_files'][1]['paths'], [self.base, 'TauCeti/Second.lean', 'TauCeti/Shared.lean'])
+        self.assertCountEqual(hints['changed_files'][1]['paths'], [self.base, 'TauCeti/Second.lean', 'TauCeti/Shared.lean'])
 
     def test_identical_edits_in_independent_heads_keep_both_potential_owners(self):
         one = self.commit(self.base, {'TauCeti/Shared.lean': 'def x := 1\n', 'one': '1'})

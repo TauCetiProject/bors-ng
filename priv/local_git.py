@@ -374,10 +374,11 @@ class Mirror:
                 meta, path = entry.split('\t', 1)
                 files[path] = meta.split()
         paths = sorted({p for c in changed for p in c['paths'] if p.endswith('.lean') and p in files})
+        if any(files[p][0] != '100644' or files[p][1] != 'blob' for p in paths):
+            raise Failure('diagnostic_limit')
         budget['reads'] += len(paths)
         budget['bytes'] += sum(int(files[p][3]) for p in paths)
-        if (budget['reads'] > 256 or any(files[p][0] != '100644' or files[p][1] != 'blob'
-                                   or int(files[p][3]) > 256 * 1024 for p in paths)
+        if (budget['reads'] > 256 or any(int(files[p][3]) > 256 * 1024 for p in paths)
                 or budget['bytes'] > 3 * 1024 * 1024):
             raise Failure('diagnostic_limit')
         oids = list(dict.fromkeys(files[p][2] for p in paths))
