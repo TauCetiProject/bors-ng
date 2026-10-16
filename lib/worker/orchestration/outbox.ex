@@ -176,7 +176,7 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
         {"dispatch", _} ->
           1
 
-        {kind, _} when kind in ["cancel", "cancel_all"] ->
+        {kind, _} when kind in ["cancel", "cancel_all", "cancel_run"] ->
           0
 
         {"cast", {:status, {commit, _, _, _}}} ->

@@ -77,6 +77,7 @@ defmodule BorsNG.Worker.CandidateCancellationTest do
     CandidateCancellation.enqueue(batch)
     System.put_env("BORS_ASYNC_ORCHESTRATION", "false")
     job = Repo.get_by!(OrchestrationJob, kind: "cancel_run")
+    assert job.priority == 0
     {:ok, p} = CandidateCancellation.authority(job.id)
     actor = %{"id" => 337_246_530, "login" => "tau-ceti-bors[bot]", "type" => "Bot"}
 
@@ -114,6 +115,63 @@ defmodule BorsNG.Worker.CandidateCancellationTest do
 
   defp unauthorized(ctx),
     do: assert({:error, :unauthorized_or_expired} == CandidateCancellation.authority(ctx.job.id))
+
+  test "the real explicit-withdrawal handler persists the intent and retains authorized survivors",
+       ctx do
+    alias BorsNG.Database.{LinkPatchBatch, Patch}
+    Repo.delete!(ctx.job)
+    ctx.batch |> Batch.changeset(%{state: :running}) |> Repo.update!()
+
+    patches =
+      for number <- 1..2 do
+        patch =
+          Repo.insert!(%Patch{
+            project_id: ctx.project.id,
+            pr_xref: number,
+            open: true,
+            commit: @head,
+            into_branch: "main",
+            queue_pending: true,
+            queue_approval: %{"state" => "approved", "head_sha" => @head, "reviewer" => "rvr"}
+          })
+
+        CandidateJournal.insert_member(
+          LinkPatchBatch.changeset(
+            %LinkPatchBatch{},
+            %{batch_id: ctx.batch.id, patch_id: patch.id, head_sha: @head, reviewer: "rvr"}
+          )
+        )
+
+        patch
+      end
+
+    [withdrawn, survivor] = patches
+    state = ServerMock.get_state()
+
+    state =
+      update_in(
+        state,
+        [@conn],
+        &Map.merge(&1, %{
+          comments: %{1 => [], 2 => []},
+          labels: %{1 => [], 2 => []},
+          statuses: %{@head => %{}}
+        })
+      )
+
+    ServerMock.put_state(state)
+    System.put_env("BORS_ASYNC_ORCHESTRATION", "true")
+    BorsNG.Worker.Batcher.handle_cast({:cancel, withdrawn.id, :requested}, ctx.project.id)
+    System.put_env("BORS_ASYNC_ORCHESTRATION", "false")
+    assert Repo.get!(Batch, ctx.batch.id).state == :canceled
+    intent = Repo.get_by!(OrchestrationJob, kind: "cancel_run")
+    assert {:ok, _} = CandidateCancellation.authority(intent.id)
+    [child] = Repo.all(Batch.all_for_project(ctx.project.id, :incomplete))
+    [link] = Repo.all(LinkPatchBatch.from_batch(child.id))
+    assert link.patch_id == survivor.id and link.head_sha == @head and link.reviewer == "rvr"
+    assert Repo.get!(Patch, survivor.id).queue_approval == survivor.queue_approval
+    refute ServerMock.get_state()[:cancellations]
+  end
 
   test "public authority is read-only, uncached and revokes on terminal job", ctx do
     conn = get(build_conn(), "/api/candidate-cancellations/#{ctx.job.id}")
