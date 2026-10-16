@@ -53,7 +53,7 @@ defmodule BorsNG.Worker.Orchestration.Worker do
     total_wait_ms = max(claimed_at - enqueued_at, 0)
 
     Logger.info(
-      "outbox_start job=#{job.id} project=#{project_id} kind=#{job.kind} priority=#{job.priority} attempt=#{job.attempts} ready_wait_ms=#{ready_wait_ms}"
+      "outbox_start job=#{job.id} project=#{project_id} kind=#{job.kind} priority=#{job.priority} attempt=#{job.attempts} claimed_at_ms=#{claimed_at} lease_until=#{job.lease_until} ready_wait_ms=#{ready_wait_ms}"
     )
 
     # An executing job may not outlive its durable lease. Killing this process
@@ -132,7 +132,7 @@ defmodule BorsNG.Worker.Orchestration.Worker do
     :telemetry.execute([:bors, :outbox, :operation], measurements, metadata)
 
     Logger.info(
-      "outbox_finish job=#{job.id} project=#{project_id} kind=#{job.kind} priority=#{job.priority} ready_wait_ms=#{ready_wait_ms} total_wait_ms=#{total_wait_ms} service_ms=#{service_ms} result=#{inspect(result)}"
+      "outbox_finish job=#{job.id} project=#{project_id} kind=#{job.kind} priority=#{job.priority} attempt=#{job.attempts} ready_wait_ms=#{ready_wait_ms} total_wait_ms=#{total_wait_ms} service_ms=#{service_ms} result=#{inspect(result)}"
     )
 
     if service_ms > 10_000,

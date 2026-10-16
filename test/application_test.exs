@@ -15,6 +15,19 @@ defmodule BorsNG.ApplicationTest do
     |> Enum.map(&child_id/1)
   end
 
+  test "shutdown drain precedes executors, API clients and the database" do
+    ids = child_ids()
+
+    assert Enum.find_index(ids, &(&1 == Application.fetch_repo())) <
+             Enum.find_index(ids, &(&1 == BorsNG.Worker.Orchestration.Supervisor))
+
+    {:ok, {_, children}} = BorsNG.Worker.Orchestration.Supervisor.init([])
+    child_ids = Enum.map(children, & &1.id)
+    assert List.last(child_ids) == BorsNG.Worker.Orchestration.Dispatcher
+    assert BorsNG.Worker.Orchestration.Workers in child_ids
+    assert BorsNG.GitHub.Advisory in child_ids
+  end
+
   test "PubSub and the Endpoint are supervised before the workers (rest_for_one)" do
     ids = child_ids()
 

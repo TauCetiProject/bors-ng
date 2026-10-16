@@ -17,6 +17,7 @@ defmodule BorsNG.Database.OrchestrationJob do
     field(:enqueued_at_ms, :integer)
     field(:claimed_at_ms, :integer)
     field(:completed_at_ms, :integer)
+    field(:attempt_timing, :map)
     field(:attempts, :integer, default: 0)
     field(:available_at, :integer)
     field(:lease_until, :integer, default: 0)

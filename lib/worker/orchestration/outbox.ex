@@ -298,12 +298,24 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
 
           project |> Ecto.Changeset.change(orchestration_streak: streak) |> Repo.update!()
 
+          claimed_at = System.system_time(:millisecond)
+
           job
           |> Ecto.Changeset.change(
             claimed_version: job.wake_version,
             rerun_at: nil,
             rerun_enqueued_at_ms: nil,
-            claimed_at_ms: System.system_time(:millisecond),
+            claimed_at_ms: claimed_at,
+            completed_at_ms: nil,
+            attempt_timing:
+              attempt_timing(job, %{
+                "event" => "claim",
+                "attempt" => job.attempts + 1,
+                "at_ms" => claimed_at,
+                "available_at" => job.available_at,
+                "previous_claimed_at_ms" => job.claimed_at_ms,
+                "previous_completed_at_ms" => job.completed_at_ms
+              }),
             state: "running",
             token: token,
             lease_until: now() + 300,
@@ -312,6 +324,31 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
           |> Repo.update!()
           |> Map.put(:priority, priority)
         end
+      end
+    end)
+  end
+
+  # Fixed numeric/category fields only: never payloads, tokens or errors. Keep
+  # enough recent attempts to distinguish service, retry backoff and lease wait
+  # even when a later claim overwrites the row's current-attempt timestamps.
+  defp attempt_timing(job, event) do
+    recent = (job.attempt_timing || %{}) |> Map.get("recent", [])
+    %{"recent" => Enum.take([event | recent], 8)}
+  end
+
+  def record_shutdown_result(job) do
+    with_project(job.project_id, fn ->
+      if current = Repo.one(from(j in owned(job), lock: "FOR UPDATE")) do
+        current
+        |> Ecto.Changeset.change(
+          attempt_timing:
+            attempt_timing(current, %{
+              "event" => "shutdown_result",
+              "attempt" => current.attempts,
+              "at_ms" => System.system_time(:millisecond)
+            })
+        )
+        |> Repo.update!()
       end
     end)
   end
@@ -626,15 +663,44 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
 
     count =
       Enum.reduce(projects, 0, fn project_id, count ->
-        {changed, _} =
+        changed =
           with_project(project_id, fn ->
-            Repo.update_all(
-              from(j in OrchestrationJob,
-                where:
-                  j.project_id == ^project_id and j.state == "running" and j.lease_until <= ^now()
-              ),
-              set: [state: "pending", token: nil, lease_until: 0]
-            )
+            expired =
+              Repo.all(
+                from(j in OrchestrationJob,
+                  where:
+                    j.project_id == ^project_id and j.state == "running" and
+                      j.lease_until <= ^now(),
+                  limit: 32,
+                  lock: "FOR UPDATE"
+                )
+              )
+
+            Enum.each(expired, fn job ->
+              recovered_at = System.system_time(:millisecond)
+
+              job
+              |> Ecto.Changeset.change(
+                state: "pending",
+                token: nil,
+                lease_until: 0,
+                attempt_timing:
+                  attempt_timing(job, %{
+                    "event" => "lease_expired",
+                    "attempt" => job.attempts,
+                    "at_ms" => recovered_at,
+                    "claimed_at_ms" => job.claimed_at_ms,
+                    "lease_until" => job.lease_until
+                  })
+              )
+              |> Repo.update!()
+
+              Logger.info(
+                "outbox_lease_expired job=#{job.id} project=#{job.project_id} attempt=#{job.attempts} claimed_at_ms=#{job.claimed_at_ms} recovered_at_ms=#{recovered_at} lease_until=#{job.lease_until}"
+              )
+            end)
+
+            length(expired)
           end)
 
         count + changed

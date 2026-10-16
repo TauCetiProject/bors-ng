@@ -82,6 +82,16 @@ container; the slot cap is per application instance, while repository claim
 serialization is shared in the database. Multiple replicas are outside this
 rollout's global-cap guarantee.
 
+On an orderly supervisor stop, the dispatcher stops claiming work and drains
+matching active results for at most four seconds before the executors stop.
+Completed commands use the existing token-fenced completion/retry paths. An
+unfinished command retains its lease: a shared HTTP client or Git child may
+still be executing, so stopping the caller cannot authorize an early replay.
+Abrupt death and commands exceeding the drain window still require normal
+lease expiry and external-state reconciliation. The drain does not shorten
+leases or clear another dispatcher's work. See [restart recovery](deploy/restart-recovery.md)
+for the timing evidence and rollout limits.
+
 ## Operation and rollback
 
 Inspect `orchestration_jobs` for kind, project, state, attempts, available_at,
@@ -90,6 +100,15 @@ candidate diagnostics remain evidence with `queue_authority=false`. Completed
 dispatch/notification keys are retained as deduplication tombstones. Payloads are
 internally produced Erlang terms decoded with `[:safe]`; they contain installation
 references, never installation tokens or publication credentials.
+
+`attempt_timing.recent` retains at most eight numeric/category events per row:
+claim time and availability (including the prior claim/completion timestamps),
+lease-expiry recovery time and deadline, and results received during orderly
+shutdown. Current `claimed_at_ms`/`completed_at_ms` describe the current attempt;
+completion is cleared on a new claim. A recovery interval is abandoned-lease
+waiting, not measured operation service. These events contain no payload,
+claim token, credentials or exception text. Shutdown and expiry logs also carry
+job/attempt identifiers and timing, without tokens.
 
 Before disabling the feature, stop new admission and drain pending/running outbox
 operations; then restart with the flag false. Do not switch execution modes live
