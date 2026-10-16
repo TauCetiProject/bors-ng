@@ -109,8 +109,11 @@ MIX_ENV=test BORS_DATABASE=postgresql mix run --no-start scripts/replay_diagnost
 
 The default new-observation policy is bounded_depth_v1. Set
 `BORS_IMPORT_PROVIDER_POLICY=direct` to restore depth-one lookups for new
-observations; any unrecognized value also selects direct. Existing immutable
-observations keep their recorded policy. `BORS_FAILURE_DIAGNOSTICS=off` retains
+observations; any unrecognized value also selects direct. The Cloudflare Worker
+explicitly forwards this variable into the Container environment, defaulting to
+bounded_depth_v1 when absent. Operators can set the Worker variable to direct
+and use the normal deployment path; no runtime setting is changed by this PR.
+Existing immutable observations keep their recorded policy. `BORS_FAILURE_DIAGNOSTICS=off` retains
 the broader existing rollback. No migration or workflow pin change is needed.
 
 Required review, hosted checks and normal automatic deployment must precede

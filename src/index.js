@@ -57,6 +57,7 @@ export class BorsContainer extends Container {
     GITHUB_INTEGRATION_PEM: workerEnv.GITHUB_INTEGRATION_PEM,
     COMMAND_TRIGGER: "bors",
     BORS_STAGE_DISPATCH_PROJECT: "TauCetiProject/TauCeti",
+    BORS_IMPORT_PROVIDER_POLICY: workerEnv.BORS_IMPORT_PROVIDER_POLICY ?? "bounded_depth_v1",
     // Conservative rollout: one executing operation, serialized per repository.
     BORS_ASYNC_ORCHESTRATION: "true",
     BORS_ASYNC_WORKERS: "1",
