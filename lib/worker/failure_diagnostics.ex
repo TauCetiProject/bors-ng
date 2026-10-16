@@ -17,7 +17,7 @@ defmodule BorsNG.Worker.FailureDiagnostics do
     hints = FailureIsolation.hints(candidate)
 
     if FailureIsolation.enabled?() and not is_nil(candidate) and is_map(hints) and
-         hints["complete"] == true and
+         FailureIsolation.ownership_complete?(hints) and
          length(candidate.snapshot["members"]) > 1 and eligible?(batch, evidence) and
          fresh_run?(candidate, evidence) do
       binding = binding(candidate, batch.commit, evidence)
@@ -133,7 +133,7 @@ defmodule BorsNG.Worker.FailureDiagnostics do
     end
   end
 
-  def map_paths(%{"complete" => true, "changed_files" => changed}, %{
+  def map_paths(%{"changed_files" => changed} = hints, %{
         "complete" => true,
         "jobs" => jobs
       }) do
@@ -144,7 +144,9 @@ defmodule BorsNG.Worker.FailureDiagnostics do
         owners =
           Enum.map(observation["paths"], fn path ->
             Enum.filter(changed, fn member ->
-              path in member["paths"] or path in (member["dependency_paths"] || [])
+              path in member["paths"] or
+                (Map.get(hints, "dependencies_complete", hints["complete"]) == true and
+                   path in (member["dependency_paths"] || []))
             end)
             |> Enum.map(& &1["pr"])
           end)
@@ -156,9 +158,10 @@ defmodule BorsNG.Worker.FailureDiagnostics do
           else: []
       end)
 
-    if mapped != [] and Enum.all?(mapped, &(&1 != [])),
-      do: {:ok, mapped |> List.flatten() |> Enum.uniq()},
-      else: :unavailable
+    if FailureIsolation.ownership_complete?(hints) and mapped != [] and
+         Enum.all?(mapped, &(&1 != [])),
+       do: {:ok, mapped |> List.flatten() |> Enum.uniq()},
+       else: :unavailable
   end
 
   def map_paths(_, _), do: :unavailable

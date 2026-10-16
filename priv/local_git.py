@@ -213,7 +213,7 @@ class Mirror:
                                       input='[ci skip][skip ci] bors local merge ancestry\n',
                                       extra_env=env)[0].strip()
             commits.append(dict(pr=member['pr'], head_sha=member['head_sha'], commit=prev, tree=tree))
-        hints = self.diagnostic_hints(base, members, prev) if self.request.get('diagnostics', True) else dict(complete=False, reason='disabled')
+        hints = self.diagnostic_hints(base, members, prev, commits) if self.request.get('diagnostics', True) else dict(complete=False, reason='disabled')
         # Scheduling barriers use exact immutable trees, independently of
         # optional failure hints and mutable PR file-list endpoints.
         paths = self.git('diff', '--name-only', '-z', '--no-renames', base, prev)[0].split('\0')
@@ -234,72 +234,165 @@ class Mirror:
                     commits=commits, git_version=self.git('--version')[0].strip(),
                     mirror_bytes=size(self.repo))
 
-    def diagnostic_hints(self, base, members, candidate=None):
+    def diagnostic_hints(self, base, members, candidate=None, commits=None):
         # These are scheduling hints, never proof verdicts. Read immutable Git
         # blobs as data; no candidate parser, executable, metrics or cache.
+        started = time.monotonic()
         previous_deadline = self.deadline
-        self.deadline = min(self.deadline, time.monotonic() + 15)
+        self.deadline = min(self.deadline, started + 15)
+        hints = dict(complete=False, ownership_complete=False, dependencies_complete=False)
         try:
-            changed = []
-            owners = {}
-            for member in members:
-                ancestor = self.git('merge-base', base, member['head_sha'])[0].strip()
-                paths = self.git('diff', '--name-only', '-z', '--no-renames',
-                                 ancestor, member['head_sha'])[0].split('\0')
-                paths = [p for p in paths if p]
-                if len(paths) > 256 or sum(len(c['paths']) for c in changed) + len(paths) > 1024:
-                    raise Failure('diagnostic_limit')
-                changed.append(dict(pr=member['pr'], head_sha=member['head_sha'], paths=paths))
-                for path in paths:
-                    owners.setdefault(path, []).append(member['pr'])
-            edges, missing, dependencies = [], [], set()
-            reads = 0
-            for member, change in zip(members, changed):
-                member_dependencies = set()
-                pending = [p for p in change['paths'] if p.endswith('.lean')]
-                seen = set()
-                while pending:
-                    path = pending.pop()
-                    if path in seen:
-                        continue
-                    seen.add(path)
-                    reads += 1
-                    if reads > 256:
-                        raise Failure('diagnostic_limit')
-                    content, absent = self.git('show', (candidate or member['head_sha']) + ':' + path, check=False)
-                    if absent:
-                        continue
-                    if len(content) > 256 * 1024:
-                        raise Failure('diagnostic_limit')
-                    imports = local_imports(content)
-                    for module in imports:
-                        provider = module.replace('.', '/') + '.lean'
-                        dependencies.add(provider)
-                        member_dependencies.add(provider)
-                        for owner in owners.get(provider, []):
-                            if owner != member['pr']:
-                                edges.append([member['pr'], owner])
-                        exists = self.git('cat-file', '-e', (candidate or member['head_sha']) + ':' + provider,
-                                          check=False)[1] == 0
-                        if not exists:
-                            missing.append(dict(pr=member['pr'], path=path, module=module,
-                                                provider_path=provider))
-                        # Direct imports only. Whole-project/transitive walks
-                        # can exhaust the budget on ordinary large batches;
-                        # unobserved dependencies remain unknown, not absent.
-                change['dependency_paths'] = sorted(member_dependencies)
-            hints = dict(complete=True, changed_files=changed, import_edges=edges,
-                         missing_imports=missing, dependency_paths=sorted(dependencies))
+            changed = self.diagnostic_owners(base, members, candidate, commits)
+            if time.monotonic() >= self.deadline:
+                raise Failure('timeout')
+            hints.update(ownership_complete=True, changed_files=changed,
+                         ownership_elapsed_ms=round((time.monotonic() - started) * 1000))
+            if candidate:
+                hints['provenance'] = self.request['identity'] | dict(
+                    commit=candidate, tree=commits[-1]['tree'],
+                    members=[dict(pr=m['pr'], head_sha=m['head_sha']) for m in members])
+            # Optional imports get their own five-second cap inside the unchanged
+            # total 15s budget. Publish them atomically; partial absence is unknown.
+            self.deadline = min(self.deadline, time.monotonic() + 5)
+            optional = self.diagnostic_dependencies(changed, candidate)
+            if time.monotonic() >= self.deadline:
+                raise Failure('timeout')
+            hints.update(optional, dependencies_complete=True, complete=True)
             if len(json.dumps(hints)) > 256 * 1024:
                 raise Failure('diagnostic_limit')
             return hints
         except Failure as error:
-            # Missing/large/ambiguous diagnostics cannot fail construction.
-            return dict(complete=False, reason=error.details['kind'])
+            hints.update(complete=False, dependencies_complete=False, reason=error.details['kind'])
+            if hints['ownership_complete']:
+                hints['changed_files'] = changed
+            # No partial optional evidence escapes, even on the final size bound.
+            for key in ['import_edges', 'missing_imports', 'dependency_paths']:
+                hints.pop(key, None)
+            return hints
         except UnicodeError:
-            return dict(complete=False, reason='non_text_source')
+            hints.update(complete=False, reason='non_text_source')
+            return hints
         finally:
+            hints['elapsed_ms'] = round((time.monotonic() - started) * 1000)
             self.deadline = previous_deadline
+
+    def diagnostic_owners(self, base, members, candidate, commits):
+        if candidate:
+            # Reuse the squash chain just constructed from these ordered exact
+            # heads. Owners mean actual assembly touches, including shared paths;
+            # inherited/no-op stacked changes are not attributed a second time.
+            if (not commits or len(commits) != len(members)
+                    or [(c['pr'], c['head_sha']) for c in commits] !=
+                       [(m['pr'], m['head_sha']) for m in members]
+                    or commits[-1]['commit'] != candidate):
+                raise Failure('diagnostic_provenance')
+            objects = self.diagnostic_objects([c['commit'] for c in commits], 'commit')
+            parent = base
+            for commit, content in zip(commits, objects):
+                headers = content.decode('utf-8').split('\n\n', 1)[0].splitlines()
+                if ([h[5:] for h in headers if h.startswith('tree ')] != [commit['tree']]
+                        or [h[7:] for h in headers if h.startswith('parent ')] != [parent]):
+                    raise Failure('diagnostic_provenance')
+                parent = commit['commit']
+            # One Git walk instead of merge-base + diff processes per member.
+            output = self.git('diff-tree', '--stdin', '--raw', '--no-abbrev', '--no-renames',
+                              '-r', '-z', '--always',
+                              input=''.join(c['commit'] + '\n' for c in commits))[0]
+            fields = output.split('\0')
+            changes, position = [], 0
+            for commit in commits:
+                if position >= len(fields) or fields[position] != commit['commit']:
+                    raise Failure('diagnostic_provenance')
+                position += 1
+                paths = []
+                while position < len(fields) and fields[position].startswith(':'):
+                    if (not re.fullmatch(r':[0-7]{6} [0-7]{6} [0-9a-f]{40} [0-9a-f]{40} [AMDT]', fields[position])
+                            or position + 1 >= len(fields)):
+                        raise Failure('diagnostic_provenance')
+                    paths.append(fields[position + 1])
+                    position += 2
+                changes.append(paths)
+            if position != len(fields) - 1 or fields[-1] != '':
+                raise Failure('diagnostic_provenance')
+        else:
+            # Conflicted construction has no complete assembly chain. Keep the
+            # bounded legacy head comparison; optional dependencies stay unknown.
+            changes = []
+            for member in members:
+                ancestor = self.git('merge-base', base, member['head_sha'])[0].strip()
+                output = self.git('diff', '--name-only', '-z', '--no-renames',
+                                  ancestor, member['head_sha'])[0]
+                changes.append([p for p in output.split('\0') if p])
+        if (any(len(paths) > 256 or any(not re.fullmatch(r'[A-Za-z0-9_./-]{1,512}', p)
+                                      for p in paths) for paths in changes)
+                or sum(map(len, changes)) > 1024):
+            raise Failure('diagnostic_limit')
+        changed = [dict(pr=m['pr'], head_sha=m['head_sha'], paths=paths)
+                   for m, paths in zip(members, changes)]
+        if len(json.dumps(changed)) > 128 * 1024:
+            raise Failure('diagnostic_limit')
+        return changed
+
+    def diagnostic_objects(self, oids, kind):
+        data = self.git('cat-file', '--batch', input=''.join(oid + '\n' for oid in oids),
+                        binary=True, output_limit=4 * 1024 * 1024)[0]
+        objects, position = [], 0
+        for oid in oids:
+            end = data.find(b'\n', position)
+            header = data[position:end].decode('ascii').split()
+            if len(header) != 3 or header[:2] != [oid, kind] or not header[2].isdigit():
+                raise Failure('diagnostic_provenance')
+            length = int(header[2])
+            position = end + 1
+            if length > 256 * 1024 or data[position + length:position + length + 1] != b'\n':
+                raise Failure('diagnostic_limit')
+            objects.append(data[position:position + length])
+            position += length + 1
+        if position != len(data):
+            raise Failure('diagnostic_provenance')
+        return objects
+
+    def diagnostic_dependencies(self, changed, candidate):
+        if not candidate:
+            raise Failure('no_assembled_dependencies')
+        listing = self.git('ls-tree', '-r', '-l', '-z', candidate,
+                           output_limit=4 * 1024 * 1024)[0]
+        files = {}
+        for entry in listing.split('\0'):
+            if entry:
+                meta, path = entry.split('\t', 1)
+                files[path] = meta.split()
+        paths = sorted({p for c in changed for p in c['paths'] if p.endswith('.lean') and p in files})
+        if (len(paths) > 256 or any(files[p][0] != '100644' or files[p][1] != 'blob'
+                                   or int(files[p][3]) > 256 * 1024 for p in paths)
+                or sum(int(files[p][3]) for p in paths) > 3 * 1024 * 1024):
+            raise Failure('diagnostic_limit')
+        oids = list(dict.fromkeys(files[p][2] for p in paths))
+        imports = {oid: local_imports(blob.decode('utf-8'))
+                   for oid, blob in zip(oids, self.diagnostic_objects(oids, 'blob'))}
+        owners = {}
+        for change in changed:
+            for path in change['paths']:
+                owners.setdefault(path, []).append(change['pr'])
+        edges, missing, dependencies, per_member = set(), [], set(), []
+        for change in changed:
+            member_dependencies = set()
+            for path in change['paths']:
+                for module in imports.get(files.get(path, ['', '', None])[2], []):
+                    provider = module.replace('.', '/') + '.lean'
+                    member_dependencies.add(provider)
+                    for owner in owners.get(provider, []):
+                        if owner != change['pr']:
+                            edges.add((change['pr'], owner))
+                    if provider not in files:
+                        missing.append(dict(pr=change['pr'], path=path, module=module, provider_path=provider))
+            dependencies.update(member_dependencies)
+            per_member.append(change | dict(dependency_paths=sorted(member_dependencies)))
+        result = dict(changed_files=per_member, import_edges=[list(e) for e in sorted(edges)],
+                      missing_imports=missing, dependency_paths=sorted(dependencies))
+        if len(json.dumps(result)) > 192 * 1024:
+            raise Failure('diagnostic_limit')
+        return result
 
     def compatibility(self):
         """Exact singleton trees, source data only; unknown coverage never holds a PR."""

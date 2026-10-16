@@ -128,6 +128,128 @@ defmodule BorsNG.Worker.FailureIsolationTest do
     }
   end
 
+  defp ownership_hints(c) do
+    provenance =
+      BorsNG.Worker.CandidateAssembler.identity(c.candidate)
+      |> Jason.encode!()
+      |> Jason.decode!()
+      |> Map.merge(%{
+        "commit" => "staged",
+        "tree" => "tree",
+        "members" => Enum.map(c.candidate.snapshot["members"], &Map.take(&1, ["pr", "head_sha"]))
+      })
+
+    c.hints
+    |> Map.merge(%{
+      "complete" => false,
+      "ownership_complete" => true,
+      "dependencies_complete" => false,
+      "reason" => "timeout",
+      "provenance" => provenance
+    })
+  end
+
+  test "optional dependency timeout retains compiler isolation and immutable approvals", c do
+    alias BorsNG.Worker.FailureDiagnostics
+    {batch, evidence} = terminal(c)
+    hints = ownership_hints(c)
+
+    CandidateJournal.event(c.candidate, "local_assembled", "bors.local_git", %{
+      commit: "staged",
+      tree: "tree",
+      evidence: %{diagnostic_hints: hints}
+    })
+
+    assert FailureIsolation.hints(c.candidate) == hints
+
+    assert :ok =
+             FailureDiagnostics.observe(batch, evidence, :conn, fn _, [200] ->
+               log_result(["TauCeti/File3.lean"])
+             end)
+
+    FailureIsolation.classified(batch, "candidate_failure", evidence)
+    assert :retrying = FailureIsolation.split(Enum.reverse(c.links), batch)
+    children = Repo.all(from(b in Batch, where: b.id != ^batch.id, order_by: b.id))
+    groups = Enum.map(children, &stored_links(&1.id))
+    assert prs(groups) == [[3], [1, 2, 4]]
+
+    assert Enum.sort(
+             Enum.map(
+               List.flatten(groups),
+               &{&1.patch_id, &1.head_sha, &1.reviewer, &1.manual_approval}
+             )
+           ) ==
+             Enum.sort(
+               Enum.map(c.links, &{&1.patch_id, &1.head_sha, &1.reviewer, &1.manual_approval})
+             )
+
+    assert Enum.all?(Repo.all(Patch), &(&1.queue_approval["state"] == "approved"))
+    [event] = Repo.all(from(e in CandidateEvent, where: e.kind == "failure_partition"))
+    assert event.details["strategy"] == "compiler_diagnostics"
+    assert event.details["ownership_complete"]
+    refute event.details["dependencies_complete"]
+    assert event.details["authority"] == "retry_only"
+  end
+
+  test "ownership-only evidence cannot use unknown imports or guess unchanged paths", c do
+    alias BorsNG.Worker.FailureDiagnostics
+
+    hints =
+      ownership_hints(c)
+      |> Map.put("missing_imports", [%{"pr" => 1}])
+      |> Map.put("import_edges", [[1, 2]])
+
+    assert :fallback = FailureIsolation.partition(c.links, hints, nil)
+
+    assert :unavailable =
+             FailureDiagnostics.map_paths(hints, log_result(["TauCeti/Provider.lean"]))
+
+    assert {:ok, [3]} = FailureDiagnostics.map_paths(hints, log_result(["TauCeti/File3.lean"]))
+
+    assert :unavailable =
+             FailureDiagnostics.map_paths(
+               hints,
+               log_result(["TauCeti/File3.lean", "TauCeti/Unknown.lean"])
+             )
+
+    # Every possible owner of a shared path stays in the retry; unknown imports
+    # cannot create additional ownership or preflight missing-source verdicts.
+    hints = put_in(hints, ["changed_files", Access.at(1), "paths"], ["TauCeti/File3.lean"])
+    assert {:ok, [2, 3]} = FailureDiagnostics.map_paths(hints, log_result(["TauCeti/File3.lean"]))
+
+    assert {:ok, groups, "compiler_diagnostics"} =
+             FailureIsolation.partition(c.links, Map.put(hints, "compiler_suspects", [2, 3]), nil)
+
+    assert prs(groups) == [[2, 3], [1, 4]]
+  end
+
+  test "ownership provenance rejects another base tree commit order or exact head", c do
+    hints = ownership_hints(c)
+
+    for broken <- [
+          put_in(hints, ["provenance", "base_sha"], "other"),
+          put_in(hints, ["provenance", "tree"], "other"),
+          put_in(hints, ["provenance", "commit"], "other"),
+          update_in(hints, ["provenance", "members"], &Enum.reverse/1),
+          put_in(hints, ["changed_files", Access.at(0), "head_sha"], "other")
+        ] do
+      CandidateJournal.event(c.candidate, "local_assembled", "bors.local_git", %{
+        commit: "staged",
+        tree: "tree",
+        evidence: %{diagnostic_hints: broken}
+      })
+
+      assert FailureIsolation.hints(c.candidate) == nil
+      # Incomplete optional data can never skip authoritative CI.
+      assert :dispatch =
+               FailureIsolation.preflight(c.links, c.batch, %{
+                 commit: "staged",
+                 tree: "tree",
+                 evidence: %{"diagnostic_hints" => broken}
+               })
+    end
+  end
+
   test "terminal diagnostics split exact membership with approvals and survive restart", c do
     alias BorsNG.Worker.FailureDiagnostics
     {batch, evidence} = terminal(c)

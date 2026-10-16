@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import shutil
 import tempfile
+import time
 import unittest
 
 spec = importlib.util.spec_from_file_location('local_git', Path(__file__).parents[1] / 'priv/local_git.py')
@@ -363,6 +364,98 @@ class LocalGitTest(unittest.TestCase):
         self.assertEqual(local.local_imports('/- import TauCeti.Fake /- nested -/ -/\nmodule\nimport TauCeti.Real -- comment\ndef x := 1'), ['TauCeti.Real'])
         self.request['members'] = [self.member(1, importer)]
         self.assertEqual(self.run_mirror()['diagnostic_hints']['missing_imports'][0]['provider_path'], 'TauCeti/Provider.lean')
+
+    def test_large_diagnostic_ownership_uses_batched_assembly_provenance(self):
+        self.request.update(timeout=120, members=[
+            self.member(n, self.commit(self.base, {f'TauCeti/F{n}.lean': 'def x := 1\n'}))
+            for n in range(1, 55)])
+
+        class Counted(TestMirror):
+            calls = None
+
+            def diagnostic_hints(self, *args):
+                self.calls = []
+                return super().diagnostic_hints(*args)
+
+            def git(self, *args, **kwargs):
+                if self.calls is not None:
+                    self.calls.append(args[0])
+                return super().git(*args, **kwargs)
+
+        mirror = Counted(self.request, self.upstream)
+        result = mirror.run()
+        hints = result['diagnostic_hints']
+        self.assertTrue(hints['complete'])
+        self.assertTrue(hints['ownership_complete'])
+        self.assertTrue(hints['dependencies_complete'])
+        self.assertEqual(mirror.calls[:4], ['cat-file', 'diff-tree', 'ls-tree', 'cat-file'])
+        self.assertLess(hints['elapsed_ms'], 15000)
+        self.assertEqual(hints['provenance'], self.request['identity'] | dict(
+            commit=result['result']['commit'], tree=result['result']['tree'],
+            members=[dict(pr=m['pr'], head_sha=m['head_sha']) for m in self.request['members']]))
+        self.assertEqual([c['paths'] for c in hints['changed_files']],
+                         [[f'TauCeti/F{n}.lean'] for n in range(1, 55)])
+
+    def test_optional_timeout_preserves_complete_owners_and_restores_deadline(self):
+        self.request['members'] = [self.member(1, self.commit(self.base, {'TauCeti/A.lean': 'import TauCeti.Absent\n'}))]
+
+        class TimedOut(TestMirror):
+            def diagnostic_dependencies(self, *args):
+                raise local.Failure('timeout')
+
+        mirror = TimedOut(self.request, self.upstream)
+        deadline = mirror.deadline
+        result = mirror.run()
+        self.assertEqual(result['status'], 'ok')
+        hints = result['diagnostic_hints']
+        self.assertTrue(hints['ownership_complete'])
+        self.assertFalse(hints['complete'])
+        self.assertFalse(hints['dependencies_complete'])
+        self.assertEqual(hints['reason'], 'timeout')
+        self.assertEqual(hints['changed_files'][0]['paths'], ['TauCeti/A.lean'])
+        self.assertNotIn('missing_imports', hints)
+        self.assertNotIn('dependency_paths', hints['changed_files'][0])
+        self.assertEqual(mirror.deadline, deadline)
+
+    def test_diagnostic_chain_provenance_rejects_order_head_tree_parent_and_candidate_mismatch(self):
+        self.request['members'] = [self.member(n, self.commit(self.base, {f'file{n}': str(n)}))
+                                   for n in [1, 2]]
+        result = self.run_mirror()
+        commits = result['commits']
+        candidate = result['result']['commit']
+        mirror = TestMirror(self.request, self.upstream)
+        for base, members, head, chain in [
+                (self.base, self.request['members'], candidate, list(reversed(commits))),
+                (self.base, self.request['members'], candidate, [commits[0] | dict(head_sha=self.base), commits[1]]),
+                (self.base, self.request['members'], candidate, [commits[0] | dict(tree='0' * 40), commits[1]]),
+                (candidate, self.request['members'], candidate, commits),
+                (self.base, self.request['members'], self.base, commits)]:
+            with self.subTest(base=base, chain=chain):
+                hints = mirror.diagnostic_hints(base, members, head, chain)
+                self.assertFalse(hints['ownership_complete'])
+                self.assertEqual(hints['reason'], 'diagnostic_provenance')
+
+    def test_diagnostic_limits_separate_owner_and_optional_bounds(self):
+        head = self.commit(self.base, {'TauCeti/Large.lean': ' ' * (256 * 1024 + 1)})
+        self.request['members'] = [self.member(1, head)]
+        hints = self.run_mirror()['diagnostic_hints']
+        self.assertTrue(hints['ownership_complete'])
+        self.assertFalse(hints['dependencies_complete'])
+        self.assertEqual(hints['reason'], 'diagnostic_limit')
+        head = self.commit(self.base, {f'file{n}': str(n) for n in range(257)})
+        self.request['members'] = [self.member(1, head)]
+        hints = self.run_mirror()['diagnostic_hints']
+        self.assertFalse(hints['ownership_complete'])
+        self.assertNotIn('changed_files', hints)
+
+    def test_ownership_framing_accepts_sha_named_paths_and_noop_stacked_touches(self):
+        one = self.commit(self.base, {self.base: 'sha filename', 'TauCeti/Shared.lean': 'def x := 1\n'})
+        two = self.commit(one, {'TauCeti/Second.lean': 'def y := 2\n'})
+        self.request['members'] = [self.member(1, one), self.member(2, two)]
+        hints = self.run_mirror()['diagnostic_hints']
+        self.assertTrue(hints['ownership_complete'])
+        self.assertIn(self.base, hints['changed_files'][0]['paths'])
+        self.assertEqual(hints['changed_files'][1]['paths'], ['TauCeti/Second.lean'])
 
     def test_provider_removed_by_base_is_checked_at_assembled_tree(self):
         old_base = self.commit(self.base, {'TauCeti/Provider.lean': 'def x := 1\n'})
