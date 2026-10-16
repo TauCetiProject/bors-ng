@@ -134,6 +134,15 @@ defmodule BorsNG.Worker.LocalGit do
     end
   end
 
+  def collision_sources(project, conn, binding, paths) do
+    run(%{repository: project.name, conn: conn}, %{
+      operation: "collision_sources",
+      binding: binding,
+      paths: paths,
+      timeout: 5
+    })
+  end
+
   defp run(context, request) do
     input =
       Path.join(
@@ -157,9 +166,13 @@ defmodule BorsNG.Worker.LocalGit do
 
       # This optional offline read needs no publication or API credentials.
       token_result =
-        if request.operation in ["import_providers", "bounded_import_providers"],
-          do: {:ok, ""},
-          else: GitHub.git_token(context.conn)
+        if request.operation in [
+             "import_providers",
+             "bounded_import_providers",
+             "collision_sources"
+           ],
+           do: {:ok, ""},
+           else: GitHub.git_token(context.conn)
 
       with {:ok, token} <- token_result,
            {output, 0} <-

@@ -36,10 +36,36 @@ hints =
              data["binding"],
              data["provider_lookup"]
            ) do
-        {:ok, suspects, "import_provider_hint"} -> Map.put(data["hints"], "provider_suspects", suspects)
-        {:ok, suspects, "bounded_provider_hint"} -> Map.put(data["hints"], "bounded_provider_suspects", suspects)
-        _ -> data["hints"]
+        {:ok, suspects, "import_provider_hint"} ->
+          Map.put(data["hints"], "provider_suspects", suspects)
+
+        {:ok, suspects, "bounded_provider_hint"} ->
+          Map.put(data["hints"], "bounded_provider_suspects", suspects)
+
+        _ ->
+          data["hints"]
       end
+  end
+
+# Optional source identities are a separate local assessment, never a retroactive
+# production observation. Verify the frozen member digest before consuming them.
+hints =
+  if data["collision_sources"] do
+    true = data["binding"]["candidate_id"] == data["candidate_id"]
+    true = data["binding"]["members_digest"] == BorsNG.Worker.CandidateJournal.digest(members)
+    true = Enum.all?(members, &(&1["head_sha"] == &1["assembly_head_sha"]))
+
+    case FailureDiagnostics.map_base_collision(
+           data["hints"],
+           data["logs"],
+           data["binding"],
+           data["collision_sources"]
+         ) do
+      {:ok, pr} -> Map.put(hints, "verified_base_collision", %{"pr" => pr})
+      _ -> hints
+    end
+  else
+    hints
   end
 
 result =

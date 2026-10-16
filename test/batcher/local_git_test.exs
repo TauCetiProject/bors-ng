@@ -17,6 +17,40 @@ defmodule BorsNG.Worker.LocalGitTest do
     assert status == 0, output
   end
 
+  test "collision identity never requests GitHub credentials or bootstraps a cold mirror" do
+    root = Path.join(System.tmp_dir!(), "bors-collision-#{System.unique_integer([:positive])}")
+    old = System.get_env("BORS_GIT_MIRROR_ROOT")
+    System.put_env("BORS_GIT_MIRROR_ROOT", root)
+
+    on_exit(fn ->
+      if old,
+        do: System.put_env("BORS_GIT_MIRROR_ROOT", old),
+        else: System.delete_env("BORS_GIT_MIRROR_ROOT")
+
+      File.rm_rf!(root)
+    end)
+
+    binding = %{
+      candidate_id: 1,
+      generation: 1,
+      members_digest: String.duplicate("a", 64),
+      commit: String.duplicate("b", 40),
+      base_sha: String.duplicate("c", 40),
+      run_id: 100,
+      run_attempt: 1,
+      job_ids: [200],
+      workflow: ".github/workflows/pr-build.yml"
+    }
+
+    assert %{"status" => "error", "details" => %{"kind" => "mirror_unavailable"}} =
+             LocalGit.collision_sources(%Project{name: "test/repo"}, :no_credentials, binding, [
+               "TauCeti/Base.lean",
+               "TauCeti/New.lean"
+             ])
+
+    refute File.exists?(root)
+  end
+
   test "only the scoped main project can select local assembly" do
     conn = {{:installation, 91}, 14}
     ServerMock.put_state(%{conn => %{local_git_mode: "local"}})

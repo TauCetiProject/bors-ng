@@ -1487,6 +1487,102 @@ defmodule BorsNG.Worker.FailureIsolationTest do
       assert Repo.aggregate(BorsNG.Database.OrchestrationJob, :count, :id) == 1
     end
 
+    test "verified base collision uses existing atomic provisional handoff and keeps its neighbor",
+         c do
+      {batch, _, hints, _} = base_collision_terminal(c)
+      conn = provisional_mock(c)
+      assert {:ok, 3, _} = BorsNG.Worker.FailureDiagnostics.base_collision(c.candidate, hints)
+      before = Map.new(c.links, &{&1.patch_id, CandidateJournal.admission(&1.id).snapshot})
+      assert :retrying = FailureIsolation.split(c.links, batch, nil, conn)
+      assert Repo.get!(Batch, batch.id).state == :error
+      [child] = Repo.all(from(b in Batch, where: b.id != ^batch.id))
+      remaining = stored_links(child.id)
+      assert prs([remaining]) == [[1, 2, 4]]
+
+      for link <- remaining do
+        a = CandidateJournal.admission(link.id).snapshot
+
+        assert Map.take(
+                 a,
+                 ~w(head_sha reviewer manual_approval original_admitted_at bundle_id scheduling)
+               ) ==
+                 Map.take(
+                   before[link.patch_id],
+                   ~w(head_sha reviewer manual_approval original_admitted_at bundle_id scheduling)
+                 )
+      end
+
+      suspect = Repo.get!(Patch, Enum.at(c.links, 2).patch_id)
+      assert suspect.queue_approval["state"] == "withdrawn"
+      assert suspect.source_compatibility["repair_policy"] == "provisional-diagnostic-v1"
+      refute suspect.source_compatibility["provisional"]["proof_authority"]
+      [event] = Repo.all(from(e in CandidateEvent, where: e.kind == "provisional_repair"))
+      assert event.details["pr"] == 3
+      refute event.details["singleton_confirmation_dispatched"]
+      [job] = Repo.all(BorsNG.Database.OrchestrationJob)
+      {_, 3, body, _} = :erlang.binary_to_term(job.payload, [:safe])
+      assert body =~ "PROVISIONAL SUSPECT, not a proven individual failure"
+      assert :retrying = FailureIsolation.split(c.links, batch, nil, conn)
+      assert Repo.aggregate(Batch, :count, :id) == 2
+      assert Repo.aggregate(BorsNG.Database.OrchestrationJob, :count, :id) == 1
+    end
+
+    for variant <- [:manual, :held, :moved_main, :successor, :existing_request, :automatic_bump] do
+      @collision_guard variant
+      test "verified base collision respects existing #{@collision_guard} provisional guard", c do
+        {batch, _, _, _} = base_collision_terminal(c)
+        conn = provisional_mock(c)
+        state = GitHub.ServerMock.get_state()
+        patch = Enum.at(c.links, 2).patch
+
+        case @collision_guard do
+          :automatic_bump ->
+            author =
+              Repo.insert!(%BorsNG.Database.User{
+                login: "tauceti-review-bot[bot]",
+                user_xref: 17106
+              })
+
+            patch
+            |> Ecto.Changeset.change(author_id: author.id, head_ref: "bump-mathlib/test")
+            |> Repo.update!()
+
+          :manual ->
+            patch
+            |> Ecto.Changeset.change(manual_approval: %{"head_sha" => "head3"})
+            |> Repo.update!()
+
+          :held ->
+            GitHub.ServerMock.put_state(put_in(state, [conn, :labels, 3], ["keep"]))
+
+          :moved_main ->
+            GitHub.ServerMock.put_state(put_in(state, [conn, :branches, "main"], "new-main"))
+
+          :successor ->
+            CandidateJournal.event(c.candidate, "successor_reserved", "bors.train", %{
+              candidate_id: 999
+            })
+
+          :existing_request ->
+            patch
+            |> Ecto.Changeset.change(
+              source_compatibility: %{
+                "repair_head" => "head3",
+                "repair_policy" => "provisional-diagnostic-v1"
+              }
+            )
+            |> Repo.update!()
+        end
+
+        assert :retrying = FailureIsolation.split(c.links, batch, nil, conn)
+        refute Repo.exists?(from(e in CandidateEvent, where: e.kind == "provisional_repair"))
+        assert Repo.aggregate(BorsNG.Database.OrchestrationJob, :count, :id) == 0
+        children = Repo.all(from(b in Batch, where: b.id != ^batch.id, order_by: b.id))
+        assert prs(Enum.map(children, &stored_links(&1.id))) == [[3], [1, 2, 4]]
+        assert Enum.all?(Repo.all(Patch), & &1.queue_pending)
+      end
+    end
+
     test "innocent exact-head human approval survives provisional retirement", c do
       approval = %{"head_sha" => "head5", "reviewer" => "human", "scope" => "scripts"}
 
@@ -1866,5 +1962,371 @@ defmodule BorsNG.Worker.FailureIsolationTest do
     })
 
     {%{batch | project: c.project}, conn}
+  end
+
+  defp provisional_mock(_c) do
+    conn = {{:installation, 91}, 14}
+
+    GitHub.ServerMock.put_state(%{
+      conn => %{
+        local_git_mode: "local",
+        branches: %{"main" => "base"},
+        pulls:
+          Map.new(
+            1..4,
+            &{&1, %GitHub.Pr{number: &1, state: :open, base_ref: "main", head_sha: "head#{&1}"}}
+          ),
+        labels: Map.new(1..4, &{&1, []}),
+        comments: Map.new(1..4, &{&1, []})
+      }
+    })
+
+    conn
+  end
+
+  defp collision_sources(binding, paths) do
+    %{
+      "complete" => true,
+      "policy" => "collision-source-identity-v1",
+      "binding" => binding,
+      "authority" => "retry_only",
+      "proof_authority" => false,
+      "files" =>
+        Enum.map(paths, fn path ->
+          entry = %{
+            "blob" => String.duplicate(if(path == "TauCeti/Base.lean", do: "a", else: "b"), 40),
+            "bytes" => 100
+          }
+
+          %{
+            "path" => path,
+            "candidate" => entry,
+            "base" => if(path == "TauCeti/Base.lean", do: entry)
+          }
+        end)
+    }
+  end
+
+  defp base_collision_terminal(c, source_change \\ &Function.identity/1) do
+    {batch, evidence, hints} = provider_terminal(c)
+
+    batch =
+      Repo.get!(Batch, batch.id)
+      |> Batch.changeset(%{state: :running, commit: "staged", base_sha: "base"})
+      |> Repo.update!()
+
+    batch = %{batch | project: c.project}
+    hints = hints |> Map.put("dependencies_complete", true) |> Map.put("import_edges", [[2, 3]])
+
+    CandidateJournal.event(c.candidate, "local_assembled", "bors.local_git", %{
+      commit: "staged",
+      tree: "tree",
+      evidence: %{diagnostic_hints: hints}
+    })
+
+    logs =
+      log_result(["TauCeti/File3.lean", "TauCeti/Base.lean"], "duplicate_declaration")
+      |> put_in(["jobs", Access.at(0), "bytes"], 1000)
+
+    assert :ok =
+             BorsNG.Worker.FailureDiagnostics.observe(
+               batch,
+               evidence,
+               :conn,
+               fn _, [200] -> logs end,
+               fn _, _, _, _ ->
+                 flunk("provider lookup must not supply direct collision evidence")
+               end,
+               fn project, :conn, binding, paths ->
+                 assert project.id == c.project.id
+                 collision_sources(binding, paths) |> source_change.()
+               end
+             )
+
+    FailureIsolation.classified(batch, "candidate_failure", evidence)
+    {batch, evidence, hints, logs}
+  end
+
+  test "verified base collision preserves direct owner before advisory component widening and replays children",
+       c do
+    alias BorsNG.Worker.FailureDiagnostics
+    {batch, evidence, hints, _} = base_collision_terminal(c)
+    assert {:ok, 3, proof} = FailureDiagnostics.base_collision(c.candidate, hints)
+    assert proof["sources"]["policy"] == "collision-source-identity-v1"
+    before = Map.new(c.links, &{&1.patch_id, CandidateJournal.admission(&1.id).snapshot})
+
+    assert {:error, :crash} =
+             Repo.transaction(fn ->
+               assert :retrying = FailureIsolation.split(c.links, batch)
+               Repo.rollback(:crash)
+             end)
+
+    assert Repo.aggregate(Batch, :count, :id) == 1
+    refute Repo.exists?(from(e in CandidateEvent, where: e.kind == "failure_partition"))
+
+    assert {:ok, :retrying} =
+             Repo.transaction(fn ->
+               assert :retrying = FailureIsolation.split(Enum.reverse(c.links), batch)
+               batch |> Batch.changeset(%{state: :error}) |> Repo.update!()
+               :retrying
+             end)
+
+    children = Repo.all(from(b in Batch, where: b.id != ^batch.id, order_by: b.id))
+    groups = Enum.map(children, &stored_links(&1.id))
+    assert prs(groups) == [[3], [1, 2, 4]]
+    assert Enum.all?(children, & &1.sealed)
+
+    for l <- List.flatten(groups) do
+      a = CandidateJournal.admission(l.id).snapshot
+
+      assert Map.take(
+               a,
+               ~w(pr patch_id head_sha reviewer manual_approval bundle_id original_admitted_at scheduling)
+             ) ==
+               Map.take(
+                 before[l.patch_id],
+                 ~w(pr patch_id head_sha reviewer manual_approval bundle_id original_admitted_at scheduling)
+               )
+
+      assert a["parent_batch_id"] == batch.id
+      assert a["parent_candidate_id"] == c.candidate.id
+    end
+
+    [partition] = Repo.all(from(e in CandidateEvent, where: e.kind == "failure_partition"))
+    assert partition.details["groups"] == [[3], [1, 2, 4]]
+    assert partition.details["verified_base_collision"]["pr"] == 3
+    assert partition.details["authority"] == "retry_only"
+
+    assert Enum.all?(
+             Repo.all(Patch),
+             &(&1.queue_pending and &1.queue_approval["state"] == "approved")
+           )
+
+    refute Repo.exists?(from(e in CandidateEvent, where: e.kind == "provisional_repair"))
+    Repo.get!(Batch, batch.id) |> Batch.changeset(%{state: :running}) |> Repo.update!()
+
+    assert :ok =
+             FailureDiagnostics.observe(
+               batch,
+               evidence,
+               :conn,
+               fn _, _ -> flunk("re-read logs") end,
+               fn _, _, _, _ -> flunk("re-read provider") end,
+               fn _, _, _, _ -> flunk("re-read sources") end
+             )
+
+    assert :retrying = FailureIsolation.split(c.links, batch)
+    assert Repo.aggregate(Batch, :count, :id) == 3
+  end
+
+  test "source identity failure retains previous conservative component partition", c do
+    alias BorsNG.Worker.FailureDiagnostics
+
+    {batch, _, hints, _} =
+      base_collision_terminal(c, fn _ -> %{"complete" => false, "reason" => "mirror_busy"} end)
+
+    assert :unavailable = FailureDiagnostics.base_collision(c.candidate, hints)
+    assert :retrying = FailureIsolation.split(c.links, batch)
+
+    assert prs(
+             Repo.all(from(b in Batch, where: b.id != ^batch.id, order_by: b.id))
+             |> Enum.map(&stored_links(&1.id))
+           ) == [[2, 3], [1, 4]]
+  end
+
+  test "base collision pure mapping excludes other owners, mixed findings and imperfect identities",
+       c do
+    alias BorsNG.Worker.FailureDiagnostics
+    {_, evidence, hints, logs} = base_collision_terminal(c)
+    binding = FailureDiagnostics.binding(c.candidate, "staged", evidence)
+    paths = ["TauCeti/Base.lean", "TauCeti/File3.lean"]
+    sources = collision_sources(binding, paths)
+    assert {:ok, 3} = FailureDiagnostics.map_base_collision(hints, logs, binding, sources)
+
+    assert {:ok, groups, "compiler_diagnostics"} =
+             FailureIsolation.partition(
+               c.links,
+               hints
+               |> Map.put("compiler_suspects", [3])
+               |> Map.put("verified_base_collision", %{"pr" => 3}),
+               nil
+             )
+
+    assert prs(groups) == [[3], [1, 2, 4]]
+
+    same_owner =
+      put_in(hints, ["changed_files", Access.at(2), "paths"], [
+        "TauCeti/Base.lean",
+        "TauCeti/File3.lean"
+      ])
+
+    assert :unavailable =
+             FailureDiagnostics.map_base_collision(same_owner, logs, binding, sources)
+
+    overlap =
+      put_in(hints, ["changed_files", Access.at(1), "paths"], [
+        "TauCeti/File2.lean",
+        "TauCeti/Shared.lean"
+      ])
+      |> update_in(["changed_files", Access.at(2), "paths"], &(&1 ++ ["TauCeti/Shared.lean"]))
+      |> Map.put("compiler_suspects", [3])
+      |> Map.put("verified_base_collision", %{"pr" => 3})
+
+    assert {:ok, shared_groups, "compiler_diagnostics"} =
+             FailureIsolation.partition(c.links, overlap, nil)
+
+    assert prs(shared_groups) == [[2, 3], [1, 4]]
+    two_owners = put_in(hints, ["changed_files", Access.at(0), "paths"], ["TauCeti/Base.lean"])
+    shared = put_in(hints, ["changed_files", Access.at(0), "paths"], ["TauCeti/File3.lean"])
+
+    dependency =
+      put_in(hints, ["changed_files", Access.at(0), "dependency_paths"], ["TauCeti/Base.lean"])
+
+    mixed =
+      update_in(
+        logs,
+        ["jobs", Access.at(0), "observations"],
+        &(&1 ++ [%{"kind" => "compiler_error", "paths" => ["TauCeti/File2.lean"]}])
+      )
+
+    pairs =
+      update_in(
+        logs,
+        ["jobs", Access.at(0), "observations"],
+        &(&1 ++
+            [
+              %{
+                "kind" => "duplicate_declaration",
+                "paths" => ["TauCeti/File2.lean", "TauCeti/Other.lean"]
+              }
+            ])
+      )
+
+    for {h, l, b, src} <- [
+          {two_owners, logs, binding, sources},
+          {shared, logs, binding, sources},
+          {dependency, logs, binding, sources},
+          {hints, mixed, binding, sources},
+          {hints, pairs, binding, sources},
+          {hints, Map.put(logs, "complete", false), binding, sources},
+          {hints, put_in(logs, ["jobs", Access.at(0), "bytes"], nil), binding, sources},
+          {hints, logs, binding, Map.put(sources, "complete", false)},
+          {hints, logs, binding, put_in(sources, ["files", Access.at(0), "base"], nil)},
+          {hints, logs, binding,
+           put_in(sources, ["files", Access.at(0), "base", "blob"], String.duplicate("c", 40))},
+          {hints, logs, binding,
+           put_in(
+             sources,
+             ["files", Access.at(1), "base"],
+             sources["files"] |> Enum.at(1) |> Map.get("candidate")
+           )},
+          {hints, logs, binding,
+           put_in(sources, ["files", Access.at(0), "candidate", "bytes"], 262_145)},
+          {hints, logs, binding, Map.put(sources, "policy", "bounded-provider-hint-v1")},
+          {hints, logs, Map.put(binding, "run_attempt", 2), sources},
+          {hints, logs, Map.put(binding, "generation", 2), sources},
+          {hints, logs, Map.put(binding, "base_sha", "other"), sources},
+          {Map.delete(hints, "provenance"), logs, binding, sources},
+          {Map.put(hints, "dependencies_complete", false), logs, binding, sources},
+          {Map.put(hints, "missing_imports", [%{"pr" => 2}]), logs, binding, sources},
+          {put_in(hints, ["changed_files", Access.at(0), "head_sha"], "other"), logs, binding,
+           sources}
+        ] do
+      assert :unavailable = FailureDiagnostics.map_base_collision(h, l, b, src)
+    end
+  end
+
+  test "collision source bypass keeps approved bundles whole and suppresses stronger handoff",
+       c do
+    {batch, _, hints, _} = base_collision_terminal(c)
+    bundle = Repo.insert!(%PatchBundle{project_id: c.project.id})
+
+    Enum.each(Enum.filter(c.links, &(&1.patch.pr_xref in [2, 3])), fn l ->
+      l.patch |> Patch.changeset(%{bundle_id: bundle.id}) |> Repo.update!()
+    end)
+
+    links = stored_links(batch.id)
+    assert :retrying = FailureIsolation.split(links, batch, nil, :no_github_calls)
+
+    groups =
+      Repo.all(from(b in Batch, where: b.id != ^batch.id, order_by: b.id))
+      |> Enum.map(&stored_links(&1.id))
+
+    assert prs(groups) == [[2, 3], [1, 4]]
+    refute Repo.exists?(from(e in CandidateEvent, where: e.kind == "provisional_repair"))
+    assert {:ok, 3, _} = BorsNG.Worker.FailureDiagnostics.base_collision(c.candidate, hints)
+  end
+
+  test "base collision cannot reuse changed classifier or live member state", c do
+    alias BorsNG.Worker.FailureDiagnostics
+    {batch, evidence, hints, _} = base_collision_terminal(c)
+
+    for changed <- [
+          %{evidence | run_id: 101},
+          %{evidence | run_attempt: 2},
+          %{evidence | run_created_at: "2000-01-01T00:00:00Z"},
+          %{evidence | identity: "wrong"},
+          %{evidence | conclusion: "success"},
+          put_in(evidence, [:failed_steps, Access.at(0), :job_id], 201)
+        ] do
+      FailureIsolation.classified(batch, "candidate_failure", changed)
+      assert :unavailable = FailureDiagnostics.base_collision(c.candidate, hints)
+    end
+
+    FailureIsolation.classified(batch, "candidate_failure", evidence)
+    hd(c.links).patch |> Patch.changeset(%{commit: "new"}) |> Repo.update!()
+    assert :unavailable = FailureDiagnostics.base_collision(c.candidate, hints)
+  end
+
+  test "frozen real candidate233 changes only scheduling2/33 to1/34 with exact snapshots" do
+    alias BorsNG.Worker.FailureDiagnostics
+    data = File.read!("test/fixtures/candidate233-base-collision.json") |> Jason.decode!()
+    members = data["members"]
+    assert length(members) == 35
+    assert CandidateJournal.digest(members) == data["binding"]["members_digest"]
+
+    links =
+      Enum.map(members, fn m ->
+        %LinkPatchBatch{
+          id: m["link_id"],
+          patch_id: m["patch_id"],
+          head_sha: m["head_sha"],
+          reviewer: m["reviewer"],
+          manual_approval: m["manual_approval"],
+          patch: %Patch{
+            pr_xref: m["pr"],
+            commit: m["head_sha"],
+            bundle_id: m["bundle_id"],
+            is_single: get_in(m, ["scheduling", "singleton"]) == true
+          }
+        }
+      end)
+
+    assert {:ok, [16504]} = FailureDiagnostics.map_paths(data["hints"], data["logs"])
+    hints = Map.put(data["hints"], "compiler_suspects", [16504])
+    assert {:ok, baseline, "compiler_diagnostics"} = FailureIsolation.partition(links, hints, nil)
+    assert Enum.map(baseline, &length/1) == [2, 33]
+    assert hd(prs(baseline)) == [16504, 16650]
+
+    assert {:ok, 16504} =
+             FailureDiagnostics.map_base_collision(
+               data["hints"],
+               data["logs"],
+               data["binding"],
+               data["collision_sources"]
+             )
+
+    hints = Map.put(hints, "verified_base_collision", %{"pr" => 16504})
+    assert {:ok, groups, "compiler_diagnostics"} = FailureIsolation.partition(links, hints, nil)
+    assert Enum.map(groups, &length/1) == [1, 34]
+    assert hd(prs(groups)) == [16504]
+    assert 16650 in List.last(prs(groups))
+
+    snapshots =
+      Enum.flat_map(groups, fn group ->
+        Enum.map(group, fn link -> Enum.find(members, &(&1["link_id"] == link.id)) end)
+      end)
+
+    assert Enum.sort_by(snapshots, & &1["link_id"]) == Enum.sort_by(members, & &1["link_id"])
   end
 end
