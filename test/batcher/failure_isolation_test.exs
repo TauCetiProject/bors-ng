@@ -199,6 +199,220 @@ defmodule BorsNG.Worker.FailureIsolationTest do
     }
   end
 
+  defp bounded_result(binding, roots, providers \\ ["TauCeti/File3.lean"]) do
+    expanded =
+      Enum.map(
+        roots,
+        &%{
+          "path" => &1,
+          "blob" => String.duplicate("a", 40),
+          "base_blob" => String.duplicate("a", 40),
+          "bytes" => 100,
+          "depth" => 0,
+          "providers" => providers
+        }
+      )
+
+    frontier =
+      Enum.map(
+        providers,
+        &%{
+          "path" => &1,
+          "blob" => String.duplicate("b", 40),
+          "bytes" => 50,
+          "depth" => 1,
+          "stop" => "changed_frontier"
+        }
+      )
+
+    %{
+      "complete" => false,
+      "bounded_complete" => true,
+      "policy" => "bounded_depth_v1",
+      "full_closure_complete" => false,
+      "binding" => binding,
+      "roots" => roots,
+      "nodes" => expanded ++ frontier,
+      "residual_frontier" => [],
+      "changed_frontier" => providers,
+      "headers" => length(roots),
+      "source_bytes" => 100 * length(roots),
+      "elapsed_ms" => 10,
+      "authority" => "retry_only",
+      "proof_authority" => false,
+      "limits" => %{
+        "max_depth" => 5,
+        "max_headers" => 64,
+        "max_file_bytes" => 262_144,
+        "max_source_bytes" => 524_288,
+        "max_paths" => 128,
+        "max_evidence_bytes" => 65_536,
+        "total_timeout_ms" => 5000
+      }
+    }
+  end
+
+  test "bounded natural replays preserve all snapshots; candidate232 has no narrowing gain" do
+    alias BorsNG.Worker.FailureDiagnostics
+
+    for {id, expected, owner} <- [{230, [1, 40], 16291}, {232, [2, 35], 16625}] do
+      data =
+        "test/fixtures/bounded-providers-candidate#{id}.json" |> File.read!() |> Jason.decode!()
+
+      assert CandidateJournal.digest(data["members"]) == data["binding"]["members_digest"]
+      assert :unavailable = FailureDiagnostics.map_paths(data["hints"], data["logs"])
+
+      assert {:ok, [^owner], "bounded_provider_hint"} =
+               FailureDiagnostics.map_retry_providers(
+                 data["hints"],
+                 data["logs"],
+                 data["binding"],
+                 data["provider_lookup"]
+               )
+
+      links =
+        Enum.map(data["members"], fn m ->
+          %LinkPatchBatch{
+            id: m["link_id"],
+            patch_id: m["patch_id"],
+            head_sha: m["head_sha"],
+            reviewer: m["reviewer"],
+            manual_approval: m["manual_approval"],
+            patch: %Patch{
+              pr_xref: m["pr"],
+              commit: m["head_sha"],
+              bundle_id: m["bundle_id"],
+              is_single: get_in(m, ["scheduling", "singleton"]) == true
+            }
+          }
+        end)
+
+      assert {:ok, groups, "bounded_provider_hint"} =
+               FailureIsolation.partition(
+                 links,
+                 Map.put(data["hints"], "bounded_provider_suspects", [owner]),
+                 nil
+               )
+
+      assert Enum.map(groups, &length/1) == expected
+
+      snapshots =
+        groups
+        |> List.flatten()
+        |> Enum.map(fn l -> Enum.find(data["members"], &(&1["link_id"] == l.id)) end)
+
+      assert Enum.sort_by(snapshots, & &1["link_id"]) ==
+               Enum.sort_by(data["members"], & &1["link_id"])
+
+      if id == 232 do
+        assert {:ok, baseline, "dependency_component"} =
+                 FailureIsolation.partition(links, data["hints"], nil)
+
+        assert prs(groups) == prs(baseline)
+        assert prs(groups) == data["recorded_baseline"]["details"]["groups"]
+      end
+    end
+  end
+
+  test "one weak bounded owner cannot invoke provisional eviction or diagnosis", c do
+    alias BorsNG.Worker.FailureDiagnostics
+    {batch, evidence, hints} = provider_terminal(c)
+    logs = log_result(["TauCeti/Downstream.lean"])
+    lookup = fn _, :conn, binding, paths -> bounded_result(binding, paths) end
+    assert :ok = FailureDiagnostics.observe(batch, evidence, :conn, fn _, _ -> logs end, lookup)
+    FailureIsolation.classified(batch, "candidate_failure", evidence)
+    assert :unavailable = FailureDiagnostics.diagnosis(c.candidate, hints)
+    assert :unavailable = FailureDiagnostics.suspects(c.candidate, hints)
+
+    assert {:ok, [3], "bounded_provider_hint"} =
+             FailureDiagnostics.retry_suspects(c.candidate, hints)
+
+    # No mocked GitHub call: an attempted provisional repair fails the test.
+    assert :retrying = FailureIsolation.split(c.links, batch, nil, :conn)
+    children = Repo.all(from(b in Batch, where: b.id != ^batch.id, order_by: b.id))
+    groups = Enum.map(children, &stored_links(&1.id))
+    assert prs(groups) == [[3], [1, 2, 4]]
+    assert Enum.all?(children, & &1.sealed)
+
+    for link <- List.flatten(groups) do
+      original = Enum.find(c.links, &(&1.patch_id == link.patch_id))
+
+      assert Map.take(link, [:head_sha, :reviewer, :manual_approval]) ==
+               Map.take(original, [:head_sha, :reviewer, :manual_approval])
+
+      admission = CandidateJournal.admission(link.id).snapshot
+      before = CandidateJournal.admission(original.id)
+      assert admission["original_admitted_at"] == before.snapshot["original_admitted_at"]
+      assert admission["parent_candidate_id"] == c.candidate.id
+      assert admission["parent_admission_id"] == before.id
+      assert admission["retry_reason"] == "bounded_provider_hint"
+      assert link.patch.queue_approval == original.patch.queue_approval
+      assert link.patch.source_compatibility == original.patch.source_compatibility
+      assert link.patch.bundle_id == original.patch.bundle_id
+    end
+
+    refute Repo.exists?(from(e in CandidateEvent, where: e.kind == "provisional_repair"))
+
+    assert :ok =
+             FailureDiagnostics.observe(
+               batch,
+               evidence,
+               :conn,
+               fn _, _ -> flunk("immutable logs repeated") end,
+               fn _, _, _, _ -> flunk("immutable lookup repeated") end
+             )
+
+    FailureIsolation.classified(batch, "candidate_failure", %{evidence | run_attempt: 2})
+    assert :unavailable = FailureDiagnostics.retry_suspects(c.candidate, hints)
+  end
+
+  test "bounded validation rejects partial graphs, moved bindings, caps and forged coverage", c do
+    alias BorsNG.Worker.FailureDiagnostics
+    logs = log_result(["TauCeti/Downstream.lean"])
+    binding = %{"run_id" => 100}
+
+    result =
+      bounded_result(binding, ["TauCeti/Downstream.lean"], [
+        "TauCeti/File2.lean",
+        "TauCeti/File3.lean"
+      ])
+
+    assert {:ok, [2, 3]} =
+             FailureDiagnostics.map_bounded_providers(c.hints, logs, binding, result)
+
+    for bad <- [
+          Map.put(result, "bounded_complete", false),
+          Map.put(result, "complete", true),
+          Map.put(result, "full_closure_complete", true),
+          Map.put(result, "binding", %{}),
+          Map.put(result, "proof_authority", true),
+          Map.put(result, "elapsed_ms", 5001),
+          Map.put(result, "source_bytes", 0),
+          Map.put(result, "headers", 65),
+          Map.put(result, "nodes", Enum.take(result["nodes"], 2)),
+          Map.put(result, "changed_frontier", []),
+          Map.put(result, "residual_frontier", ["hidden"]),
+          put_in(result, ["limits", "max_depth"], 6),
+          put_in(result, ["nodes", Access.at(0), "base_blob"], "moved"),
+          put_in(result, ["nodes", Access.at(0), "providers"], ["../secret"]),
+          put_in(result, ["nodes", Access.at(1), "stop"], "depth_limit")
+        ] do
+      assert :unavailable = FailureDiagnostics.map_retry_providers(c.hints, logs, binding, bad)
+    end
+
+    # Every diagnostic root needs a reachable changed frontier, even when roots share paths.
+    roots = ["TauCeti/Downstream.lean", "TauCeti/Other.lean"]
+    multi = bounded_result(binding, roots)
+
+    assert {:ok, [3]} =
+             FailureDiagnostics.map_bounded_providers(c.hints, log_result(roots), binding, multi)
+
+    multi = put_in(multi, ["nodes", Access.at(1), "providers"], [])
+
+    assert :unavailable =
+             FailureDiagnostics.map_bounded_providers(c.hints, log_result(roots), binding, multi)
+  end
+
   test "exact candidate225 production replay narrows 1/21 and preserves every frozen snapshot" do
     alias BorsNG.Worker.FailureDiagnostics
     data = "test/fixtures/import-providers-candidate225.json" |> File.read!() |> Jason.decode!()

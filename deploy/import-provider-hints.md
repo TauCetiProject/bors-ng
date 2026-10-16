@@ -1,5 +1,9 @@
 # Direct import-provider retry hints
 
+The subsequent [bounded-depth policy](bounded-provider-hints.md) extends new
+observations under its distinct advisory contract; this page describes the
+original direct-only policy and its rollback mode.
+
 Refs TauCetiProject/TauCeti#17084. When complete, exact-run compiler diagnostics
 name only unmapped project files, Bors can inspect their direct imports at the
 failed candidate commit. Every inspected file must have the same blob and size

@@ -137,6 +137,173 @@ class LocalGitTest(unittest.TestCase):
             TestMirror(request | dict(root=str(self.root / 'absent')), self.upstream).run()
         self.assertFalse((self.root / 'absent').exists())
 
+    def bounded_fixture(self, sources=None, roots=None, changed=None):
+        sources = sources or {
+            'TauCeti/Root.lean': 'import TauCeti.Middle\nimport TauCeti.Branch',
+            'TauCeti/Middle.lean': 'import TauCeti.Owner',
+            'TauCeti/Branch.lean': 'import TauCeti.Root\nimport TauCeti.Middle',
+            'TauCeti/Owner.lean': 'import TauCeti.MissingBeyondChangedFrontier'}
+        commit = self.commit(self.base, sources)
+        self.request.update(identity=self.request['identity'] | dict(base_sha=commit),
+                            members=[self.member(1, commit)])
+        self.run_mirror()
+        return self.request | dict(operation='bounded_import_providers', timeout=5,
+            paths=roots or ['TauCeti/Root.lean'], changed_paths=changed or ['TauCeti/Owner.lean'],
+            binding=dict(candidate_id=1, generation=1, members_digest='a' * 64,
+                base_sha=commit, commit=commit, run_id=100, run_attempt=1, job_ids=[200],
+                workflow='.github/workflows/pr-build.yml'))
+
+    def test_bounded_cycles_shared_paths_and_changed_frontier_stop_offline(self):
+        from unittest.mock import patch
+        request = self.bounded_fixture()
+        local.validate(request)
+        mirror = TestMirror(request, self.upstream)
+        with patch.object(mirror, 'fetch', side_effect=AssertionError('network')), \
+                patch.object(mirror, 'initialize', side_effect=AssertionError('initialize')):
+            result = mirror.run()
+        self.assertTrue(result['bounded_complete'])
+        self.assertFalse(result['complete'])
+        self.assertFalse(result['full_closure_complete'])
+        self.assertEqual(result['policy'], 'bounded_depth_v1')
+        self.assertEqual(result['headers'], 3)
+        self.assertEqual(len(result['nodes']), 4)
+        self.assertEqual(result['changed_frontier'], ['TauCeti/Owner.lean'])
+        self.assertEqual(result['residual_frontier'], [])
+        self.assertEqual(result['nodes'][-1]['stop'], 'changed_frontier')
+        warm = TestMirror(request, self.upstream).run()
+        self.assertEqual(warm['nodes'], result['nodes'])
+        self.assertEqual(warm['cold_blobs'], 0)
+        self.assertEqual(warm['source_bytes'], result['source_bytes'])
+
+    def test_bounded_multiple_roots_depth_residual_and_hidden_owner(self):
+        sources = {f'TauCeti/N{i}.lean': f'import TauCeti.N{i+1}' for i in range(6)}
+        sources |= {'TauCeti/Root.lean': 'import TauCeti.N1\nimport TauCeti.Owner',
+                    'TauCeti/Owner.lean': '-- frontier', 'TauCeti/N6.lean': '-- hidden owner'}
+        request = self.bounded_fixture(sources, ['TauCeti/Root.lean', 'TauCeti/N0.lean'],
+                                       ['TauCeti/N6.lean', 'TauCeti/Owner.lean'])
+        result = TestMirror(request, self.upstream).run()
+        self.assertEqual(result['changed_frontier'], ['TauCeti/Owner.lean'])
+        self.assertEqual(result['residual_frontier'], ['TauCeti/N5.lean'])
+        self.assertNotIn('TauCeti/N6.lean', [n['path'] for n in result['nodes']])
+        self.assertEqual(result['headers'], 6)
+        # Expanding N5 would exceed the declared contract, even on a warm cache.
+        self.assertTrue(result['bounded_complete'])
+        self.assertFalse(result['proof_authority'])
+
+    def test_frozen_natural_bounded_source_graphs_match_real_git_and_parser(self):
+        import gzip
+        for candidate, headers, byte_count, residual in [(230, 37, 493244, 15), (232, 36, 457279, 5)]:
+            fixture = Path(__file__).parent / 'fixtures' / f'bounded-providers-candidate{candidate}'
+            data = json.loads(fixture.with_suffix('.json').read_text())
+            sources = json.loads(gzip.decompress(Path(str(fixture) + '-sources.json.gz').read_bytes()))
+            expected = data['provider_lookup']
+            request = self.bounded_fixture(sources, expected['roots'],
+                sorted({p for m in data['hints']['changed_files'] for p in m['paths']
+                        if local.PROVIDER_PATH.fullmatch(p)}))
+            result = TestMirror(request, self.upstream).run()
+            # Portable minimal Git trees retain every original source blob. Only
+            # tree/commit binding is synthetic; frozen production replay is separate.
+            self.assertEqual(result['nodes'], expected['nodes'])
+            self.assertEqual(result['headers'], headers)
+            self.assertEqual(result['source_bytes'], byte_count)
+            self.assertEqual(len(result['residual_frontier']), residual)
+            self.assertEqual(result['changed_frontier'], expected['changed_frontier'])
+            self.assertTrue(result['bounded_complete'])
+
+    def test_bounded_resource_caps_are_shared_across_roots_and_cached_headers(self):
+        for sources, roots, reason in [
+            ({'TauCeti/A.lean': 'import TauCeti.Owner\n' + ' ' * 180000,
+              'TauCeti/B.lean': 'import TauCeti.Owner\n' + ' ' * 180000,
+              'TauCeti/C.lean': 'import TauCeti.Owner\n' + ' ' * 180000,
+              'TauCeti/Owner.lean': ''}, ['TauCeti/A.lean', 'TauCeti/B.lean', 'TauCeti/C.lean'], 'provider_byte_limit'),
+            ({'TauCeti/Root.lean': '\n'.join(f'import TauCeti.P{i}' for i in range(65)),
+              **{f'TauCeti/P{i}.lean': '-- source' for i in range(65)}}, None, 'provider_header_limit'),
+            ({'TauCeti/Root.lean': '\n'.join(f'import TauCeti.P{i}' for i in range(128)),
+              **{f'TauCeti/P{i}.lean': '' for i in range(128)}}, None, 'provider_count_limit'),
+            ({'TauCeti/Root.lean': ' ' * (262144 + 1)}, None, 'provider_byte_limit')]:
+            request = self.bounded_fixture(sources, roots)
+            with self.assertRaises(local.Failure) as failure:
+                TestMirror(request, self.upstream).run()
+            self.assertEqual(failure.exception.details['kind'], reason)
+
+    def test_bounded_partial_reads_parse_missing_blob_and_deadline_never_complete(self):
+        from unittest.mock import patch
+        for content in ['private import TauCeti.Unknown', '/- unterminated', 'import «TauCeti.Hidden»', '\ufeffimport TauCeti.Owner']:
+            request = self.bounded_fixture({'TauCeti/Root.lean': content})
+            with self.assertRaises(local.Failure):
+                TestMirror(request, self.upstream).run()
+        request = self.bounded_fixture()
+        mirror = TestMirror(request, self.upstream)
+        with patch.object(mirror, 'diagnostic_objects', return_value=[b'import']):
+            with self.assertRaises(local.Failure):
+                mirror.run()
+        mirror = TestMirror(request, self.upstream)
+        parse = local.compatibility_imports
+        def expire(content):
+            mirror.deadline = time.monotonic() - 1
+            return parse(content)
+        with patch.object(local, 'compatibility_imports', side_effect=expire):
+            with self.assertRaises(local.Failure) as failure:
+                mirror.run()
+            self.assertEqual(failure.exception.details['kind'], 'timeout')
+        request = self.bounded_fixture({'TauCeti/Root.lean': 'import TauCeti.Absent'})
+        with self.assertRaises(local.Failure):
+            TestMirror(request, self.upstream).run()
+        request = self.bounded_fixture()
+        mirror = TestMirror(request, self.upstream)
+        oid = git(self.upstream, 'rev-parse', request['binding']['commit'] + ':TauCeti/Owner.lean')
+        # A missing-object response for a terminal frontier must fail too.
+        original_git = mirror.git
+        def missing_terminal(*args, **kwargs):
+            result, status = original_git(*args, **kwargs)
+            if args[:2] == ('cat-file', '--batch-check'):
+                result = '\n'.join(oid + ' missing' if line.startswith(oid + ' ') else line
+                                   for line in result.splitlines()) + '\n'
+            return result, status
+        with patch.object(mirror, 'git', side_effect=missing_terminal):
+            with self.assertRaises(local.Failure):
+                mirror.run()
+
+    def test_bounded_busy_cold_objects_real_alarm_and_output_cap(self):
+        import fcntl
+        from unittest.mock import patch
+        request = self.bounded_fixture()
+        with (Path(request['root']) / '.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaises(local.Failure) as failure:
+                TestMirror(request, self.upstream).run()
+            self.assertEqual(failure.exception.details['kind'], 'mirror_busy')
+        with self.assertRaises(local.Failure):
+            TestMirror(request | dict(root=str(self.root / 'absent')), self.upstream).run()
+        with self.assertRaises(local.Failure):
+            TestMirror(request | dict(binding=request['binding'] | dict(commit='f' * 40)), self.upstream).run()
+        mirror = TestMirror(request | dict(timeout=0.1), self.upstream)
+        started = time.monotonic()
+        with patch.object(local, 'compatibility_imports', side_effect=lambda _: time.sleep(2)):
+            with self.assertRaises(local.Failure) as failure:
+                mirror.run()
+        self.assertEqual(failure.exception.details['kind'], 'timeout')
+        self.assertLess(time.monotonic() - started, 1)
+        modules = ['TauCeti.' + 'P' * 180 + str(i) for i in range(30)]
+        header = '\n'.join('import ' + m for m in modules)
+        sources = {m.replace('.', '/') + '.lean': header for m in modules}
+        sources['TauCeti/Root.lean'] = header
+        request = self.bounded_fixture(sources)
+        with self.assertRaises(local.Failure) as failure:
+            TestMirror(request, self.upstream).run()
+        self.assertEqual(failure.exception.details['kind'], 'provider_output_limit')
+        self.assertFalse(failure.exception.details['bounded_complete'])
+        self.assertTrue(failure.exception.details['progress']['evidence_truncated'])
+        self.assertLess(len(json.dumps(failure.exception.details).encode()), 65536)
+        # Production CLI also emits explicit unknown coverage for failures.
+        request_path = self.root / 'bounded-request.json'
+        request_path.write_text(json.dumps(request))
+        result = json.loads(subprocess.check_output(['python3', str(Path(local.__file__)), str(request_path)]))
+        self.assertFalse(result['bounded_complete'])
+        self.assertEqual(result['policy'], 'bounded_depth_v1')
+        self.assertEqual(result['limits'], local.PROVIDER_LIMITS)
+        self.assertLess(len(json.dumps(result).encode()), 65536)
+
     def test_compatibility_deleted_source_and_unchanged_importer(self):
         fork = self.commit(self.base, {'TauCeti/Old.lean': 'def old := 1',
             'TauCeti/Dependency.lean': 'import TauCeti.Old\ndef dependency := 1'})
