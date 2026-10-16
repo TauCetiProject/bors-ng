@@ -115,6 +115,93 @@ defmodule BorsNG.Worker.CandidateJournalTest do
     assert Journal.admission(child_link.id) == a
   end
 
+  test "one bulk read orders live unchanged members and excludes withdrawn history", ctx do
+    link = member(ctx.batch, ctx.patch)
+    other = Repo.insert!(Batch.new(ctx.project.id, "main"))
+    patch = Repo.insert!(%Patch{project_id: ctx.project.id, pr_xref: 43, commit: "other"})
+    other_link = member(other, patch)
+    now = System.system_time(:microsecond)
+    assert Journal.queue_age_members([ctx.batch, other]) |> length() == 2
+    rows = Journal.queue_age_members([ctx.batch, other])
+    keys = BorsNG.Worker.Batcher.QueueAge.keys([ctx.batch, other], rows, now)
+    assert elem(keys[ctx.batch.id], 1) == :original_admission
+    assert elem(keys[other.id], 1) == :original_admission
+    Repo.delete!(link)
+
+    assert Journal.queue_age_members([ctx.batch, other]) |> Enum.map(fn {l, _, _} -> l.id end) ==
+             [other_link.id]
+
+    assert Journal.admission(link.id) != nil
+    patch |> Patch.changeset(%{commit: "changed"}) |> Repo.update!()
+    keys = BorsNG.Worker.Batcher.QueueAge.keys([other], Journal.queue_age_members([other]), now)
+    assert elem(keys[other.id], 1) == :poll_fallback
+    assert Journal.queue_age_members([%{other | state: :running}]) == []
+  end
+
+  test "scheduler metadata is one bulk read and deferred while serial running", ctx do
+    member(ctx.batch, ctx.patch)
+    repo = :persistent_term.get(:db_repo)
+    event = repo.config()[:telemetry_prefix] ++ [:query]
+    ref = make_ref()
+
+    :telemetry.attach(
+      ref,
+      event,
+      fn _, _, metadata, {owner, ref} ->
+        if String.contains?(metadata.query, "candidate_admissions"), do: send(owner, ref)
+      end,
+      {self(), ref}
+    )
+
+    on_exit(fn -> :telemetry.detach(ref) end)
+    assert {:waiting, [batch]} = BorsNG.Worker.Batcher.sort_batches([ctx.batch])
+    assert batch.id == ctx.batch.id
+    assert_received ^ref
+    refute_received ^ref
+    running = %{ctx.batch | id: -1, state: :running, priority: 100}
+    assert {:running, _} = BorsNG.Worker.Batcher.sort_batches([running, ctx.batch])
+    refute_received ^ref
+    assert {:running, _} = BorsNG.Worker.Batcher.sort_batches([running, ctx.batch], :successor)
+    assert_received ^ref
+    refute_received ^ref
+  end
+
+  test "multiple sealed retry generations retain identity and exhaust FIFO inheritance", ctx do
+    link = member(ctx.batch, ctx.patch)
+    original = Journal.admission(link.id)
+
+    Enum.reduce(1..5, ctx.batch, fn generation, parent ->
+      parent |> Batch.changeset(%{state: :error, priority: 100}) |> Repo.update!()
+
+      child =
+        Divider.clone_batch(
+          Repo.all(LinkPatchBatch.from_batch(parent.id)),
+          ctx.project.id,
+          "main"
+        )
+
+      child_link = Repo.one!(LinkPatchBatch.from_batch(child.id))
+      admission = Journal.admission(child_link.id)
+      assert child.sealed
+      assert child.priority == ctx.patch.priority
+      assert admission.snapshot["queue_age_retries"] == min(generation, 3)
+
+      assert admission.snapshot["original_admitted_at"] ==
+               original.snapshot["original_admitted_at"]
+
+      assert child_link.head_sha == link.head_sha
+      assert child_link.reviewer == link.reviewer
+      assert child_link.manual_approval == link.manual_approval
+      rows = Journal.queue_age_members([child])
+      keys = BorsNG.Worker.Batcher.QueueAge.keys([child], rows, System.system_time(:microsecond))
+
+      assert elem(keys[child.id], 1) ==
+               if(generation < 3, do: :original_admission, else: :retry_fairness)
+
+      child
+    end)
+  end
+
   test "scheduling evidence is expendable and never changes approval identity", ctx do
     BorsNG.Worker.Batcher.Diversity.remember(ctx.patch, ["roadmap/A"])
     link = member(ctx.batch, ctx.patch)
