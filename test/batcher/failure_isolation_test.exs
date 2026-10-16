@@ -939,4 +939,395 @@ defmodule BorsNG.Worker.FailureIsolationTest do
     assert event.details["evidence"]["run_id"] == 5
     refute event.details["proof_authority"]
   end
+
+  describe "provisional diagnostic repair" do
+    setup do
+      :sys.suspend(BorsNG.Worker.Orchestration.Dispatcher)
+      on_exit(fn -> :sys.resume(BorsNG.Worker.Orchestration.Dispatcher) end)
+      old = System.get_env("BORS_ASYNC_ORCHESTRATION")
+      System.put_env("BORS_ASYNC_ORCHESTRATION", "true")
+
+      on_exit(fn ->
+        if old,
+          do: System.put_env("BORS_ASYNC_ORCHESTRATION", old),
+          else: System.delete_env("BORS_ASYNC_ORCHESTRATION")
+      end)
+
+      :ok
+    end
+
+    test "one bound owner skips singleton CI, preserves remainder and deduplicates restart", c do
+      {batch, conn} = provisional_candidate(c)
+      before = Map.new(c.links, &{&1.patch_id, CandidateJournal.admission(&1.id).snapshot})
+      assert :retrying = FailureIsolation.split(c.links, batch, nil, conn)
+      assert Repo.get!(Batch, batch.id).state == :error
+      children = Repo.all(from(b in Batch, where: b.id != ^batch.id))
+      assert [child] = children
+      assert child.sealed
+      remaining = stored_links(child.id)
+      assert prs([remaining]) == [[1, 2, 4]]
+
+      for link <- remaining do
+        admission = CandidateJournal.admission(link.id).snapshot
+        assert admission["original_admitted_at"] == before[link.patch_id]["original_admitted_at"]
+        assert admission["scheduling"] == before[link.patch_id]["scheduling"]
+        assert admission["parent_candidate_id"] == c.candidate.id
+        assert link.reviewer == "r"
+        assert link.manual_approval == nil
+        assert Repo.get!(Patch, link.patch_id).queue_approval["state"] == "approved"
+      end
+
+      suspect = Repo.get!(Patch, Enum.at(c.links, 2).patch_id)
+      assert suspect.queue_approval["state"] == "withdrawn"
+      assert suspect.source_compatibility["repair_policy"] == "provisional-diagnostic-v1"
+      refute suspect.source_compatibility["provisional"]["proof_authority"]
+      assert suspect.source_compatibility["provisional"]["binding"]["run_attempt"] == 1
+      assert [%{payload: payload}] = Repo.all(BorsNG.Database.OrchestrationJob)
+      {_, 3, body, marker} = :erlang.binary_to_term(payload, [:safe])
+      assert body =~ "PROVISIONAL SUSPECT, not a proven individual failure"
+      assert body =~ "candidate #{c.candidate.id}"
+      assert body =~ "run attempt 1"
+      assert marker == "<!--tauceti-rebase:v1 head3-->"
+      assert Repo.aggregate(BorsNG.Database.Status, :count, :id) == 0
+      assert :retrying = FailureIsolation.split(c.links, batch, nil, conn)
+      assert Repo.aggregate(Batch, :count, :id) == 2
+      assert Repo.aggregate(BorsNG.Database.OrchestrationJob, :count, :id) == 1
+    end
+
+    test "innocent exact-head human approval survives provisional retirement", c do
+      approval = %{"head_sha" => "head5", "reviewer" => "human", "scope" => "scripts"}
+
+      innocent =
+        Repo.insert!(%Patch{
+          project_id: c.project.id,
+          pr_xref: 5,
+          commit: "head5",
+          into_branch: "main",
+          manual_approval: approval
+        })
+
+      CandidateJournal.insert_member(
+        LinkPatchBatch.changeset(%LinkPatchBatch{}, %{
+          batch_id: c.batch.id,
+          patch_id: innocent.id,
+          head_sha: "head5",
+          manual_approval: approval,
+          reviewer: "human"
+        })
+      )
+
+      links = stored_links(c.batch.id)
+      candidate = CandidateJournal.begin(c.batch, links, "base")
+
+      hints =
+        Map.update!(
+          c.hints,
+          "changed_files",
+          &(&1 ++ [%{"pr" => 5, "head_sha" => "head5", "paths" => ["Scripts/helper.py"]}])
+        )
+
+      c = %{c | links: links, candidate: candidate, hints: hints}
+      {batch, conn} = provisional_candidate(c)
+      assert :retrying = FailureIsolation.split(links, batch, nil, conn)
+      [child] = Repo.all(from(b in Batch, where: b.id != ^batch.id))
+      preserved = stored_links(child.id) |> Enum.find(&(&1.patch_id == innocent.id))
+      assert preserved.manual_approval == approval
+      assert preserved.reviewer == "human"
+      assert Repo.get!(Patch, innocent.id).manual_approval == approval
+
+      assert CandidateJournal.admission(preserved.id).snapshot["parent_candidate_id"] ==
+               candidate.id
+    end
+
+    for variant <- [
+          :multiple,
+          :unowned,
+          :generic,
+          :wrong_attempt,
+          :wrong_head,
+          :moved_main,
+          :held,
+          :manual,
+          :api_outage,
+          :tracked,
+          :component
+        ] do
+      @variant variant
+      test "#{variant} retains conservative fully checked retries", c do
+        paths =
+          case @variant do
+            :multiple -> ["TauCeti/File2.lean", "TauCeti/File3.lean"]
+            :unowned -> ["TauCeti/Unknown.lean"]
+            _ -> ["TauCeti/File3.lean"]
+          end
+
+        {batch, conn} = provisional_candidate(c, paths)
+        state = GitHub.ServerMock.get_state()
+
+        case @variant do
+          :wrong_attempt ->
+            event =
+              Repo.one!(
+                from(e in CandidateEvent,
+                  where: e.candidate_id == ^c.candidate.id and e.kind == "failure_classified"
+                )
+              )
+
+            evidence = event.details["evidence"] |> Map.put("run_attempt", 2)
+            FailureIsolation.classified(batch, "candidate_failure", evidence)
+
+          :wrong_head ->
+            p = Enum.at(c.links, 2).patch
+            p |> Ecto.Changeset.change(commit: "new-head") |> Repo.update!()
+
+          :moved_main ->
+            GitHub.ServerMock.put_state(put_in(state, [conn, :branches, "main"], "new-main"))
+
+          :held ->
+            GitHub.ServerMock.put_state(put_in(state, [conn, :labels, 3], ["keep"]))
+
+          :api_outage ->
+            GitHub.ServerMock.put_state(put_in(state, [conn, :branches], %{}))
+
+          :manual ->
+            p = Enum.at(c.links, 2).patch
+
+            p
+            |> Ecto.Changeset.change(manual_approval: %{"head_sha" => "head3"})
+            |> Repo.update!()
+
+          :tracked ->
+            CandidateJournal.event(c.candidate, "train_reserved", "bors.train", %{})
+
+          :component ->
+            hints =
+              ownership_hints(c)
+              |> Map.put("dependencies_complete", true)
+              |> Map.put("import_edges", [[3, 2]])
+
+            CandidateJournal.event(c.candidate, "local_assembled", "bors.local_git", %{
+              commit: "staged",
+              tree: "tree",
+              evidence: %{diagnostic_hints: hints}
+            })
+
+          :generic ->
+            Repo.delete_all(from(e in CandidateEvent, where: e.kind == "failure_diagnostics"))
+
+          _ ->
+            :ok
+        end
+
+        assert :retrying = FailureIsolation.split(c.links, batch, nil, conn)
+        assert Repo.aggregate(BorsNG.Database.OrchestrationJob, :count, :id) == 0
+        refute Repo.exists?(from(e in CandidateEvent, where: e.kind == "provisional_repair"))
+        children = Repo.all(from(b in Batch, where: b.id != ^batch.id))
+
+        assert Enum.sort(Enum.flat_map(children, &stored_links(&1.id)) |> Enum.map(& &1.head_sha)) ==
+                 Enum.sort(Enum.map(c.links, & &1.head_sha))
+      end
+    end
+
+    for stop <- [:new_head, :pause, :withdrawal, :api_outage] do
+      @stop stop
+      test "unconfirmed fallback respects #{@stop}", c do
+        alias BorsNG.Worker.SourceCompatibility
+        {batch, conn} = provisional_candidate(c)
+        assert :retrying = FailureIsolation.split(c.links, batch, nil, conn)
+        p = Repo.get!(Patch, Enum.at(c.links, 2).patch_id)
+
+        r =
+          put_in(
+            p.source_compatibility,
+            ["provisional", "requested_at"],
+            System.system_time(:second) - 5701
+          )
+
+        p = p |> Ecto.Changeset.change(source_compatibility: r) |> Repo.update!()
+        state = GitHub.ServerMock.get_state()
+
+        case @stop do
+          :new_head ->
+            p |> Ecto.Changeset.change(commit: "new-head") |> Repo.update!()
+
+          :pause ->
+            GitHub.ServerMock.put_state(put_in(state, [conn, :labels, 3], ["human"]))
+
+          :withdrawal ->
+            p
+            |> Ecto.Changeset.change(
+              queue_approval: %{
+                "state" => "withdrawn",
+                "reason" => "requested",
+                "head_sha" => "head3"
+              }
+            )
+            |> Repo.update!()
+
+          :api_outage ->
+            GitHub.ServerMock.put_state(put_in(state, [conn, :branches], %{}))
+        end
+
+        assert :unavailable =
+                 SourceCompatibility.provisional_fallback(
+                   c.project,
+                   conn,
+                   Repo.get!(Patch, p.id),
+                   "base"
+                 )
+
+        assert Repo.aggregate(Batch, :count, :id) == 2
+
+        refute get_in(Repo.get!(Patch, p.id).source_compatibility, [
+                 "provisional",
+                 "fallback_batch_id"
+               ])
+      end
+    end
+
+    test "a real isolated failure upgrades provenance without resetting repair or fallback", c do
+      alias BorsNG.Worker.SourceCompatibility
+      {batch, conn} = provisional_candidate(c)
+      assert :retrying = FailureIsolation.split(c.links, batch, nil, conn)
+      p = Repo.get!(Patch, Enum.at(c.links, 2).patch_id)
+
+      r =
+        put_in(
+          p.source_compatibility,
+          ["provisional", "requested_at"],
+          System.system_time(:second) - 5701
+        )
+
+      p = p |> Ecto.Changeset.change(source_compatibility: r) |> Repo.update!()
+      assert {:ok, _} = SourceCompatibility.provisional_fallback(c.project, conn, p, "base")
+      p = Repo.get!(Patch, p.id)
+      fallback = Repo.get!(Batch, p.source_compatibility["provisional"]["fallback_batch_id"])
+      links = stored_links(fallback.id)
+      candidate = CandidateJournal.begin(fallback, links, "base")
+
+      CandidateJournal.bind(
+        candidate,
+        "isolated",
+        "isolated-tree",
+        "base",
+        %BorsToml{status: ["build"]},
+        %{}
+      )
+
+      fallback = %{fallback | commit: "isolated", base_sha: "base"}
+
+      evidence = %{
+        conclusion: "failure",
+        run_id: 101,
+        diagnostic: nil,
+        failed_steps: [
+          %{name: "Build exact candidate under bwrap with workflow-pinned audits, offline"}
+        ]
+      }
+
+      FailureIsolation.classified(fallback, "candidate_failure", evidence)
+      SourceCompatibility.proven_failure(fallback, links, conn)
+      p = Repo.get!(Patch, p.id)
+      assert p.source_compatibility["status"] == "integrated_failure"
+      assert p.source_compatibility["repair_policy"] == "authoritative-individual-v1"
+      assert p.source_compatibility["provisional"]["fallback_batch_id"] == fallback.id
+      assert SourceCompatibility.requested?(p, "head3")
+      assert :unavailable = SourceCompatibility.provisional_fallback(c.project, conn, p, "base")
+      assert Repo.aggregate(BorsNG.Database.OrchestrationJob, :count, :id) == 2
+      SourceCompatibility.proven_failure(fallback, links, conn)
+      assert Repo.aggregate(BorsNG.Database.OrchestrationJob, :count, :id) == 2
+    end
+
+    test "unconfirmed no-op gets one sealed fallback, never a cheap pass or new repair attempt",
+         c do
+      alias BorsNG.Worker.SourceCompatibility
+      {batch, conn} = provisional_candidate(c)
+      assert :retrying = FailureIsolation.split(c.links, batch, nil, conn)
+      p = Repo.get!(Patch, Enum.at(c.links, 2).patch_id)
+      assert :unavailable = SourceCompatibility.provisional_fallback(c.project, conn, p, "base")
+
+      r =
+        put_in(
+          p.source_compatibility,
+          ["provisional", "requested_at"],
+          System.system_time(:second) - 5701
+        )
+
+      p = p |> Ecto.Changeset.change(source_compatibility: r) |> Repo.update!()
+      assert {:ok, _} = SourceCompatibility.provisional_fallback(c.project, conn, p, "base")
+      p = Repo.get!(Patch, p.id)
+      fallback = Repo.get!(Batch, p.source_compatibility["provisional"]["fallback_batch_id"])
+      assert fallback.sealed
+      assert prs([stored_links(fallback.id)]) == [[3]]
+      assert SourceCompatibility.requested?(p, "head3")
+      assert p.source_compatibility["status"] == "suspected_failure"
+      assert :unavailable = SourceCompatibility.provisional_fallback(c.project, conn, p, "base")
+      # A cheap header PASS never resolves compiler suspicion or authenticates a repair.
+      result = %{
+        "pr" => 3,
+        "head_sha" => "head3",
+        "base_sha" => "base",
+        "policy" => "local-source-v3",
+        "status" => "pass"
+      }
+
+      SourceCompatibility.apply_results(c.project, conn, "base", [p], [result])
+      p = Repo.get!(Patch, p.id)
+      assert SourceCompatibility.requested?(p, "head3")
+      assert p.source_compatibility["repair_policy"] == "provisional-diagnostic-v1"
+
+      assert SourceCompatibility.admit(
+               c.project,
+               conn,
+               fallback,
+               stored_links(fallback.id),
+               "base"
+             )
+             |> length() == 1
+
+      assert Repo.aggregate(BorsNG.Database.OrchestrationJob, :count, :id) == 1
+      [event] = Repo.all(from(e in CandidateEvent, where: e.kind == "provisional_unconfirmed"))
+      refute event.details["proof_authority"]
+      assert event.details["fallback_batch_id"] == fallback.id
+    end
+  end
+
+  defp provisional_candidate(c, paths \\ ["TauCeti/File3.lean"]) do
+    {batch, evidence} = terminal(c)
+
+    batch =
+      Repo.get!(Batch, batch.id)
+      |> Batch.changeset(%{state: :running, commit: batch.commit, base_sha: batch.base_sha})
+      |> Repo.update!()
+
+    CandidateJournal.event(c.candidate, "local_assembled", "bors.local_git", %{
+      commit: "staged",
+      tree: "tree",
+      evidence: %{diagnostic_hints: ownership_hints(c)}
+    })
+
+    assert :ok =
+             BorsNG.Worker.FailureDiagnostics.observe(batch, evidence, :conn, fn _, [200] ->
+               log_result(paths)
+             end)
+
+    FailureIsolation.classified(batch, "candidate_failure", evidence)
+    conn = {{:installation, 91}, 14}
+
+    GitHub.ServerMock.put_state(%{
+      conn => %{
+        local_git_mode: "local",
+        branches: %{"main" => "base"},
+        pulls:
+          Map.new(
+            1..4,
+            &{&1, %GitHub.Pr{number: &1, state: :open, base_ref: "main", head_sha: "head#{&1}"}}
+          ),
+        labels: Map.new(1..4, &{&1, []}),
+        comments: Map.new(1..4, &{&1, []})
+      }
+    })
+
+    {%{batch | project: c.project}, conn}
+  end
 end

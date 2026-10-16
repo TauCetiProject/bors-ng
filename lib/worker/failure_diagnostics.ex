@@ -110,6 +110,13 @@ defmodule BorsNG.Worker.FailureDiagnostics do
   # Only the latest trusted classifier observation can select an observation.
   # A changed generation/head/base/run/attempt/job cannot reuse another's logs.
   def suspects(candidate, hints) do
+    case diagnosis(candidate, hints) do
+      {:ok, prs, _} -> {:ok, prs}
+      other -> other
+    end
+  end
+
+  def diagnosis(candidate, hints) do
     with false <- is_nil(candidate),
          event when not is_nil(event) <-
            Repo.one(
@@ -127,7 +134,17 @@ defmodule BorsNG.Worker.FailureDiagnostics do
          true <- CandidateJournal.commit_binding(candidate)["commit"] == commit,
          observation when not is_nil(observation) <-
            observation(candidate, binding(candidate, commit, evidence)) do
-      map_paths(hints, observation.details["result"])
+      case map_paths(hints, observation.details["result"]) do
+        {:ok, prs} ->
+          {:ok, prs,
+           %{
+             "binding" => observation.details["binding"],
+             "diagnostics" => observation.details["result"]
+           }}
+
+        other ->
+          other
+      end
     else
       _ -> :unavailable
     end

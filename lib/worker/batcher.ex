@@ -3880,7 +3880,7 @@ defmodule BorsNG.Worker.Batcher do
       |> Repo.all()
 
     patches = Enum.map(patch_links, & &1.patch)
-    state = BorsNG.Worker.FailureIsolation.split(patch_links, batch)
+    state = BorsNG.Worker.FailureIsolation.split(patch_links, batch, nil, repo_conn)
 
     # The batch failed, so it's OK to push the next batch on top of the same commit we saw
     # see do_get_base/4

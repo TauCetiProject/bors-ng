@@ -107,8 +107,24 @@ defmodule BorsNG.Worker.FailureIsolation do
     end
   end
 
-  def split(links, batch, conflict \\ nil) do
+  def split(links, batch, conflict \\ nil, conn \\ nil) do
     candidate = CandidateJournal.latest(batch.id)
+
+    if candidate &&
+         Repo.exists?(
+           from(e in CandidateEvent,
+             where:
+               e.candidate_id == ^candidate.id and e.kind == "provisional_repair" and
+                 e.source == "bors.failure_isolation"
+           )
+         ) do
+      :retrying
+    else
+      do_split(links, batch, candidate, conflict, conn)
+    end
+  end
+
+  defp do_split(links, batch, candidate, conflict, conn) do
     links = ordered_links(links, candidate)
 
     hints = if enabled?() and not uncertain_terminal?(candidate), do: hints(candidate)
@@ -130,6 +146,29 @@ defmodule BorsNG.Worker.FailureIsolation do
           dependencies_complete: Map.get(hints, "dependencies_complete", hints["complete"]),
           authority: "retry_only"
         })
+
+        groups =
+          if reason == "compiler_diagnostics" and not is_nil(conn) do
+            case groups do
+              [[suspect] | remainder] ->
+                case BorsNG.Worker.SourceCompatibility.provisional_failure(
+                       batch,
+                       links,
+                       suspect,
+                       remainder,
+                       hints,
+                       conn
+                     ) do
+                  :handed_off -> []
+                  _ -> groups
+                end
+
+              _ ->
+                groups
+            end
+          else
+            groups
+          end
 
         Enum.each(groups, fn group ->
           if is_nil(Divider.clone_batch(group, batch.project_id, batch.into_branch, reason)),
