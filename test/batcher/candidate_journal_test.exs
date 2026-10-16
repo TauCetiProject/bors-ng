@@ -202,6 +202,37 @@ defmodule BorsNG.Worker.CandidateJournalTest do
     end)
   end
 
+  test "neutral train generations preserve age without spending failure allowance", ctx do
+    link = member(ctx.batch, ctx.patch)
+    original = Journal.admission(link.id)
+
+    Enum.reduce(1..5, ctx.batch, fn _, parent ->
+      parent |> Batch.changeset(%{state: :error}) |> Repo.update!()
+
+      child =
+        Divider.clone_batch(
+          Repo.all(LinkPatchBatch.from_batch(parent.id)),
+          ctx.project.id,
+          "main",
+          "train_invalidated"
+        )
+
+      admission = Journal.admission(Repo.one!(LinkPatchBatch.from_batch(child.id)).id)
+      assert admission.snapshot["queue_age_retries"] == 0
+
+      assert admission.snapshot["original_admitted_at"] ==
+               original.snapshot["original_admitted_at"]
+
+      assert BorsNG.Worker.Batcher.QueueAge.key(
+               child,
+               Journal.queue_age_members([child]),
+               System.system_time(:microsecond)
+             ) == {original.snapshot["original_admitted_at"], :original_admission}
+
+      child
+    end)
+  end
+
   test "scheduling evidence is expendable and never changes approval identity", ctx do
     BorsNG.Worker.Batcher.Diversity.remember(ctx.patch, ["roadmap/A"])
     link = member(ctx.batch, ctx.patch)

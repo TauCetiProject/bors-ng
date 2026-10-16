@@ -151,7 +151,6 @@ defmodule BorsNG.Worker.QueueAgeTest do
             {"patch_id", 3},
             {"base", "other"},
             {"reviewer", "other"},
-            {"manual_approval", nil},
             {"queue_age_retries", -1},
             {"queue_age_retries", "0"}
           ],
@@ -175,7 +174,7 @@ defmodule BorsNG.Worker.QueueAgeTest do
     assert ordered([b], [older, younger]) == [b]
   end
 
-  test "retry generations preserve age initially then yield behind waiting peers indefinitely" do
+  test "failed retries preserve age initially then yield behind already waiting peers" do
     peer = batch(1, 10)
     assert QueueAge.next_retry(nil) == 3
     assert QueueAge.next_retry(%{"queue_age_retries" => "bad"}) == 3
@@ -197,7 +196,30 @@ defmodule BorsNG.Worker.QueueAgeTest do
     end
 
     b = batch(2, 20, %{recovery_failures: 3})
-    assert QueueAge.key(b, [member(b, 2, 1)], 100) == {20_000_000, :retry_fairness}
+    assert QueueAge.key(b, [member(b, 2, 1)], 100) == {1, :original_admission}
+  end
+
+  test "neutral clones and manual approval changes preserve unchanged head age" do
+    for reason <-
+          ~w(train_invalidated stale_dispatch member_removed cancellation non_fast_forward provisional_remainder provisional_unconfirmed) do
+      count =
+        Enum.reduce(1..10, 0, fn _, count ->
+          QueueAge.next_retry(%{"queue_age_retries" => count}, reason)
+        end)
+
+      assert count == 0
+      assert QueueAge.next_retry(%{"queue_age_retries" => 3}, reason) == 3
+    end
+
+    b = batch(1, 20)
+    {l, h, a} = member(b, 1, 1)
+    assert QueueAge.key(b, [{%{l | manual_approval: nil}, h, a}], 100) == {1, :original_admission}
+
+    assert QueueAge.key(
+             b,
+             [{l, h, %{a | snapshot: Map.put(a.snapshot, "manual_approval", nil)}}],
+             100
+           ) == {1, :original_admission}
   end
 
   test "legacy journal grace is bounded without changing original timestamp" do

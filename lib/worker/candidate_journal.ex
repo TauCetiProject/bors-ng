@@ -44,7 +44,11 @@ defmodule BorsNG.Worker.CandidateJournal do
         "parent_admission_id" => if(original, do: original.id),
         "queue_age_retries" =>
           if(source_link,
-            do: BorsNG.Worker.Batcher.QueueAge.next_retry(if(original, do: original.snapshot)),
+            do:
+              BorsNG.Worker.Batcher.QueueAge.next_retry(
+                if(original, do: original.snapshot),
+                retry_reason
+              ),
             else: 0
           ),
         "original_admitted_at" =>

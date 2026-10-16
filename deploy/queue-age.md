@@ -9,8 +9,10 @@ retain original admission and lineage across generations; a changed current head
 cannot inherit the old head's scheduling evidence.
 
 Every member must have a matching admission for project, branch, batch, link,
-patch, exact admitted/current head, reviewer and manual approval. Original age
-must be a positive integer no later than its observation, which cannot be in the
+patch, exact admitted/current head and reviewer. Manual approval is mutable at
+the same head (a human can take over queued work); it is never an age input or
+an authorization output. Existing dispatch and promotion checks validate it.
+Original age must be a positive integer no later than its observation, which cannot be in the
 future. Missing, malformed, duplicate or inconsistent records, and empty groups,
 use the batch's current `last_polled` as an operational fallback for the **whole
 group**. Unknown age is never inferred from PR creation, parent batches or other
@@ -21,10 +23,12 @@ including explicit user priorities above the running priority100 sentinel.
 Clones continue using member priorities, never the running sentinel.
 
 Age preference has a finite retry allowance. Fresh admissions start with
-`queue_age_retries=0`; each sealed clone increments and saturates at3. At3,
-or when infrastructure `recovery_failures` reaches3, the whole group returns to
-poll-time FIFO. Thus repeated inconclusive/failing clones cannot inherit an old
-position indefinitely and repeatedly overtake existing waiting peers. Original
+`queue_age_retries=0`; failed/inconclusive clones increment and saturate at3.
+At3 the whole group returns to poll-time FIFO. Neutral train invalidation, stale dispatch, member
+removal/cancellation, non-fast-forward promotion and provisional remainder or
+isolated fallback clones carry the counter unchanged. Unknown reasons consume
+the allowance conservatively. Registry crash counts do not spend it. Thus repeated
+inconclusive/failing clones cannot inherit an old position indefinitely and repeatedly overtake existing waiting peers. Original
 age, head approval and retry/repair budgets remain intact. Historical snapshots
 without a counter start at0 for a bounded rollout grace; a missing original
 admission or malformed counter gets no new inherited preference. This is a
@@ -33,13 +37,18 @@ Existing narrowing bisection, indivisible terminal failure, recovery backoff and
 per-head worker attempt limits continue to apply.
 
 The scheduler reads current waiting links, current heads and their admissions in
-one bulk join, bounded by current waiting membership. It performs no historical
-ancestry scan, per-batch/member admission lookup or GitHub request for ordering.
+one bulk join, returning only current waiting membership. A PostgreSQL batch-ID
+index supports membership seeks; MySQL already indexes the foreign key. It
+performs no historical ancestry query, per-batch/member admission lookup or
+GitHub request for ordering. Serial running polls defer the metadata read to
+successor selection, if train eligibility permits one.
 The same helper is used for serial and speculative successor selection. No batch,
 link or approval is written by age calculation. `last_polled` is never backdated.
 Poll delay, `recovery_after` and `promotion_retry_at` all gate waiting eligibility;
 running promotion/recovery logic and predecessor/train gates remain authoritative.
-An older waiting group cannot preempt running work.
+An older waiting group cannot preempt running work. The existing explicit
+priority hold path may put a running batch back into waiting with its priority100
+and promotion deadline intact; it must respect that deadline before resuming.
 
 Conflict isolation deliberately creates unmergeable units first; deterministic
 bisection and diagnostic partitions also have deliberate creation order. Durable

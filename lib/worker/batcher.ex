@@ -1474,6 +1474,11 @@ defmodule BorsNG.Worker.Batcher do
     "#{root}/#{project.name}/compare/#{parent.commit}...#{child.commit}"
   end
 
+  @doc """
+  Sort incomplete work. Serial running polls order running batches only by the
+  operational key; their waiting tail is unused. `:successor` explicitly orders
+  that tail by admission age with the pass's single metadata read.
+  """
   def sort_batches(batches, purpose \\ :serial) do
     # A serial pass with running work cannot select waiting work. Defer its one
     # metadata read to successor selection, if train eligibility permits it.

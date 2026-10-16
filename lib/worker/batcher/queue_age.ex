@@ -6,14 +6,22 @@ defmodule BorsNG.Worker.Batcher.QueueAge do
 
   @inherited_retries 3
 
-  # Old journals have no counter: allow a bounded rollout grace, then persist
-  # every new retry. Saturation avoids overflow and cannot renew the preference.
-  def next_retry(nil), do: @inherited_retries
+  # Neutral topology/membership changes cannot spend the unchanged survivors'
+  # failure allowance. Unknown reasons conservatively consume it.
+  @neutral_retries ~w(train_invalidated stale_dispatch member_removed cancellation non_fast_forward provisional_remainder provisional_unconfirmed)
 
-  def next_retry(snapshot) do
+  # Old journals have no counter: allow bounded rollout grace, then persist
+  # failed/inconclusive retries. Saturation cannot renew the preference.
+  def next_retry(snapshot, reason \\ "retry")
+  def next_retry(nil, _reason), do: @inherited_retries
+
+  def next_retry(snapshot, reason) do
     case Map.get(snapshot, "queue_age_retries", 0) do
-      count when is_integer(count) and count >= 0 -> min(count + 1, @inherited_retries)
-      _ -> @inherited_retries
+      count when is_integer(count) and count >= 0 ->
+        min(count + if(reason in @neutral_retries, do: 0, else: 1), @inherited_retries)
+
+      _ ->
+        @inherited_retries
     end
   end
 
@@ -33,7 +41,7 @@ defmodule BorsNG.Worker.Batcher.QueueAge do
       rows == [] or length(Enum.uniq(ids)) != length(ids) or :unknown in ages ->
         {fallback(batch, now), :poll_fallback}
 
-      :exhausted in ages or (Map.get(batch, :recovery_failures) || 0) >= @inherited_retries ->
+      :exhausted in ages ->
         {fallback(batch, now), :retry_fairness}
 
       true ->
@@ -47,6 +55,9 @@ defmodule BorsNG.Worker.Batcher.QueueAge do
     count = Map.get(snapshot, "queue_age_retries", 0)
     observed = admission.observed_at
 
+    # ManualApproval.grant/6 legitimately updates queued link approvals in
+    # place. That does not change head admission age. Approval validity remains
+    # exclusively in normal dispatch/promotion checks, never this policy.
     valid =
       admission.project_id == batch.project_id and admission.into_branch == batch.into_branch and
         admission.batch_id == batch.id and link.batch_id == batch.id and
@@ -54,7 +65,6 @@ defmodule BorsNG.Worker.Batcher.QueueAge do
         snapshot["patch_id"] == link.patch_id and is_binary(link.head_sha) and
         link.head_sha == current_head and snapshot["head_sha"] == link.head_sha and
         snapshot["reviewer"] == link.reviewer and
-        snapshot["manual_approval"] == link.manual_approval and
         is_integer(age) and age > 0 and is_integer(observed) and age <= observed and
         observed <= now and is_integer(count) and count >= 0
 
