@@ -522,6 +522,221 @@ defmodule BorsNG.Worker.OrchestrationTest do
            ) == 1
   end
 
+  test "repeated failed PR-status evaluations create one durable public rejection", ctx do
+    patch = blocked_patch(ctx)
+
+    for _ <- 1..4 do
+      assert :ok ==
+               execute(
+                 ctx.worker,
+                 Outbox.enqueue(ctx.project.id, "cast", {:reviewed, patch.id, "reviewer"})
+               )
+    end
+
+    notices = Repo.all(from(j in OrchestrationJob, where: j.kind == "notice"))
+    assert length(notices) == 1
+    [notice] = notices
+
+    # A producer restart must not depend on process-local observation state.
+    stop_supervised!(Worker)
+    worker = start_supervised!({Worker, ctx.project.id})
+
+    assert :ok ==
+             execute(
+               worker,
+               Outbox.enqueue(ctx.project.id, "cast", {:reviewed, patch.id, "reviewer"})
+             )
+
+    assert Repo.aggregate(from(j in OrchestrationJob, where: j.kind == "notice"), :count) == 1
+    assert :ok == execute(worker, notice)
+    assert :ok == execute(worker, notice)
+    assert [body] = get_in(GitHub.ServerMock.get_state(), [ctx.conn, :comments, 2])
+    assert String.starts_with?(body, ":-1: Rejected by PR status")
+
+    assert get_in(GitHub.ServerMock.get_state(), [ctx.conn, :statuses, "blocked", "bump-guard"]) ==
+             :error
+
+    assert Repo.all(Batch.all_for_patch(patch.id, :incomplete)) == []
+  end
+
+  test "changed blockers, head and recovery each allow a new public rejection", ctx do
+    patch = blocked_patch(ctx)
+
+    reject = fn patch ->
+      assert :ok ==
+               execute(
+                 ctx.worker,
+                 Outbox.enqueue(ctx.project.id, "cast", {:reviewed, patch.id, "reviewer"})
+               )
+    end
+
+    reject.(patch)
+    statuses = %{"build" => :ok, "scope" => :error, "bump-guard" => :ok}
+    set_blocked_statuses(ctx, statuses)
+    reject.(patch)
+
+    # Irrelevant statuses and configuration ordering are not new blockers.
+    set_blocked_statuses(ctx, Map.put(statuses, "unrequired", :error))
+    reordered = "status = [\"build\"]\npr_status = [\"bump-guard\", \"scope\", \"build\"]\n"
+
+    GitHub.ServerMock.get_state()
+    |> put_in([ctx.conn, :files, "blocked", "bors.toml"], reordered)
+    |> GitHub.ServerMock.put_state()
+
+    reject.(patch)
+    assert rejection_count() == 2
+
+    # A -> B -> A must be visible; a permanent head/reason key would lose A.
+    set_blocked_statuses(ctx, %{"build" => :ok, "scope" => :ok, "bump-guard" => :error})
+    reject.(patch)
+    assert rejection_count() == 3
+
+    # A conclusive pending observation rearms; a transient read error does not.
+    set_blocked_statuses(ctx, %{"build" => :ok, "scope" => :ok, "bump-guard" => :running})
+    reject.(patch)
+    assert is_nil(Repo.get!(Patch, patch.id).preflight_notice)
+    set_blocked_statuses(ctx, %{"build" => :ok, "scope" => :ok, "bump-guard" => :error})
+    reject.(patch)
+    assert rejection_count() == 4
+
+    GitHub.ServerMock.put_state(Map.put(GitHub.ServerMock.get_state(), :get_labels_error, 100))
+    reject.(patch)
+    GitHub.ServerMock.put_state(Map.delete(GitHub.ServerMock.get_state(), :get_labels_error))
+    reject.(patch)
+    assert rejection_count() == 4
+
+    set_blocked_statuses(ctx, %{})
+    reject.(patch)
+    set_blocked_statuses(ctx, %{"build" => :ok, "scope" => :ok, "bump-guard" => :error})
+    reject.(patch)
+    assert rejection_count() == 4
+
+    old = GitHub.ServerMock.get_state()[ctx.conn]
+
+    GitHub.ServerMock.get_state()
+    |> put_in([ctx.conn, :files, "new-head"], old.files["blocked"])
+    |> put_in([ctx.conn, :statuses, "new-head"], old.statuses["blocked"])
+    |> GitHub.ServerMock.put_state()
+
+    patch = patch |> Patch.changeset(%{commit: "new-head"}) |> Repo.update!()
+    reject.(patch)
+    assert rejection_count() == 5
+
+    # All generated notices still use the ordinary durable delivery lane.
+    for notice <- Repo.all(from(j in OrchestrationJob, where: j.kind == "notice", order_by: j.id)) do
+      assert :ok == execute(ctx.worker, notice)
+    end
+
+    comments = get_in(GitHub.ServerMock.get_state(), [ctx.conn, :comments, 2])
+    assert Enum.count(comments, &String.starts_with?(&1, ":-1: Rejected by PR status")) == 5
+    assert Repo.all(Batch.all_for_patch(patch.id, :incomplete)) == []
+  end
+
+  test "a fully successful preflight rearms an unchanged rejection", ctx do
+    patch = blocked_patch(ctx)
+    job = Outbox.enqueue(ctx.project.id, "cast", {:reviewed, patch.id, "reviewer"})
+    assert :ok == execute(ctx.worker, job)
+
+    # The legacy config-error path returns {:ok, nil} without a policy verdict.
+    # It must not be mistaken for a conclusive recovery of the required statuses.
+    files = GitHub.ServerMock.get_state()[ctx.conn].files
+
+    GitHub.ServerMock.get_state()
+    |> put_in([ctx.conn, :files, "blocked", "bors.toml"], "status = 1")
+    |> GitHub.ServerMock.put_state()
+
+    fingerprint = Repo.get!(Patch, patch.id).preflight_notice
+    assert :ok == execute(ctx.worker, job)
+    assert Repo.get!(Patch, patch.id).preflight_notice == fingerprint
+    batch = Repo.one!(Batch.all_for_patch(patch.id, :incomplete))
+    batch |> Batch.changeset(%{state: :error}) |> Repo.update!()
+
+    GitHub.ServerMock.get_state()
+    |> put_in([ctx.conn, :files], files)
+    |> GitHub.ServerMock.put_state()
+
+    set_blocked_statuses(ctx, %{"build" => :ok, "scope" => :ok, "bump-guard" => :ok})
+    assert :ok == execute(ctx.worker, job)
+    assert is_nil(Repo.get!(Patch, patch.id).preflight_notice)
+    batch = Repo.one!(Batch.all_for_patch(patch.id, :incomplete))
+
+    # Model a subsequent finished build; the next approval evaluates preflight
+    # again instead of the separate already-running-review path.
+    batch |> Batch.changeset(%{state: :error}) |> Repo.update!()
+    set_blocked_statuses(ctx, %{"build" => :ok, "scope" => :ok, "bump-guard" => :error})
+    assert :ok == execute(ctx.worker, job)
+    assert rejection_count() == 2
+  end
+
+  test "legacy synchronous rejection is deduplicated only after successful delivery", ctx do
+    patch = blocked_patch(ctx)
+    reason = {:pr_status, ["bump-guard"]}
+    GitHub.ServerMock.put_state(Map.put(GitHub.ServerMock.get_state(), :post_comment_error, 100))
+    assert {:error, _} = BorsNG.Worker.PreflightNotice.reject(ctx.conn, patch, reason)
+    assert is_nil(Repo.get!(Patch, patch.id).preflight_notice)
+    GitHub.ServerMock.put_state(Map.delete(GitHub.ServerMock.get_state(), :post_comment_error))
+
+    for _ <- 1..3, do: BorsNG.Worker.PreflightNotice.reject(ctx.conn, patch, reason)
+
+    assert get_in(GitHub.ServerMock.get_state(), [ctx.conn, :comments, 2]) == [
+             ":-1: Rejected by PR status"
+           ]
+  end
+
+  test "a rolled-back rejection records neither observation nor delivery intent", ctx do
+    patch = blocked_patch(ctx)
+    Process.put(:orchestration_executor, true)
+    on_exit(fn -> Process.delete(:orchestration_executor) end)
+
+    assert {:error, :producer_failed} ==
+             Repo.transaction(fn ->
+               BorsNG.Worker.PreflightNotice.reject(ctx.conn, patch, {:pr_status, ["bump-guard"]})
+               assert rejection_count() == 1
+               assert is_binary(Repo.get!(Patch, patch.id).preflight_notice)
+               Repo.rollback(:producer_failed)
+             end)
+
+    assert rejection_count() == 0
+    assert is_nil(Repo.get!(Patch, patch.id).preflight_notice)
+    BorsNG.Worker.PreflightNotice.reject(ctx.conn, patch, {:pr_status, ["bump-guard"]})
+    assert rejection_count() == 1
+  end
+
+  defp rejection_count do
+    Repo.all(from(j in OrchestrationJob, where: j.kind == "notice"))
+    |> Enum.count(fn job ->
+      {_, _, body, _} = Outbox.payload(job)
+      String.starts_with?(body, ":-1: Rejected by PR status")
+    end)
+  end
+
+  defp set_blocked_statuses(ctx, statuses) do
+    GitHub.ServerMock.get_state()
+    |> put_in([ctx.conn, :statuses, "blocked"], statuses)
+    |> GitHub.ServerMock.put_state()
+  end
+
+  defp blocked_patch(ctx) do
+    toml = "status = [\"build\"]\npr_status = [\"build\", \"scope\", \"bump-guard\"]\n"
+
+    GitHub.ServerMock.get_state()
+    |> put_in([ctx.conn, :comments, 2], [])
+    |> put_in([ctx.conn, :statuses, "blocked"], %{
+      "build" => :ok,
+      "scope" => :ok,
+      "bump-guard" => :error
+    })
+    |> put_in([ctx.conn, :files, "blocked"], %{"bors.toml" => toml})
+    |> GitHub.ServerMock.put_state()
+
+    Repo.insert!(%Patch{
+      project_id: ctx.project.id,
+      pr_xref: 2,
+      commit: "blocked",
+      into_branch: "master"
+    })
+  end
+
   test "rate limit before mutation backs off and lookup failure never dispatches", ctx do
     System.put_env("BORS_STAGE_DISPATCH_PROJECT", ctx.project.name)
     job = construct(ctx)

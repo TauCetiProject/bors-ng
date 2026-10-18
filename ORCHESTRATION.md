@@ -70,6 +70,17 @@ markers. One write is attempted initially; replay checks a bounded comment page 
 posting a duplicate. Commit statuses and labels retain their existing same-value
 update semantics. Notification jobs do not grant queue or publication authority.
 
+Preflight rejection generation also retains one latest fingerprint on each patch,
+bound to its head, target branch and reason. PR-status reasons include the sorted
+failed required contexts. Repeated evaluations of an unchanged blocker enqueue
+no additional notice, even across executor restarts. A changed blocker or a
+conclusive recovery followed by rejection gets a new marker; unavailable reads
+and incomplete status sets do not count as recovery. The fingerprint and async
+notice intent commit together. This adds constant storage per patch, while real
+transitions retain ordinary outbox delivery/replay tombstones. Existing notices
+are not rewritten or removed. Legacy synchronous delivery records the fingerprint
+after an acknowledged write and retains its existing HTTP ambiguity on a crash.
+
 Claims use random tokens. Completion, failure and lease renewal update only the
 matching token; old results cannot complete a new owner. Active leases renew;
 an application/dispatcher restart stops all old repository executors before

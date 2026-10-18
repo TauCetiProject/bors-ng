@@ -438,7 +438,7 @@ defmodule BorsNG.Worker.Batcher do
 
           {:error, message} ->
             QueueApproval.stop([patch], :preflight)
-            send_message(repo_conn, [patch], {:preflight, message})
+            BorsNG.Worker.PreflightNotice.reject(repo_conn, patch, message)
         end
     end
   end
@@ -908,7 +908,7 @@ defmodule BorsNG.Worker.Batcher do
               {:error, message} ->
                 QueueApproval.stop([patch], :preflight)
                 Bundles.drop_held_approval(patch.id)
-                send_message(repo_conn, [patch], {:preflight, message})
+                BorsNG.Worker.PreflightNotice.reject(repo_conn, patch, message)
             end
         end
 
@@ -1286,7 +1286,7 @@ defmodule BorsNG.Worker.Batcher do
       {:error, message, failed} ->
         QueueApproval.stop([failed], :preflight)
         Bundles.drop_held_approval(failed.id)
-        send_message(repo_conn, [failed], {:preflight, message})
+        BorsNG.Worker.PreflightNotice.reject(repo_conn, failed, message)
 
         repo_conn
         |> send_message(
@@ -4690,6 +4690,7 @@ defmodule BorsNG.Worker.Batcher do
       case {passed_label, no_error_status, no_waiting_status, no_unset_status, passed_review,
             code_owners_approved, passed_up_to_date_review} do
         {true, true, true, true, :sufficient, true, :sufficient} ->
+          BorsNG.Worker.PreflightNotice.recovered(patch)
           {:ok, toml.max_batch_size}
 
         {false, _, _, _, _, _, _} ->
@@ -4705,9 +4706,18 @@ defmodule BorsNG.Worker.Batcher do
           {:error, :missing_code_owner_approval}
 
         {_, false, _, _, _, _, _} ->
-          {:error, :pr_status}
+          failed_contexts =
+            github_commit_statuses
+            |> Enum.filter(fn {context, state} ->
+              state == :error and MapSet.member?(pr_status_mapset, context)
+            end)
+            |> Enum.map(fn {context, _} -> context end)
+            |> Enum.sort()
+
+          {:error, {:pr_status, failed_contexts}}
 
         {_, _, false, _, _, _, _} ->
+          if no_unset_status, do: BorsNG.Worker.PreflightNotice.recovered(patch)
           {:waiting, toml}
 
         {_, _, _, false, _, _, _} ->

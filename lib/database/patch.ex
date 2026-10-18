@@ -37,6 +37,7 @@ defmodule BorsNG.Database.Patch do
     field(:manual_revision_at, :utc_datetime_usec)
     field(:queue_approval, :map)
     field(:queue_pending, :boolean, default: false)
+    field(:preflight_notice, :string)
     field(:source_compatibility, :map)
     timestamps()
   end
