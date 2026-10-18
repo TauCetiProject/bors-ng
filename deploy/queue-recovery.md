@@ -47,6 +47,14 @@ Transient database or status-read failures retain a prompt retry instead of
 losing the wake-up or breaking worker startup. Infrastructure retries report
 their members as waiting in queue; repeated-problem alerts remain separate.
 
+For a tracked candidate, green commit statuses can arrive before its exact
+workflow's finalizer and cache publisher have finished. A queued or running
+workflow therefore retains the candidate and schedules a durable recheck after
+120 seconds, rather than relying on the 30-minute regular batch poll. The retry
+uses the existing batch/head-bound promotion handler: it revalidates the exact
+workflow, live members, withdrawal intent and current base before any push.
+This does not dispatch another build or treat green statuses as a landing.
+
 A confirmed cancelled build retains approval and creates a native retry child
 with the same exact-head membership through the existing transactional divider.
 The old attempt retains historical links and CI records while releasing the

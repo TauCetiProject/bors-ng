@@ -3556,6 +3556,14 @@ defmodule BorsNG.Worker.Batcher do
         {:ok, %{"status" => "completed", "conclusion" => "success"}} ->
           complete_verified_batch(batch, statuses, conn)
 
+        {:ok, %{"status" => status}}
+        when status in ["queued", "in_progress", "waiting", "pending", "requested"] ->
+          # Build statuses can turn green before the finalizer/publisher finishes.
+          # Keep the exact generation behind its workflow gate, with a durable
+          # wakeup instead of waiting for the coarse regular poll interval.
+          schedule_recheck(batch, DateTime.to_unix(DateTime.utc_now()) + 120)
+          :running
+
         _ ->
           :running
       end
