@@ -40,7 +40,7 @@ export class BorsContainer extends Container {
 
   envVars = {
     PORT: "4000",
-    PUBLIC_HOST: "bors.taucetiproject.org",
+    PUBLIC_HOST: workerEnv.PUBLIC_HOST ?? "bors.taucetiproject.org",
     PUBLIC_PROTOCOL: "https",
     PUBLIC_PORT: "443",
     // The Container port serves HTTP behind Cloudflare's public TLS endpoint.
@@ -56,18 +56,24 @@ export class BorsContainer extends Container {
     GITHUB_INTEGRATION_ID: workerEnv.GITHUB_INTEGRATION_ID,
     GITHUB_INTEGRATION_PEM: workerEnv.GITHUB_INTEGRATION_PEM,
     COMMAND_TRIGGER: "bors",
-    BORS_STAGE_DISPATCH_PROJECT: "TauCetiProject/TauCeti",
+    BORS_PROJECT: workerEnv.BORS_PROJECT ?? "TauCetiProject/TauCeti",
+    BORS_BASE_BRANCH: workerEnv.BORS_BASE_BRANCH ?? "main",
+    BORS_STAGE_DISPATCH_PROJECT: workerEnv.BORS_PROJECT ?? "TauCetiProject/TauCeti",
     BORS_IMPORT_PROVIDER_POLICY: workerEnv.BORS_IMPORT_PROVIDER_POLICY ?? "bounded_depth_v1",
     // Conservative rollout: one executing operation, serialized per repository.
+    BORS_REPOSITORY_ID: workerEnv.BORS_REPOSITORY_ID,
+    BORS_ACTOR_ID: workerEnv.BORS_ACTOR_ID,
+    BORS_CANCELLATION_WORKFLOW_ID: workerEnv.BORS_CANCELLATION_WORKFLOW_ID,
+    BORS_REVIEW_LOGIN: workerEnv.BORS_REVIEW_LOGIN ?? (workerEnv.BORS_PROJECT && workerEnv.BORS_PROJECT !== "TauCetiProject/TauCeti" ? "" : "tauceti-review-bot[bot]"),
     BORS_ASYNC_ORCHESTRATION: "true",
     BORS_ASYNC_WORKERS: "1",
     // B/E/F are rollout-verified. Bound this canary to one lifetime successor.
-    BORS_SPECULATIVE_TRAINS: "true",
+    BORS_SPECULATIVE_TRAINS: workerEnv.BORS_SPECULATIVE_TRAINS ?? (workerEnv.BORS_PROJECT && workerEnv.BORS_PROJECT !== "TauCetiProject/TauCeti" ? "false" : "true"),
     BORS_SPECULATION_CANARY_SUCCESSORS: "1",
     BORS_SPECULATION_GATE_16231: "https://github.com/TauCetiProject/TauCeti/issues/16231#issuecomment-6179935551",
     BORS_SPECULATION_GATE_16232: "https://github.com/TauCetiProject/TauCeti/issues/16232#issuecomment-6163837222",
     BORS_SPECULATION_GATE_16234: "https://github.com/TauCetiProject/TauCeti/issues/16234#issuecomment-6167663957",
-    TAUCETI_REVIEW_APP_ID: REVIEW_APP_ID,
+    TAUCETI_REVIEW_APP_ID: workerEnv.TAUCETI_REVIEW_APP_ID ?? (workerEnv.BORS_PROJECT && workerEnv.BORS_PROJECT !== "TauCetiProject/TauCeti" ? "0" : REVIEW_APP_ID),
   };
 }
 
@@ -120,7 +126,7 @@ export default {
     const delivery = request.headers.get("x-github-delivery");
     const event = request.headers.get("x-github-event");
     if (!delivery || !event) return new Response("Missing GitHub headers", { status: 400 });
-    if (!needsBors(event, body)) return new Response("Accepted", { status: 202 });
+    if (!needsBors(event, body, env.TAUCETI_REVIEW_APP_ID ?? REVIEW_APP_ID, env.BORS_PROJECT ?? "TauCetiProject/TauCeti")) return new Response("Accepted", { status: 202 });
 
     const item = { delivery, event, signature };
     if (body.byteLength <= INLINE_LIMIT) {
@@ -146,7 +152,7 @@ export default {
       } else {
         body = Uint8Array.from(item.body);
       }
-      if (!needsBors(item.event, body)) {
+      if (!needsBors(item.event, body, env.TAUCETI_REVIEW_APP_ID ?? REVIEW_APP_ID, env.BORS_PROJECT ?? "TauCetiProject/TauCeti")) {
         if (item.object) await env.WEBHOOK_BODIES.delete(item.object);
         message.ack();
         continue;

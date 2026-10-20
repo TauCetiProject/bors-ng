@@ -39,6 +39,8 @@ def main():
     parser.add_argument("--github-app-id", required=True)
     parser.add_argument("--github-private-key-file", type=pathlib.Path, required=True)
     parser.add_argument("--secret-key-base-file", type=pathlib.Path, required=True)
+    parser.add_argument("--name", default="tauceti-bors")
+    parser.add_argument("--config", type=pathlib.Path)
     args = parser.parse_args()
 
     database_url = read(args.database_url_file)
@@ -69,13 +71,13 @@ def main():
         "GITHUB_INTEGRATION_PEM": base64.b64encode(pem).decode(),
     }
     result = subprocess.run(
-        ["npx", "wrangler", "secret", "bulk", "--name", "tauceti-bors"],
+        [str(pathlib.Path(__file__).resolve().parents[2] / "node_modules/.bin/wrangler"), "secret", "bulk", "--name", args.name, *(["--config", str(args.config)] if args.config else [])],
         input=json.dumps(values), text=True, capture_output=True, check=False,
     )
     if result.returncode:
         raise SystemExit(f"Wrangler secret upload failed (exit {result.returncode}); "
                          "output withheld because it may contain secrets")
-    print("Uploaded seven runtime secrets to tauceti-bors.")
+    print(f"Uploaded seven runtime secrets to {args.name}.")
 
 
 if __name__ == "__main__":

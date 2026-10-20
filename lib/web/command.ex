@@ -1123,7 +1123,7 @@ defmodule BorsNG.Command do
 
   @spec run(t, cmd) :: :ok
   def run(c, :activate) do
-    if c.patch.into_branch == "main" and not is_nil(c.approval_created_at) and
+    if c.patch.into_branch == BorsNG.ProjectConfig.branch() and not is_nil(c.approval_created_at) and
          BorsNG.Worker.ManualApproval.authorized?(c.project, c.commenter) do
       batcher = Batcher.Registry.get(c.project.id)
 

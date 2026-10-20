@@ -527,7 +527,7 @@ defmodule BorsNG.GitHub.Server do
     backend = setting.backend
 
     query =
-      ~s|{repository(owner:"TauCetiProject",name:"TauCeti"){mergeQueue(branch:"main"){entries(first:1){totalCount}}}}|
+      ~s|{repository(owner:#{Jason.encode!(hd(String.split(BorsNG.ProjectConfig.repo(), "/")))},name:#{Jason.encode!(List.last(String.split(BorsNG.ProjectConfig.repo(), "/")))}){mergeQueue(branch:#{Jason.encode!(BorsNG.ProjectConfig.branch())}){entries(first:1){totalCount}}}}|
 
     response =
       "token #{token}"
@@ -559,7 +559,7 @@ defmodule BorsNG.GitHub.Server do
              "/graphql",
              Jason.encode!(%{
                query:
-                 ~s|{repository(owner:"TauCetiProject",name:"TauCeti"){mergeQueue(branch:"main"){entries(last:1){totalCount nodes{id position state headCommit{oid} pullRequest{id number headRefOid}}}}}}|
+                 ~s|{repository(owner:#{Jason.encode!(hd(String.split(BorsNG.ProjectConfig.repo(), "/")))},name:#{Jason.encode!(List.last(String.split(BorsNG.ProjectConfig.repo(), "/")))}){mergeQueue(branch:#{Jason.encode!(BorsNG.ProjectConfig.branch())}){entries(last:1){totalCount nodes{id position state headCommit{oid} pullRequest{id number headRefOid}}}}}}|
              })
            ),
          data <- Jason.decode!(raw),
@@ -597,10 +597,12 @@ defmodule BorsNG.GitHub.Server do
   end
 
   def do_handle_call(:get_pr_merge_base, conn, {number, head}) do
+    branch = BorsNG.ProjectConfig.branch()
+
     with %{status: 200, body: raw} <- get!(conn, "pulls/#{number}"),
          %{
            "state" => "open",
-           "base" => %{"ref" => "main", "sha" => base},
+           "base" => %{"ref" => ^branch, "sha" => base},
            "head" => %{"sha" => ^head}
          } <- Jason.decode!(raw),
          %{status: 200, body: raw} <- get!(conn, "compare/#{base}...#{head}?per_page=1"),
@@ -632,7 +634,8 @@ defmodule BorsNG.GitHub.Server do
         context: "bump-integration",
         state: "failure",
         description: "Confirmed singleton integration failure; bump repair required",
-        target_url: "https://bors.taucetiproject.org/batches/#{batch}"
+        target_url:
+          "https://#{System.get_env("PUBLIC_HOST", "bors.taucetiproject.org")}/batches/#{batch}"
       })
 
     case post!(conn, "statuses/#{head}", body) do
@@ -1612,7 +1615,7 @@ defmodule BorsNG.GitHub.Server do
 
   defp merge_candidates_page(token, cursor) do
     query =
-      ~s|query($cursor:String){repository(owner:"TauCetiProject",name:"TauCeti"){pullRequests(first:100,after:$cursor,states:OPEN,baseRefName:"main"){pageInfo{hasNextPage endCursor}nodes{number headRefOid isDraft isInMergeQueue labels(first:100){nodes{name}pageInfo{hasNextPage}}}}}}|
+      ~s|query($cursor:String){repository(owner:#{Jason.encode!(hd(String.split(BorsNG.ProjectConfig.repo(), "/")))},name:#{Jason.encode!(List.last(String.split(BorsNG.ProjectConfig.repo(), "/")))}){pullRequests(first:100,after:$cursor,states:OPEN,baseRefName:#{Jason.encode!(BorsNG.ProjectConfig.branch())}){pageInfo{hasNextPage endCursor}nodes{number headRefOid isDraft isInMergeQueue labels(first:100){nodes{name}pageInfo{hasNextPage}}}}}}|
 
     response =
       "token #{token}"

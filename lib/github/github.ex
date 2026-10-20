@@ -71,7 +71,7 @@ defmodule BorsNG.GitHub do
   end
 
   def get_recovery_base(repo_conn),
-    do: safe_genserver_call(:get_branch, repo_conn, {"main"}, 15_000)
+    do: safe_genserver_call(:get_branch, repo_conn, {BorsNG.ProjectConfig.branch()}, 15_000)
 
   def get_staging_base(repo_conn, head) do
     safe_genserver_call(:get_staging_base, repo_conn, {head}, 15_000)

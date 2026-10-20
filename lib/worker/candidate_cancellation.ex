@@ -6,10 +6,6 @@ defmodule BorsNG.Worker.CandidateCancellation do
   alias BorsNG.Worker.Orchestration.Outbox
   require Logger
 
-  @repo "TauCetiProject/TauCeti"
-  @repo_id 1_256_881_326
-  @actor_id 337_246_530
-  @workflow_id 288_851_159
   @protected ["promotion_requested", "promoted", "main_pushed", "post_merge"]
 
   # Called in the same transaction as the explicit withdrawal. No HTTP here.
@@ -17,8 +13,10 @@ defmodule BorsNG.Worker.CandidateCancellation do
     project = Repo.get!(Project, batch.project_id)
     candidate = Journal.current(batch)
 
-    if Outbox.enabled?() and project.name == @repo and project.repo_xref == @repo_id and
-         System.get_env("BORS_STAGE_DISPATCH_PROJECT") == @repo and candidate do
+    if Outbox.enabled?() and project.name == BorsNG.ProjectConfig.repo() and
+         project.repo_xref == BorsNG.ProjectConfig.repo_id() and
+         System.get_env("BORS_STAGE_DISPATCH_PROJECT") == BorsNG.ProjectConfig.repo() and
+         candidate do
       requested =
         Repo.all(
           from(e in CandidateEvent,
@@ -30,8 +28,8 @@ defmodule BorsNG.Worker.CandidateCancellation do
       case requested do
         [event] ->
           payload = %{
-            "repository" => @repo,
-            "repository_id" => @repo_id,
+            "repository" => BorsNG.ProjectConfig.repo(),
+            "repository_id" => BorsNG.ProjectConfig.repo_id(),
             "batch_id" => batch.id,
             "candidate_id" => candidate.id,
             "generation" => candidate.generation,
@@ -58,7 +56,10 @@ defmodule BorsNG.Worker.CandidateCancellation do
          p when is_map(p) <- Outbox.payload(job),
          true <- valid_payload?(p),
          true <- p["expires_at"] > Outbox.now(),
-         %Project{name: @repo, repo_xref: @repo_id} <- Repo.get(Project, job.project_id),
+         %Project{} = project <- Repo.get(Project, job.project_id),
+         true <-
+           project.name == BorsNG.ProjectConfig.repo() and
+             project.repo_xref == BorsNG.ProjectConfig.repo_id(),
          %Batch{state: :canceled} = batch <- Repo.get(Batch, p["batch_id"]),
          true <-
            batch.project_id == job.project_id and batch.commit == p["head_sha"] and
@@ -97,7 +98,8 @@ defmodule BorsNG.Worker.CandidateCancellation do
   end
 
   defp valid_payload?(p) do
-    p["repository"] == @repo and p["repository_id"] == @repo_id and
+    p["repository"] == BorsNG.ProjectConfig.repo() and
+      p["repository_id"] == BorsNG.ProjectConfig.repo_id() and
       Enum.all?(
         ["batch_id", "candidate_id", "generation", "dispatch_at", "expires_at"],
         &(is_integer(p[&1]) and p[&1] > 0)
@@ -153,13 +155,14 @@ defmodule BorsNG.Worker.CandidateCancellation do
     with true <-
            run["event"] == "repository_dispatch" and
              run["path"] == ".github/workflows/pr-build.yml" and
-             run["workflow_id"] == @workflow_id and run["display_title"] == title(p),
+             run["workflow_id"] == BorsNG.ProjectConfig.cancellation_workflow_id() and
+             run["display_title"] == title(p),
          true <-
-           get_in(run, ["repository", "id"]) == @repo_id and
-             get_in(run, ["repository", "full_name"]) == @repo,
+           get_in(run, ["repository", "id"]) == BorsNG.ProjectConfig.repo_id() and
+             get_in(run, ["repository", "full_name"]) == BorsNG.ProjectConfig.repo(),
          true <-
            Enum.all?(["actor", "triggering_actor"], fn k ->
-             get_in(run, [k, "id"]) == @actor_id and
+             get_in(run, [k, "id"]) == BorsNG.ProjectConfig.actor_id() and
                get_in(run, [k, "login"]) == "tau-ceti-bors[bot]" and
                get_in(run, [k, "type"]) == "Bot"
            end),

@@ -183,7 +183,7 @@ defmodule BorsNG.ApiController do
           scope_approvals: approvals,
           requested_batch: requested,
           handoff:
-            if(project.name == "TauCetiProject/TauCeti",
+            if(project.name == BorsNG.ProjectConfig.repo(),
               do: BorsNG.Worker.MergeReconciler.observation(),
               else: nil
             )

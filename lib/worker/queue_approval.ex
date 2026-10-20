@@ -76,7 +76,8 @@ defmodule BorsNG.Worker.QueueApproval do
         left_join: a in subquery(active),
         on: a.patch_id == p.id and a.head_sha == p.commit,
         where:
-          p.project_id == ^project_id and p.into_branch == "main" and p.open and not p.is_draft and
+          p.project_id == ^project_id and p.into_branch == ^BorsNG.ProjectConfig.branch() and
+            p.open and not p.is_draft and
             (p.queue_pending or
                (not is_nil(p.manual_approval) and is_nil(p.bundle_id) and
                   p.queue_approval["state"] == "withdrawn" and

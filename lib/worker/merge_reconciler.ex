@@ -32,7 +32,9 @@ defmodule BorsNG.Worker.MergeReconciler do
   end
 
   defp reconcile(state) do
-    case Repo.one(from(p in Project, where: p.name == "TauCetiProject/TauCeti")) do
+    configured_repo = BorsNG.ProjectConfig.repo()
+
+    case Repo.one(from(p in Project, where: p.name == ^configured_repo)) do
       nil -> state
       project -> observe(project, state)
     end
@@ -70,7 +72,7 @@ defmodule BorsNG.Worker.MergeReconciler do
       batches =
         Repo.all(
           from(b in Batch.all_for_project(project.id, :incomplete),
-            where: b.into_branch == "main"
+            where: b.into_branch == ^BorsNG.ProjectConfig.branch()
           )
         )
 
@@ -111,7 +113,7 @@ defmodule BorsNG.Worker.MergeReconciler do
             join: b in Batch,
             on: b.id == l.batch_id,
             where:
-              b.project_id == ^project.id and b.into_branch == "main" and
+              b.project_id == ^project.id and b.into_branch == ^BorsNG.ProjectConfig.branch() and
                 b.state in ^[:waiting, :running],
             select: {p.pr_xref, l.head_sha}
           )
@@ -136,7 +138,7 @@ defmodule BorsNG.Worker.MergeReconciler do
             on: p.id == l.patch_id,
             join: b in Batch,
             on: b.id == l.batch_id,
-            where: b.into_branch == "main",
+            where: b.into_branch == ^BorsNG.ProjectConfig.branch(),
             select: {p.pr_xref, l.head_sha, b.state}
           )
         )
@@ -150,7 +152,7 @@ defmodule BorsNG.Worker.MergeReconciler do
         Repo.all(
           from(p in Patch,
             where:
-              p.project_id == ^project.id and p.into_branch == "main" and
+              p.project_id == ^project.id and p.into_branch == ^BorsNG.ProjectConfig.branch() and
                 p.open and not is_nil(p.bundle_reviewer),
             select: {p.pr_xref, p.commit}
           )
@@ -202,7 +204,8 @@ defmodule BorsNG.Worker.MergeReconciler do
             from(p in Patch,
               where:
                 p.project_id == ^project.id and
-                  p.into_branch == "main" and p.open and not is_nil(p.bundle_reviewer)
+                  p.into_branch == ^BorsNG.ProjectConfig.branch() and p.open and
+                  not is_nil(p.bundle_reviewer)
             )
           )
 
@@ -238,8 +241,9 @@ defmodule BorsNG.Worker.MergeReconciler do
           join: u in User,
           on: u.id == p.author_id,
           where:
-            u.login == "tauceti-review-bot[bot]" and p.project_id == ^project.id and
-              p.into_branch == "main" and p.open and not p.is_draft and not p.queue_pending and
+            u.login == ^BorsNG.ProjectConfig.reviewer() and p.project_id == ^project.id and
+              p.into_branch == ^BorsNG.ProjectConfig.branch() and p.open and not p.is_draft and
+              not p.queue_pending and
               is_nil(p.bundle_reviewer) and is_nil(p.bundle_id) and is_nil(p.manual_approval) and
               (like(p.head_ref, "bump-mathlib/%") or p.head_ref == "hopscotch/lkg-bump"),
           order_by: p.id,

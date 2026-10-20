@@ -17,8 +17,8 @@ defmodule BorsNG.Worker.SourceCompatibility do
 
   def wake(project, main \\ nil)
 
-  def wake(%Project{name: "TauCetiProject/TauCeti"} = project, main) do
-    if Outbox.enabled?() and enabled?() do
+  def wake(%Project{} = project, main) do
+    if project.name == BorsNG.ProjectConfig.repo() and Outbox.enabled?() and enabled?() do
       # The executor reads actual main. Promotion notifications only make this
       # one project-level job due; repeated notifications never fan out per PR.
       if main do
@@ -47,8 +47,8 @@ defmodule BorsNG.Worker.SourceCompatibility do
     if previous["checked_at"] == nil or Outbox.now() - previous["checked_at"] >= 300 or
          (previous["required_sha"] != nil and previous["required_sha"] != previous["base_sha"]) do
       with true <- enabled?(),
-           "local" <- LocalGit.mode(project, "main", conn),
-           {:ok, %{commit: base}} <- GitHub.get_branch(conn, "main") do
+           "local" <- LocalGit.mode(project, BorsNG.ProjectConfig.branch(), conn),
+           {:ok, %{commit: base}} <- GitHub.get_branch(conn, BorsNG.ProjectConfig.branch()) do
         cursor = previous["cursor"] || 0
 
         active =
@@ -63,7 +63,8 @@ defmodule BorsNG.Worker.SourceCompatibility do
           from(p in Patch,
             where:
               p.project_id == ^project_id and p.open and
-                not p.is_draft and p.into_branch == "main" and is_nil(p.bundle_id) and
+                not p.is_draft and p.into_branch == ^BorsNG.ProjectConfig.branch() and
+                is_nil(p.bundle_id) and
                 (p.id in subquery(active) or p.queue_pending or
                    p.merge_eligibility["eligible"] == true or
                    p.source_compatibility["repair_policy"] == "provisional-diagnostic-v1"),
@@ -128,10 +129,11 @@ defmodule BorsNG.Worker.SourceCompatibility do
     end
   end
 
-  def admit(%Project{name: "TauCetiProject/TauCeti"} = project, conn, batch, links, base) do
-    if enabled?() and batch.into_branch == "main" and
-         LocalGit.mode(project, "main", conn) == "local" do
-      with {:ok, %{commit: ^base}} <- GitHub.get_branch(conn, "main") do
+  def admit(%Project{} = project, conn, batch, links, base) do
+    if project.name == BorsNG.ProjectConfig.repo() and enabled?() and
+         batch.into_branch == BorsNG.ProjectConfig.branch() and
+         LocalGit.mode(project, BorsNG.ProjectConfig.branch(), conn) == "local" do
+      with {:ok, %{commit: ^base}} <- GitHub.get_branch(conn, BorsNG.ProjectConfig.branch()) do
         # Bounded selected heads get a just-in-time exact check. Bundles and
         # excess/unknown coverage retain authoritative candidate validation.
         patches =
@@ -182,7 +184,7 @@ defmodule BorsNG.Worker.SourceCompatibility do
         join: c in Candidate,
         on: c.id == e.candidate_id,
         where:
-          c.project_id == ^project_id and c.into_branch == "main" and
+          c.project_id == ^project_id and c.into_branch == ^BorsNG.ProjectConfig.branch() and
             e.source == "bors.local_git" and
             e.kind in ["local_assembled", "local_conflict", "staging_pushed"],
         order_by: [desc: e.id],
@@ -259,7 +261,7 @@ defmodule BorsNG.Worker.SourceCompatibility do
          nil <- patch.bundle_id,
          nil <- patch.manual_approval,
          false <- Outbox.withdrawal_pending?(project.id, [patch.id]),
-         {:ok, %{commit: ^base}} <- GitHub.get_branch(conn, "main"),
+         {:ok, %{commit: ^base}} <- GitHub.get_branch(conn, BorsNG.ProjectConfig.branch()),
          {:ok, pr} <- GitHub.get_pr(conn, patch.pr_xref),
          true <- pr.state == :open and not pr.draft and pr.head_sha == head,
          {:ok, labels} <- GitHub.get_labels(conn, patch.pr_xref),
@@ -285,7 +287,7 @@ defmodule BorsNG.Worker.SourceCompatibility do
           BorsNG.Worker.Batcher.Divider.clone_batch(
             [source],
             project.id,
-            "main",
+            BorsNG.ProjectConfig.branch(),
             "provisional_unconfirmed"
           )
 
@@ -426,7 +428,7 @@ defmodule BorsNG.Worker.SourceCompatibility do
 
   @doc false
   def apply_results(project, conn, base, patches, results) do
-    with {:ok, %{commit: ^base}} <- GitHub.get_branch(conn, "main") do
+    with {:ok, %{commit: ^base}} <- GitHub.get_branch(conn, BorsNG.ProjectConfig.branch()) do
       Enum.each(patches, fn patch ->
         result =
           Enum.find(
@@ -615,8 +617,8 @@ defmodule BorsNG.Worker.SourceCompatibility do
 
     with true <- enabled?(),
          true <- Outbox.enabled?(),
-         "TauCetiProject/TauCeti" <- project.name,
-         "main" <- batch.into_branch,
+         true <- project.name == BorsNG.ProjectConfig.repo(),
+         true <- batch.into_branch == BorsNG.ProjectConfig.branch(),
          true <- hints["ownership_complete"] == true,
          true <- not is_nil(candidate),
          nil <- candidate.snapshot["speculative_predecessor_id"],
@@ -637,7 +639,7 @@ defmodule BorsNG.Worker.SourceCompatibility do
          true <-
            diagnosis["binding"]["commit"] == batch.commit and
              candidate.snapshot["base_sha"] == batch.base_sha,
-         {:ok, %{commit: base}} <- GitHub.get_branch(conn, "main"),
+         {:ok, %{commit: base}} <- GitHub.get_branch(conn, BorsNG.ProjectConfig.branch()),
          true <- base == batch.base_sha,
          {:ok, pr} <- GitHub.get_pr(conn, patch.pr_xref),
          true <- pr.head_sha == suspect.head_sha and pr.state == :open and not pr.draft,
@@ -650,7 +652,7 @@ defmodule BorsNG.Worker.SourceCompatibility do
         "policy" => @provisional_policy,
         "status" => "suspected_failure",
         "run_url" =>
-          "https://github.com/TauCetiProject/TauCeti/actions/runs/#{diagnosis["binding"]["run_id"]}",
+          "https://github.com/#{BorsNG.ProjectConfig.repo()}/actions/runs/#{diagnosis["binding"]["run_id"]}",
         "provisional" =>
           Map.merge(diagnosis, %{
             "candidate_id" => candidate.id,
@@ -682,7 +684,7 @@ defmodule BorsNG.Worker.SourceCompatibility do
                     BorsNG.Worker.Batcher.Divider.clone_batch(
                       group,
                       project.id,
-                      "main",
+                      BorsNG.ProjectConfig.branch(),
                       "provisional_remainder"
                     )
                   ),
@@ -751,8 +753,8 @@ defmodule BorsNG.Worker.SourceCompatibility do
     candidate = BorsNG.Worker.CandidateJournal.current(batch)
 
     with true <- enabled?(),
-         "TauCetiProject/TauCeti" <- project.name,
-         "main" <- batch.into_branch,
+         true <- project.name == BorsNG.ProjectConfig.repo(),
+         true <- batch.into_branch == BorsNG.ProjectConfig.branch(),
          [link] <- links,
          false <- Outbox.withdrawal_pending?(project.id, [link.patch_id]),
          nil <- link.patch.bundle_id,
@@ -790,7 +792,7 @@ defmodule BorsNG.Worker.SourceCompatibility do
         "base_sha" => batch.base_sha,
         "policy" => "authoritative-individual-v1",
         "status" => "integrated_failure",
-        "run_url" => "https://github.com/TauCetiProject/TauCeti/actions/runs/#{run}"
+        "run_url" => "https://github.com/#{BorsNG.ProjectConfig.repo()}/actions/runs/#{run}"
       }
 
       patch = Repo.get!(Patch, link.patch_id)

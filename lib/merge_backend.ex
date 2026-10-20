@@ -4,7 +4,8 @@ defmodule BorsNG.MergeBackend do
   alias BorsNG.Database.{Project, Repo}
   alias BorsNG.GitHub
 
-  def scoped?(project, base), do: project.name == "TauCetiProject/TauCeti" and base == "main"
+  def scoped?(project, base),
+    do: project.name == BorsNG.ProjectConfig.repo() and base == BorsNG.ProjectConfig.branch()
 
   # Previously started work may drain under either setting. New work starts
   # only under bors; the batcher releases unstarted work when queue is selected.
