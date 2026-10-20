@@ -462,7 +462,7 @@ defmodule BorsNG.Worker.Batcher do
       previous = Repo.one(Status.get_for_batch(batch.id, identifier))
 
       {updated, _} =
-        if (Process.get(:orchestration_executor, false) and previous) && previous.state == state &&
+        if Process.get(:orchestration_executor, false) and previous && previous.state == state &&
              previous.url == url do
           {0, nil}
         else
@@ -1961,7 +1961,7 @@ defmodule BorsNG.Worker.Batcher do
           reason: reason
         })
 
-        if (batch && batch.state == :waiting) and
+        if batch && batch.state == :waiting and
              CandidateJournal.latest(batch.id).id == candidate.id do
           members =
             Repo.all(LinkPatchBatch.from_batch(batch.id))
