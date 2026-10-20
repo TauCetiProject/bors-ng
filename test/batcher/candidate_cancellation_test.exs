@@ -428,7 +428,7 @@ defmodule BorsNG.Worker.CandidateCancellationTest do
           Map.put(ctx.run, "event", "pull_request_target"),
           Map.put(ctx.run, "workflow_id", 1),
           Map.put(ctx.run, "path", ".github/workflows/other.yml"),
-          Map.put(ctx.run, "run_attempt", 2),
+          Map.put(ctx.run, "run_attempt", 0),
           Map.delete(ctx.run, "run_attempt"),
           put_in(ctx.run, ["actor", "id"], 1),
           put_in(ctx.run, ["triggering_actor", "id"], 1),
@@ -534,6 +534,27 @@ defmodule BorsNG.Worker.CandidateCancellationTest do
     end
 
     assert length(ServerMock.get_state().cancellations) == 3
+  end
+
+  test "an existing fleet retry can bind its observed attempt without authorizing a later one",
+       ctx do
+    retried = Map.put(ctx.run, "run_attempt", 2)
+
+    ServerMock.put_state(
+      put_in(ServerMock.get_state(), [@conn, :staging_runs, {@head, ctx.batch.id}], retried)
+    )
+
+    job = claim(ctx.job)
+
+    assert catch_throw(CandidateCancellation.deliver(job)) ==
+             {:cancellation_retry, :awaiting_ci_terminal}
+
+    assert [{_, 123, 2}] = ServerMock.get_state().cancellations
+    assert {:ok, bound} = CandidateCancellation.authority(ctx.job.id)
+    assert bound["run_attempt"] == 2
+
+    assert {:error, :invalid_run_binding} ==
+             CandidateCancellation.validate_run(Map.put(retried, "run_attempt", 3), bound)
   end
 
   test "a run appearing after first lookup is discovered on retry", ctx do

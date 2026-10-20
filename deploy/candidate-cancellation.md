@@ -13,8 +13,9 @@ completion and restart. Surviving members retain their approvals and are requeue
 through normal preflight.
 
 Run discovery uses the recorded dispatch window and exact workflow title. Repository,
-workflow, bot actor, candidate identity and the first attempt must match. Ambiguous
-same-head/base generations cannot authorize cancellation. The discovered run ID is
+workflow, bot actor and candidate identity must match. The first observed run
+attempt is saved alongside the run ID, including an existing fleet-recovery retry. Ambiguous
+same-head/base generations cannot authorize cancellation. The discovered run ID and attempt are
 saved once and cannot be replaced by a later lookup.
 
 The API adapter rechecks the saved withdrawal and fetches the bound run immediately

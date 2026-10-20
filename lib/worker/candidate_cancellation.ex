@@ -84,8 +84,9 @@ defmodule BorsNG.Worker.CandidateCancellation do
         [] ->
           {:ok, Map.put(p, "intent_id", job.id)}
 
-        [%{details: %{"run_id" => run_id, "run_attempt" => 1} = details}]
-        when is_integer(run_id) and run_id > 0 and map_size(details) == 2 ->
+        [%{details: %{"run_id" => run_id, "run_attempt" => attempt} = details}]
+        when is_integer(run_id) and run_id > 0 and is_integer(attempt) and attempt > 0 and
+               map_size(details) == 2 ->
           {:ok, p |> Map.put("intent_id", job.id) |> Map.merge(details)}
 
         _ ->
@@ -163,7 +164,10 @@ defmodule BorsNG.Worker.CandidateCancellation do
                get_in(run, [k, "login"]) == "tau-ceti-bors[bot]" and
                get_in(run, [k, "type"]) == "Bot"
            end),
-         true <- is_integer(run["id"]) and run["id"] > 0 and run["run_attempt"] == 1,
+         true <-
+           is_integer(run["id"]) and run["id"] > 0 and
+             is_integer(run["run_attempt"]) and run["run_attempt"] > 0 and
+             run["run_attempt"] == Map.get(p, "run_attempt", run["run_attempt"]),
          {:ok, created, _} <- DateTime.from_iso8601(run["created_at"] || ""),
          true <-
            DateTime.to_unix(created, :microsecond) >= p["dispatch_at"] - 60_000_000 and
@@ -242,7 +246,7 @@ defmodule BorsNG.Worker.CandidateCancellation do
              conn,
              {job.id, run["id"], run["run_attempt"]}
            ) do
-        :ok -> record(p, "requested", %{run_id: run["id"], run_attempt: 1})
+        :ok -> record(p, "requested", %{run_id: run["id"], run_attempt: run["run_attempt"]})
         result -> result
       end
     end
