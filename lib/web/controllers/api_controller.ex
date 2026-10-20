@@ -11,21 +11,6 @@ defmodule BorsNG.ApiController do
   alias BorsNG.Database.Batch
   alias BorsNG.Database.Project
 
-  def candidate_cancellation(conn, %{"id" => raw}) do
-    result =
-      case Integer.parse(raw) do
-        {id, ""} when id > 0 -> BorsNG.Worker.CandidateCancellation.authority(id)
-        _ -> {:error, :invalid_id}
-      end
-
-    conn = put_resp_header(conn, "cache-control", "no-store")
-
-    case result do
-      {:ok, authority} -> json(conn, Map.put(authority, "schema", "tauceti-bors.cancellation/v1"))
-      _ -> send_resp(conn, 404, "")
-    end
-  end
-
   def project_candidates(conn, %{"id" => id} = params) do
     case Repo.get(Project, id) do
       nil ->
