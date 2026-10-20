@@ -15,7 +15,12 @@ defmodule BorsNG.ProjectConfig do
     end
   end
 
-  def reviewer, do: System.get_env("BORS_REVIEW_LOGIN", if(repo() == "TauCetiProject/TauCeti", do: "tauceti-review-bot[bot]", else: ""))
+  def reviewer,
+    do:
+      System.get_env(
+        "BORS_REVIEW_LOGIN",
+        if(repo() == "TauCetiProject/TauCeti", do: "tauceti-review-bot[bot]", else: "")
+      )
 
   def repo_id, do: integer("BORS_REPOSITORY_ID", 1_256_881_326)
   def actor_id, do: integer("BORS_ACTOR_ID", 337_246_530)
