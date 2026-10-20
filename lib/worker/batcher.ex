@@ -4300,7 +4300,7 @@ defmodule BorsNG.Worker.Batcher do
             end
           end)
 
-        if batch.into_branch == "main",
+        if batch.into_branch == BorsNG.ProjectConfig.branch(),
           do: BorsNG.Worker.SourceCompatibility.wake(batch.project, batch.commit)
 
         Process.delete({:push_failure_reported, batch.id})

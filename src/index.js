@@ -61,9 +61,6 @@ export class BorsContainer extends Container {
     BORS_STAGE_DISPATCH_PROJECT: workerEnv.BORS_PROJECT ?? "TauCetiProject/TauCeti",
     BORS_IMPORT_PROVIDER_POLICY: workerEnv.BORS_IMPORT_PROVIDER_POLICY ?? "bounded_depth_v1",
     // Conservative rollout: one executing operation, serialized per repository.
-    BORS_REPOSITORY_ID: workerEnv.BORS_REPOSITORY_ID,
-    BORS_ACTOR_ID: workerEnv.BORS_ACTOR_ID,
-    BORS_CANCELLATION_WORKFLOW_ID: workerEnv.BORS_CANCELLATION_WORKFLOW_ID,
     BORS_REVIEW_LOGIN: workerEnv.BORS_REVIEW_LOGIN ?? (workerEnv.BORS_PROJECT && workerEnv.BORS_PROJECT !== "TauCetiProject/TauCeti" ? "" : "tauceti-review-bot[bot]"),
     BORS_ASYNC_ORCHESTRATION: "true",
     BORS_ASYNC_WORKERS: "1",

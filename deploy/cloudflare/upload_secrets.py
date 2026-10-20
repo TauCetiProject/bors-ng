@@ -39,7 +39,7 @@ def main():
     parser.add_argument("--github-app-id", required=True)
     parser.add_argument("--github-private-key-file", type=pathlib.Path, required=True)
     parser.add_argument("--secret-key-base-file", type=pathlib.Path, required=True)
-    parser.add_argument("--name", default="tauceti-bors")
+    parser.add_argument("--name", required=True)
     parser.add_argument("--config", type=pathlib.Path)
     args = parser.parse_args()
 

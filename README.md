@@ -517,8 +517,8 @@ comparison and finishes on GitHub's queue.
 
 For a downstream deployment, set `BORS_PROJECT`, `BORS_BASE_BRANCH`,
 `TAUCETI_REVIEW_APP_ID` and `BORS_REVIEW_LOGIN` to that project's own repository and automation App.
-Set `BORS_REPOSITORY_ID`, `BORS_ACTOR_ID` and `BORS_CANCELLATION_WORKFLOW_ID` to the actual GitHub IDs.
-A downstream without these identities cannot inherit Tau Ceti's cancellation or review authority.
+Exact-run cancellation and speculative trains remain Tau Ceti-only. Downstream deployments
+do not need repository, actor or workflow IDs for cancellation.
 The [TauCetiTools setup manual](https://github.com/TauCetiProject/TauCetiTools/blob/main/docs/project-setup.md#bors)
 covers Docker and Cloudflare, project-owned Apps and database credentials. Hosted infrastructure
 supplies only a separate Neon project; the downstream operates Bors itself. Container publication is
