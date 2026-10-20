@@ -925,7 +925,7 @@ defmodule BorsNG.Worker.Batcher do
     cursor = Process.get(:queue_recovery_cursor, 0)
 
     candidates =
-      if BorsNG.MergeBackend.allow(project, "main", :admit) == :ok,
+      if BorsNG.MergeBackend.allow(project, BorsNG.ProjectConfig.branch(), :admit) == :ok,
         do:
           QueueApproval.candidates(
             project_id,
@@ -1044,14 +1044,14 @@ defmodule BorsNG.Worker.Batcher do
   defp recover_backend_holds(project_id, budget \\ 4, seen \\ []) do
     project = Repo.get!(Project, project_id)
 
-    if BorsNG.MergeBackend.scoped?(project, "main") and
-         BorsNG.MergeBackend.allow(project, "main", :admit) == :ok do
+    if BorsNG.MergeBackend.scoped?(project, BorsNG.ProjectConfig.branch()) and
+         BorsNG.MergeBackend.allow(project, BorsNG.ProjectConfig.branch(), :admit) == :ok do
       held =
         Repo.all(
           from(p in Patch.all(:awaiting_review),
             where:
               p.project_id == ^project_id and
-                p.into_branch == "main" and not is_nil(p.bundle_reviewer)
+                p.into_branch == ^BorsNG.ProjectConfig.branch() and not is_nil(p.bundle_reviewer)
           )
         )
 
@@ -1680,14 +1680,14 @@ defmodule BorsNG.Worker.Batcher do
   def release_unstarted_batches(nil), do: :ok
 
   def release_unstarted_batches(project) do
-    if BorsNG.MergeBackend.scoped?(project, "main") do
+    if BorsNG.MergeBackend.scoped?(project, BorsNG.ProjectConfig.branch()) do
       waiting =
         Repo.all(
           from(b in Batch.all_for_project(project.id, :waiting),
             left_join: s in Status,
             on: s.batch_id == b.id,
             where:
-              b.into_branch == "main" and is_nil(s.id) and
+              b.into_branch == ^BorsNG.ProjectConfig.branch() and is_nil(s.id) and
                 (is_nil(b.timeout_at) or b.timeout_at == 0 or not is_nil(b.commit))
           )
         )
@@ -1727,7 +1727,11 @@ defmodule BorsNG.Worker.Batcher do
                   do: Process.delete({:approval_pending, patch.id})
               end)
 
-              Labeler.reconcile_queue(conn, "main", Enum.map(links, & &1.patch))
+              Labeler.reconcile_queue(
+                conn,
+                BorsNG.ProjectConfig.branch(),
+                Enum.map(links, & &1.patch)
+              )
 
               Logger.info(
                 Jason.encode!(%{
@@ -4296,7 +4300,7 @@ defmodule BorsNG.Worker.Batcher do
             end
           end)
 
-        if batch.into_branch == "main",
+        if batch.into_branch == BorsNG.ProjectConfig.branch(),
           do: BorsNG.Worker.SourceCompatibility.wake(batch.project, batch.commit)
 
         Process.delete({:push_failure_reported, batch.id})

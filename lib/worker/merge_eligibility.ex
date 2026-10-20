@@ -7,9 +7,7 @@ defmodule BorsNG.Worker.MergeEligibility do
   alias BorsNG.Worker.{Batcher, BumpRecovery, QueueApproval, Syncer}
 
   @name "merge eligibility"
-  @repo "TauCetiProject/TauCeti"
   @schema "tauceti-merge.eligibility/v1"
-  @reviewer "tauceti-review-bot[bot]"
   @keep ~w(keep hold wip human do-not-close)
 
   def name, do: @name
@@ -24,7 +22,7 @@ defmodule BorsNG.Worker.MergeEligibility do
   def notification_pr(check) do
     with true <- trusted?(check),
          {:ok, data} when is_map(data) <- Jason.decode(check["external_id"] || ""),
-         @repo <- data["repo"],
+         true <- data["repo"] == BorsNG.ProjectConfig.repo(),
          pr when is_integer(pr) and pr > 0 <- data["pr"] do
       pr
     else
@@ -49,7 +47,7 @@ defmodule BorsNG.Worker.MergeEligibility do
     with true <- is_integer(check["id"]) and check["id"] > 0,
          {:ok, data} <- Jason.decode(check["external_id"] || ""),
          @schema <- data["schema"],
-         @repo <- data["repo"],
+         true <- data["repo"] == BorsNG.ProjectConfig.repo(),
          ^pr <- data["pr"],
          ^head <- check["head_sha"],
          "completed" <- check["status"],
@@ -72,7 +70,13 @@ defmodule BorsNG.Worker.MergeEligibility do
 
   defp sha?(s), do: is_binary(s) and Regex.match?(~r/\A[0-9a-f]{40}\z/, s)
 
-  def reconcile(%Project{name: @repo} = project, pr_number) do
+  def reconcile(%Project{} = project, pr_number) do
+    if project.name == BorsNG.ProjectConfig.repo(),
+      do: reconcile_project(project, pr_number),
+      else: :ok
+  end
+
+  defp reconcile_project(project, pr_number) do
     conn = Project.installation_connection(project.repo_xref, Repo)
 
     with {:ok, pr} <- GitHub.get_pr(conn, pr_number) do
@@ -80,7 +84,8 @@ defmodule BorsNG.Worker.MergeEligibility do
       # A missed push/close/retarget cancels the old approval even if the new
       # head has no eligibility check yet.
       if patch &&
-           (patch.commit != pr.head_sha or pr.state != :open or pr.base_ref != "main" or pr.draft) do
+           (patch.commit != pr.head_sha or pr.state != :open or
+              pr.base_ref != BorsNG.ProjectConfig.branch() or pr.draft) do
         Batcher.do_handle_cast({:cancel, patch.id, :eligibility_changed}, project.id)
       end
 
@@ -105,7 +110,7 @@ defmodule BorsNG.Worker.MergeEligibility do
   defp apply_decision(project, conn, pr, patch, d) do
     recovery =
       with true <- d["eligible"] and BumpRecovery.automatic?(patch),
-           :ok <- BorsNG.MergeBackend.allow(project, "main", :admit),
+           :ok <- BorsNG.MergeBackend.allow(project, BorsNG.ProjectConfig.branch(), :admit),
            {:ok, labels} <- GitHub.get_labels(conn, pr.number),
            true <- MapSet.disjoint?(MapSet.new(labels, &String.downcase/1), MapSet.new(@keep)) do
         BumpRecovery.plan(conn, project, pr, patch, d)
@@ -115,7 +120,7 @@ defmodule BorsNG.Worker.MergeEligibility do
 
     recovery =
       if recovery == :defer and not BumpRecovery.automatic?(patch) do
-        with :ok <- BorsNG.MergeBackend.allow(project, "main", :admit),
+        with :ok <- BorsNG.MergeBackend.allow(project, BorsNG.ProjectConfig.branch(), :admit),
              {:ok, labels} <- GitHub.get_labels(conn, pr.number),
              true <- MapSet.disjoint?(MapSet.new(labels, &String.downcase/1), MapSet.new(@keep)) do
           BorsNG.Worker.FailureIsolation.reconsider(conn, patch, d)
@@ -156,7 +161,8 @@ defmodule BorsNG.Worker.MergeEligibility do
         patch |> Patch.changeset(%{merge_eligibility_id: d["id"]}) |> Repo.update!()
         Batcher.do_handle_cast({:cancel, patch.id, :review_unsafe}, project.id)
 
-      not d["eligible"] or pr.state != :open or pr.base_ref != "main" or pr.draft ->
+      not d["eligible"] or pr.state != :open or pr.base_ref != BorsNG.ProjectConfig.branch() or
+          pr.draft ->
         :ok
 
       QueueApproval.blocked?(patch) and is_nil(retry) ->
@@ -169,7 +175,7 @@ defmodule BorsNG.Worker.MergeEligibility do
         :ok
 
       true ->
-        with :ok <- BorsNG.MergeBackend.allow(project, "main", :admit),
+        with :ok <- BorsNG.MergeBackend.allow(project, BorsNG.ProjectConfig.branch(), :admit),
              {:ok, labels} <- GitHub.get_labels(conn, pr.number),
              true <- MapSet.disjoint?(MapSet.new(labels, &String.downcase/1), MapSet.new(@keep)),
              {:ok, merge_base} <- GitHub.get_pr_merge_base(conn, pr.number, pr.head_sha),
@@ -183,11 +189,11 @@ defmodule BorsNG.Worker.MergeEligibility do
               queue_pending: true,
               queue_approval: %{
                 "head_sha" => patch.commit,
-                "reviewer" => @reviewer,
+                "reviewer" => BorsNG.ProjectConfig.reviewer(),
                 "state" => "approved"
               },
               is_single: d["single"],
-              bundle_reviewer: @reviewer
+              bundle_reviewer: BorsNG.ProjectConfig.reviewer()
             })
             |> Repo.update!()
 
@@ -195,7 +201,10 @@ defmodule BorsNG.Worker.MergeEligibility do
             "merge eligibility admitted pr=#{pr.number} head=#{pr.head_sha} check=#{d["id"]}"
           )
 
-          Batcher.do_handle_cast({:reviewed, patch.id, @reviewer}, project.id)
+          Batcher.do_handle_cast(
+            {:reviewed, patch.id, BorsNG.ProjectConfig.reviewer()},
+            project.id
+          )
         else
           _ -> :ok
         end
@@ -224,7 +233,7 @@ defmodule BorsNG.Worker.MergeEligibility do
     with {:ok, pr} <- GitHub.get_pr(conn, patch.pr_xref),
          true <- patch.merge_eligibility["head_sha"] == patch.commit,
          true <-
-           pr.state == :open and pr.base_ref == "main" and not pr.draft and
+           pr.state == :open and pr.base_ref == BorsNG.ProjectConfig.branch() and not pr.draft and
              pr.head_sha == patch.commit,
          {:ok, checks} <- GitHub.get_eligibility_checks(conn, patch.commit),
          {:ok, d} when not is_nil(d) <- latest(checks, patch.pr_xref, patch.commit),

@@ -8,7 +8,7 @@ function borsBranch(branch) {
 
 export const REVIEW_APP_ID = "3947238";
 
-export function needsBors(event, body, reviewAppId = REVIEW_APP_ID) {
+export function needsBors(event, body, reviewAppId = REVIEW_APP_ID, repository = "TauCetiProject/TauCeti") {
   if (event !== "check_run" && event !== "check_suite") return true;
 
   let payload;
@@ -20,7 +20,7 @@ export function needsBors(event, body, reviewAppId = REVIEW_APP_ID) {
   }
 
   if (event === "check_run") {
-    if (payload.repository?.full_name === "TauCetiProject/TauCeti" &&
+    if (payload.repository?.full_name === repository &&
         payload.check_run?.name === "merge eligibility" &&
         reviewAppId && String(payload.check_run?.app?.id) === String(reviewAppId)) return true;
     return payload.check_run?.status === "completed" &&

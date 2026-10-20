@@ -4,6 +4,7 @@
 The one-time code is read from stdin. No credential or code is printed.
 """
 
+import argparse
 import json
 import os
 import pathlib
@@ -25,6 +26,12 @@ def save(name, value):
 
 
 def main():
+    global OUTPUT
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--owner", default="TauCetiProject")
+    parser.add_argument("--output", type=pathlib.Path, default=OUTPUT)
+    args = parser.parse_args()
+    OUTPUT = args.output
     if (OUTPUT / "github-app.json").exists():
         raise SystemExit("App credentials already saved; refusing to overwrite them")
     recovery = OUTPUT / "github-app-credentials.json"
@@ -42,8 +49,8 @@ def main():
             raise SystemExit(f"GitHub manifest exchange failed (exit {result.returncode}); "
                              "response withheld because it may contain credentials")
         app = json.loads(result.stdout)
-    if app.get("owner", {}).get("login") != "TauCetiProject":
-        raise SystemExit("GitHub returned an App outside TauCetiProject")
+    if app.get("owner", {}).get("login") != args.owner:
+        raise SystemExit(f"GitHub returned an App outside {args.owner}")
     if not all(app.get(key) for key in ("id", "slug", "client_id", "client_secret",
                                        "webhook_secret", "pem")):
         raise SystemExit("GitHub did not return all required App credentials")
@@ -60,8 +67,8 @@ def main():
         "id": app["id"], "slug": app["slug"], "client_id": app["client_id"],
         "owner": app["owner"]["login"],
     }, indent=2))
-    print(f"Saved TauCetiProject GitHub App {app['slug']} ({app['id']}) credentials to {OUTPUT}")
-    print(f"Install it for TauCeti only: https://github.com/apps/{app['slug']}/installations/new")
+    print(f"Saved {args.owner} GitHub App {app['slug']} ({app['id']}) credentials to {OUTPUT}")
+    print(f"Install it only on the configured content repository: https://github.com/apps/{app['slug']}/installations/new")
 
 
 if __name__ == "__main__":

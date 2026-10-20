@@ -4,7 +4,6 @@ defmodule BorsNG.Worker.BumpRecovery do
   alias BorsNG.Database.{Batch, LinkPatchBatch, Patch, Repo, User}
   alias BorsNG.GitHub
 
-  @reviewer "tauceti-review-bot[bot]"
   @limit 3
 
   def branch?(ref) when is_binary(ref),
@@ -13,15 +12,23 @@ defmodule BorsNG.Worker.BumpRecovery do
   def branch?(_), do: false
 
   def automatic?(patch) do
+    reviewer_login = BorsNG.ProjectConfig.reviewer()
+
     is_integer(patch.author_id) and branch?(patch.head_ref) and is_nil(patch.manual_approval) and
       is_nil(patch.bundle_id) and
-      match?(%User{login: @reviewer}, Repo.get(User, patch.author_id))
+      match?(%User{login: ^reviewer_login}, Repo.get(User, patch.author_id))
   end
 
   # A queue priority below the running-batch sentinel (100) cannot preempt CI.
   # Reconcile existing memberships too; deploying policy needs no PR command.
   @queue_priority 50
-  def prioritize_waiting(%{name: "TauCetiProject/TauCeti", id: project_id}) do
+  def prioritize_waiting(%{name: name} = project) do
+    if name == BorsNG.ProjectConfig.repo(), do: prioritize_project(project), else: :ok
+  end
+
+  defp prioritize_project(%{id: project_id}) do
+    reviewer_login = BorsNG.ProjectConfig.reviewer()
+
     candidates =
       Repo.all(
         from(b in Batch,
@@ -32,12 +39,15 @@ defmodule BorsNG.Worker.BumpRecovery do
           join: u in User,
           on: u.id == p.author_id,
           where:
-            b.project_id == ^project_id and b.into_branch == "main" and b.state == :waiting and
-              p.project_id == ^project_id and p.into_branch == "main" and p.open and
+            b.project_id == ^project_id and b.into_branch == ^BorsNG.ProjectConfig.branch() and
+              b.state == :waiting and
+              p.project_id == ^project_id and p.into_branch == ^BorsNG.ProjectConfig.branch() and
+              p.open and
               not p.is_draft and
               p.is_single and is_nil(p.bundle_id) and is_nil(p.manual_approval) and
-              is_nil(l.manual_approval) and l.head_sha == p.commit and l.reviewer == ^@reviewer and
-              u.login == ^@reviewer and
+              is_nil(l.manual_approval) and l.head_sha == p.commit and
+              l.reviewer == ^reviewer_login and
+              u.login == ^reviewer_login and
               (like(p.head_ref, "bump-mathlib/%") or p.head_ref == "hopscotch/lkg-bump") and
               (b.priority < ^@queue_priority and p.priority == 0),
           select: {b, p}
@@ -52,7 +62,7 @@ defmodule BorsNG.Worker.BumpRecovery do
            Repo.aggregate(from(l in LinkPatchBatch, where: l.batch_id == ^batch.id), :count, :id) ==
              1 and
            match?(
-             %{"state" => "approved", "head_sha" => head, "reviewer" => @reviewer}
+             %{"state" => "approved", "head_sha" => head, "reviewer" => ^reviewer_login}
              when head == patch.commit,
              patch.queue_approval
            ) do
@@ -68,6 +78,8 @@ defmodule BorsNG.Worker.BumpRecovery do
   def prioritize_waiting(_), do: :ok
 
   def plan(conn, project, pr, patch, decision) do
+    reviewer_login = BorsNG.ProjectConfig.reviewer()
+
     metadata =
       if get_in(patch.merge_eligibility || %{}, ["head_sha"]) == patch.commit,
         do: patch.merge_eligibility,
@@ -79,7 +91,7 @@ defmodule BorsNG.Worker.BumpRecovery do
          true <- pr.head_repo_id == project.repo_xref and pr.base_repo_id == project.repo_xref,
          true <- not patch.queue_pending and is_nil(patch.bundle_reviewer),
          true <- is_integer(count) and count >= 0,
-         %{batch: batch, reviewer: @reviewer} <- latest(patch),
+         %{batch: batch, reviewer: ^reviewer_login} <- latest(patch),
          true <-
            batch.state == :error and permitted_stop?(patch.queue_approval, patch.commit, batch.id),
          1 <-
@@ -158,7 +170,7 @@ defmodule BorsNG.Worker.BumpRecovery do
         on: b.id == l.batch_id,
         where:
           l.patch_id == ^patch.id and l.head_sha == ^patch.commit and
-            b.project_id == ^patch.project_id and b.into_branch == "main",
+            b.project_id == ^patch.project_id and b.into_branch == ^BorsNG.ProjectConfig.branch(),
         order_by: [desc: b.id],
         limit: 1,
         select: %{batch: b, reviewer: l.reviewer}
@@ -219,6 +231,7 @@ defmodule BorsNG.Worker.BumpRecovery do
   end
 
   def restore_failed_preflight(patch, reason) when reason in [:preflight, :preflight_timeout] do
+    reviewer_login = BorsNG.ProjectConfig.reviewer()
     metadata = patch.merge_eligibility || %{}
     batch_id = metadata["bump_retry_batch"]
     count = metadata["bump_retry_count"]
@@ -226,7 +239,7 @@ defmodule BorsNG.Worker.BumpRecovery do
     with true <- automatic?(patch),
          true <- metadata["head_sha"] == patch.commit,
          true <- is_integer(count) and count > 0,
-         %{"state" => "approved", "head_sha" => head, "reviewer" => @reviewer}
+         %{"state" => "approved", "head_sha" => head, "reviewer" => ^reviewer_login}
          when head == patch.commit <-
            patch.queue_approval,
          true <- confirmed_singleton?(patch, batch_id),

@@ -235,10 +235,14 @@ defmodule BorsNG.WebhookController do
   end
 
   defp review_bot_command(comment, project) do
-    app_id = System.get_env("TAUCETI_REVIEW_APP_ID")
+    app_id =
+      case Integer.parse(System.get_env("TAUCETI_REVIEW_APP_ID", "")) do
+        {id, ""} when id > 0 -> id
+        _ -> nil
+      end
 
-    if project.name == "TauCetiProject/TauCeti" and not is_nil(app_id) and
-         get_in(comment, ["performed_via_github_app", "id"]) == String.to_integer(app_id) do
+    if project.name == BorsNG.ProjectConfig.repo() and not is_nil(app_id) and
+         get_in(comment, ["performed_via_github_app", "id"]) == app_id do
       case Regex.run(~r/\Abors (r\+ single|r\+|r-) sha=([0-9a-f]{40})\z/, comment["body"] || "") do
         [_, "r+ single", head] -> {:ok, "bors r+ single on", head}
         [_, command, head] -> {:ok, "bors #{command}", head}
@@ -359,7 +363,7 @@ defmodule BorsNG.WebhookController do
 
     BorsNG.Worker.CandidateJournal.observe_check(project.id, check)
 
-    if project.name == "TauCetiProject/TauCeti" and pr do
+    if project.name == BorsNG.ProjectConfig.repo() and pr do
       Batcher.eligibility(Batcher.Registry.get(project.id), pr)
     end
 

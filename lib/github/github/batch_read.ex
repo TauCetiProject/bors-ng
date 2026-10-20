@@ -4,7 +4,7 @@ defmodule BorsNG.GitHub.BatchRead do
 
   def enabled?(project),
     do:
-      project.name == "TauCetiProject/TauCeti" and
+      project.name == BorsNG.ProjectConfig.repo() and
         String.trim_trailing(Confex.fetch_env!(:bors, :api_github_root), "/") ==
           "https://api.github.com" and
         Process.get(:orchestration_executor, false)

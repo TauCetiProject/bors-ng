@@ -1,0 +1,29 @@
+name: Publish Bors container
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+permissions:
+  contents: read
+  packages: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish immutable revision
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}
+          REVISION: ${{ github.sha }}
+        run: |
+          image="${IMAGE,,}"
+          docker build --label org.opencontainers.image.source="https://github.com/$GITHUB_REPOSITORY" --tag "$image:$REVISION" .
+          docker push "$image:$REVISION" | tee /tmp/bors-image-push.log
+          digest=$(sed -n 's/.*digest: \(sha256:[a-f0-9]*\).*/\1/p' /tmp/bors-image-push.log | tail -1)
+          test -n "$digest"
+          echo "Container: \`$image@$digest\`" >> "$GITHUB_STEP_SUMMARY"

@@ -4,24 +4,23 @@ defmodule BorsNG.Worker.ManualApproval do
   alias BorsNG.Database.{Batch, LinkPatchBatch, Patch, Project, Repo, User}
   alias BorsNG.GitHub
 
-  @repo "TauCetiProject/TauCeti"
-
-  def scoped?(%Project{name: @repo}, "main"), do: true
+  def scoped?(%Project{} = project, base), do: BorsNG.ProjectConfig.scoped?(project, base)
   def scoped?(_, _), do: false
 
   # Actual authenticated command author, never the name in `r=somebody`.
-  def authorized?(%Project{name: @repo} = project, %User{user_xref: actor}) do
+  def authorized?(%Project{} = project, %User{user_xref: actor}) do
     conn = Project.installation_connection(project.repo_xref, Repo)
-    administrator?(conn, actor) == {:ok, true}
+    project.name == BorsNG.ProjectConfig.repo() and administrator?(conn, actor) == {:ok, true}
   end
 
   def authorized?(_, _), do: false
 
-  def valid?(%Patch{into_branch: "main", open: true, is_draft: false} = patch) do
+  def valid?(%Patch{open: true, is_draft: false} = patch) do
     case patch.manual_approval do
       %{"actor_id" => actor, "head_sha" => head, "merge_base_sha" => base}
       when is_integer(actor) and actor > 0 ->
-        head == patch.commit and sha?(head) and sha?(base)
+        patch.into_branch == BorsNG.ProjectConfig.branch() and head == patch.commit and sha?(head) and
+          sha?(base)
 
       _ ->
         false
@@ -32,14 +31,18 @@ defmodule BorsNG.Worker.ManualApproval do
 
   def grant(conn, project, patch, actor, head, created_at \\ DateTime.utc_now())
 
-  def grant(conn, %Project{name: @repo}, patch, actor, head, created_at) do
-    with {:ok, true} <- administrator?(conn, actor),
+  def grant(conn, %Project{} = project, patch, actor, head, created_at) do
+    with true <- project.name == BorsNG.ProjectConfig.repo(),
+         {:ok, true} <- administrator?(conn, actor),
          true <- fresh_command?(patch, created_at),
          true <- patch.commit == head,
-         true <- patch.open and not patch.is_draft and patch.into_branch == "main",
+         true <-
+           patch.open and not patch.is_draft and
+             patch.into_branch == BorsNG.ProjectConfig.branch(),
          {:ok, pr} <- GitHub.get_pr(conn, patch.pr_xref),
          true <-
-           pr.head_sha == head and pr.state == :open and not pr.draft and pr.base_ref == "main",
+           pr.head_sha == head and pr.state == :open and not pr.draft and
+             pr.base_ref == BorsNG.ProjectConfig.branch(),
          {:ok, base} <- GitHub.get_pr_merge_base(conn, patch.pr_xref, head),
          true <- sha?(head) and sha?(base) do
       {:ok, patch} =
@@ -103,7 +106,7 @@ defmodule BorsNG.Worker.ManualApproval do
          {:ok, pr} <- GitHub.get_pr(conn, patch.pr_xref),
          true <-
            pr.head_sha == patch.commit and pr.state == :open and not pr.draft and
-             pr.base_ref == "main",
+             pr.base_ref == BorsNG.ProjectConfig.branch(),
          {:ok, base} <- GitHub.get_pr_merge_base(conn, patch.pr_xref, patch.commit),
          true <- base == patch.manual_approval["merge_base_sha"] do
       :ok
