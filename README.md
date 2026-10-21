@@ -391,6 +391,8 @@ All the same recommendations apply, with some extra notes:
 - `BORS_LOG_LEVEL` allows you to set the log level at runtime for bors-ng.
   The allowed values are the usual Elixir `Logger` levels, e.g. `info`, `debug`, `warn`, etc.
   Defaults to `info` if not set.
+- bors's requests to GitHub and Zulip trust the image's system certificate store, Debian's `ca-certificates`.
+  Rebuild the runtime stage without its layer cache to pick up changes to the store.
 
       docker create --name bors --restart=unless-stopped \
           -e PUBLIC_HOST=app.bors.tech \

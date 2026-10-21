@@ -1,6 +1,6 @@
 FROM node:22-bookworm AS node
 
-FROM elixir:1.17.3 AS build
+FROM hexpm/elixir:1.17.3-erlang-27.3.4.13-debian-bookworm-20260623-slim AS build
 
 ENV MIX_ENV=prod LANG=C.UTF-8
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
@@ -19,9 +19,12 @@ RUN npm ci --prefix assets
 COPY . .
 RUN npm run deploy --prefix assets && mix phx.digest && mix compile && mix release
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim AS runtime
+
+# Outgoing TLS trusts this store. Refuse images with the compromised emSign root.
 RUN apt-get update && apt-get install -y --no-install-recommends git python3 ca-certificates libssl3 libstdc++6 libncurses6 zlib1g \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && test ! -e /etc/ssl/certs/emSign_ECC_Root_CA_-_G3.pem
 WORKDIR /app
 COPY --from=build /src/_build/prod/rel/bors ./
 COPY deploy/cloudflare/entrypoint.sh /usr/local/bin/bors-entrypoint
