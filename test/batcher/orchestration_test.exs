@@ -997,6 +997,98 @@ defmodule BorsNG.Worker.OrchestrationTest do
     assert Repo.get!(Batch, ctx.batch.id).state == :ok
   end
 
+  test "a terminal status replay resumes deferred completion without duplicate journal writes",
+       ctx do
+    dispatch = construct(ctx)
+    assert :ok == execute(ctx.worker, dispatch)
+    batch = Repo.get!(Batch, ctx.batch.id)
+    candidate = CandidateJournal.current(batch)
+
+    GitHub.ServerMock.put_state(
+      put_in(GitHub.ServerMock.get_state(), [ctx.conn, :statuses, batch.commit], %{
+        "ci" => :ok,
+        "cd" => :ok
+      })
+    )
+
+    command = Outbox.enqueue(ctx.project.id, "cast", {:set_priority, ctx.patch.id, 7})
+    payload = {:status, {batch.commit, "ci", :ok, "url"}}
+    green = Outbox.enqueue(ctx.project.id, "cast", payload)
+
+    assert {:defer, :withdrawal_pending} == execute(ctx.worker, green)
+    assert Repo.get_by!(Status, batch_id: batch.id, identifier: "ci").state == :ok
+    assert Repo.get!(Batch, batch.id).state == :running
+    assert get_in(GitHub.ServerMock.get_state(), [ctx.conn, :branches, "master"]) == "ini"
+
+    assert :ok == execute(ctx.worker, command)
+    assert :ok == execute(ctx.worker, Repo.get!(OrchestrationJob, green.id))
+    assert Repo.get!(Batch, batch.id).state == :ok
+    assert get_in(GitHub.ServerMock.get_state(), [ctx.conn, :branches, "master"]) == batch.commit
+
+    assert :ok == execute(ctx.worker, Outbox.enqueue(ctx.project.id, "cast", payload))
+
+    events =
+      Repo.all(from(e in BorsNG.Database.CandidateEvent, where: e.candidate_id == ^candidate.id))
+
+    assert Enum.count(events, &(&1.source == "github.status_webhook")) == 1
+    assert Enum.count(events, &(&1.kind == "promoted")) == 1
+  end
+
+  test "a terminal status replay refreshes CI after deferred completion", ctx do
+    dispatch = construct(ctx)
+    assert :ok == execute(ctx.worker, dispatch)
+    batch = Repo.get!(Batch, ctx.batch.id)
+
+    GitHub.ServerMock.put_state(
+      put_in(GitHub.ServerMock.get_state(), [ctx.conn, :statuses, batch.commit], %{
+        "ci" => :ok,
+        "cd" => :ok
+      })
+    )
+
+    command = Outbox.enqueue(ctx.project.id, "cast", {:set_priority, ctx.patch.id, 7})
+
+    green =
+      Outbox.enqueue(ctx.project.id, "cast", {:status, {batch.commit, "ci", :ok, "old-green"}})
+
+    assert {:defer, :withdrawal_pending} == execute(ctx.worker, green)
+    assert Repo.get_by!(Status, batch_id: batch.id, identifier: "ci").state == :ok
+
+    GitHub.ServerMock.put_state(
+      put_in(GitHub.ServerMock.get_state(), [ctx.conn, :statuses, batch.commit, "ci"], :error)
+    )
+
+    assert :ok == execute(ctx.worker, command)
+    assert :ok == execute(ctx.worker, Repo.get!(OrchestrationJob, green.id))
+    assert Repo.get_by!(Status, batch_id: batch.id, identifier: "ci").state == :error
+    assert Repo.get!(Batch, batch.id).state == :error
+    assert get_in(GitHub.ServerMock.get_state(), [ctx.conn, :branches, "master"]) == "ini"
+  end
+
+  test "a deferred terminal replay cannot undo a cancellation", ctx do
+    dispatch = construct(ctx)
+    assert :ok == execute(ctx.worker, dispatch)
+    batch = Repo.get!(Batch, ctx.batch.id)
+
+    GitHub.ServerMock.put_state(
+      put_in(GitHub.ServerMock.get_state(), [ctx.conn, :statuses, batch.commit], %{
+        "ci" => :ok,
+        "cd" => :ok
+      })
+    )
+
+    cancel = Outbox.enqueue(ctx.project.id, "cast", {:cancel, ctx.patch.id, :requested})
+    green = Outbox.enqueue(ctx.project.id, "cast", {:status, {batch.commit, "ci", :ok, "url"}})
+
+    assert {:defer, :withdrawal_pending} == execute(ctx.worker, green)
+    assert Repo.get_by!(Status, batch_id: batch.id, identifier: "ci").state == :ok
+    assert :ok == execute(ctx.worker, cancel)
+    assert :ok == execute(ctx.worker, Repo.get!(OrchestrationJob, green.id))
+    assert Repo.get!(Batch, batch.id).state == :canceled
+    refute Repo.get!(Patch, ctx.patch.id).queue_pending
+    assert get_in(GitHub.ServerMock.get_state(), [ctx.conn, :branches, "master"]) == "ini"
+  end
+
   test "eligibility received before a patch exists conservatively fences the project", ctx do
     dispatch = construct(ctx)
     policy = Outbox.enqueue(ctx.project.id, "cast", {:eligibility, 999_999})
