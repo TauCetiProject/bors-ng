@@ -10,7 +10,7 @@ const MANIFEST = {
   callback_urls: ["https://bors.taucetiproject.org/auth/github/callback"],
   public: false,
   default_permissions: {
-    contents: "write", issues: "write", pull_requests: "write",
+    actions: "write", contents: "write", issues: "write", pull_requests: "write",
     statuses: "write", checks: "write", members: "read", workflows: "write",
   },
   default_events: [

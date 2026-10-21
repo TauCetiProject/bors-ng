@@ -802,9 +802,6 @@ defmodule BorsNG.GitHub.ServerMock do
     {{:ok, get_in(state, [conn, :active_staging_count]) || 0}, state}
   end
 
-  def do_handle_call(:cancellation_capability, _conn, {}, state),
-    do: {state[:cancellation_capability_error] || :ok, state}
-
   def do_handle_call(:cancellation_lookup, conn, {p}, state) do
     if state[:cancellation_lookup_error] do
       {state[:cancellation_lookup_error], state}
@@ -813,12 +810,12 @@ defmodule BorsNG.GitHub.ServerMock do
     end
   end
 
-  def do_handle_call(:cancellation_dispatch, _conn, args, state) do
+  def do_handle_call(:cancel_candidate_run, _conn, args, state) do
     if hook = state[:cancellation_hook], do: hook.()
 
     case BorsNG.Worker.CandidateCancellation.authority(elem(args, 0)) do
       {:ok, _} ->
-        {state[:cancellation_dispatch_error] || :ok,
+        {state[:cancel_candidate_run_error] || :ok,
          Map.update(state, :cancellations, [args], &[args | &1])}
 
       error ->

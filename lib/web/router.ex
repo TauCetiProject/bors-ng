@@ -131,7 +131,6 @@ defmodule BorsNG.Router do
     pipe_through(:browser_ajax)
 
     get("/active-batches", ApiController, :active_batches)
-    get("/candidate-cancellations/:id", ApiController, :candidate_cancellation)
   end
 
   # Unauthenticated project-scoped JSON endpoint

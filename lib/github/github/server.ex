@@ -61,8 +61,7 @@ defmodule BorsNG.GitHub.Server do
              :batch_read,
              :public_user,
              :cancellation_lookup,
-             :cancellation_dispatch,
-             :cancellation_capability
+             :cancel_candidate_run
            ] do
     # Include time spent behind another API request. Never execute an expired
     # advisory call or hide retries/token refreshes inside its service budget.
@@ -372,42 +371,6 @@ defmodule BorsNG.GitHub.Server do
     end
   end
 
-  # Exact reviewed default-branch blobs prove that the sink exists before any
-  # dispatch. A repository_dispatch204 alone does not prove a workflow received it.
-  def do_handle_call(:cancellation_capability, conn, {}) do
-    blobs = [
-      {".github/workflows/cancel-bors-candidate.yml", "42f163d30052a1285bae4cdef41770c5bc857b42"},
-      {"scripts/cancel_bors_candidate.py", "be518d2f27d8e2757977a566b70bf4e9943a06ff"}
-    ]
-
-    with %{status: 200, body: raw} <- get!(conn, "actions/workflows/cancel-bors-candidate.yml"),
-         %{
-           "path" => ".github/workflows/cancel-bors-candidate.yml",
-           "state" => "active",
-           "id" => id
-         }
-         when is_integer(id) and id > 0 <- Jason.decode!(raw) do
-      Enum.reduce_while(blobs, :ok, fn {path, sha}, _ ->
-        case get!(conn, "contents/#{path}?ref=main") do
-          %{status: 200, body: raw} ->
-            if Jason.decode!(raw)["sha"] == sha,
-              do: {:cont, :ok},
-              else: {:halt, {:error, :cancellation_capability_mismatch}}
-
-          %{status: 404} ->
-            {:halt, {:error, :cancellation_sink_not_landed}}
-
-          %{status: status} ->
-            {:halt, {:error, :cancellation_capability, status}}
-        end
-      end)
-    else
-      %{status: 404} -> {:error, :cancellation_sink_not_landed}
-      %{status: status} -> {:error, :cancellation_capability, status}
-      _ -> {:error, :cancellation_sink_inactive}
-    end
-  end
-
   def do_handle_call(:cancellation_lookup, conn, {p}) do
     do_handle_call(
       :staging_run,
@@ -416,21 +379,29 @@ defmodule BorsNG.GitHub.Server do
     )
   end
 
-  def do_handle_call(:cancellation_dispatch, conn, {id, run_id, attempt}) do
-    # This runs after token acquisition/mailbox wait, immediately before POST.
-    with {:ok, %{"run_id" => ^run_id, "run_attempt" => ^attempt}} <-
-           BorsNG.Worker.CandidateCancellation.authority(id) do
-      body =
-        Jason.encode!(%{
-          event_type: "tauceti-bors-cancel",
-          client_payload: %{intent_id: id, run_id: run_id, run_attempt: attempt}
-        })
+  def do_handle_call(:cancel_candidate_run, conn, {id, run_id, attempt}) do
+    alias BorsNG.Worker.CandidateCancellation
 
-      case post!(conn, "dispatches", body) do
-        %{status: 204} -> :ok
-        %{status: code} -> {:error, :cancellation_dispatch, code}
+    # Token acquisition and mailbox wait may outlive the original decision.
+    # Re-read the bound run and durable withdrawal before normal cancellation.
+    with {:ok, %{"run_id" => ^run_id, "run_attempt" => ^attempt} = authority} <-
+           CandidateCancellation.authority(id),
+         %{status: 200, body: raw} <- get!(conn, "actions/runs/#{run_id}"),
+         {:ok, run} <- Jason.decode(raw),
+         true <- is_map(run) and run["id"] == run_id,
+         {:ok, _} <- CandidateCancellation.validate_run(run, authority),
+         {:ok, ^authority} <- CandidateCancellation.authority(id) do
+      case post!(conn, "actions/runs/#{run_id}/cancel", "") do
+        %{status: 202} -> :ok
+        %{status: 409} -> {:terminal, :already_completed}
+        response -> cancellation_error(response)
       end
     else
+      {:terminal, _} = terminal -> terminal
+      %{status: _} = response -> cancellation_error(response)
+      {:error, reason} = error when reason in [:invalid_run_binding, :invalid_run_state] -> error
+      {:error, %Jason.DecodeError{}} -> {:error, :cancel_candidate_response, 502}
+      false -> {:error, :invalid_run_binding}
       _ -> {:error, :unauthorized_or_expired}
     end
   end
@@ -1939,4 +1910,18 @@ defmodule BorsNG.GitHub.Server do
       _ -> {:error, :cleanup_policy}
     end
   end
+
+  defp cancellation_error(%{status: 403, headers: headers}) do
+    limited =
+      Enum.any?(headers, fn {name, value} ->
+        String.downcase(name) == "retry-after" or
+          (String.downcase(name) == "x-ratelimit-remaining" and value == "0")
+      end)
+
+    if limited,
+      do: {:error, :cancel_candidate_rate_limit, 429},
+      else: {:error, :cancel_candidate_run, 403}
+  end
+
+  defp cancellation_error(%{status: code}), do: {:error, :cancel_candidate_run, code}
 end

@@ -1,5 +1,5 @@
 defmodule BorsNG.Worker.CandidateCancellation do
-  @moduledoc "Bounded exact-candidate cancellation through a trusted default-branch workflow."
+  @moduledoc "Bounded direct cancellation of an explicitly withdrawn Actions candidate."
   import Ecto.Query
   alias BorsNG.Database.{Batch, Candidate, CandidateEvent, OrchestrationJob, Project, Repo}
   alias BorsNG.Worker.CandidateJournal, as: Journal
@@ -50,7 +50,7 @@ defmodule BorsNG.Worker.CandidateCancellation do
     end
   end
 
-  # Public read-only authority; knowing an ID never creates or extends authority.
+  # Internal authority; retries cannot extend a withdrawal to another run.
   def authority(id) do
     with %OrchestrationJob{kind: "cancel_run", state: state} = job <-
            Repo.get(OrchestrationJob, id),
@@ -84,8 +84,9 @@ defmodule BorsNG.Worker.CandidateCancellation do
         [] ->
           {:ok, Map.put(p, "intent_id", job.id)}
 
-        [%{details: %{"run_id" => run_id, "run_attempt" => 1} = details}]
-        when is_integer(run_id) and run_id > 0 and map_size(details) == 2 ->
+        [%{details: %{"run_id" => run_id, "run_attempt" => attempt} = details}]
+        when is_integer(run_id) and run_id > 0 and is_integer(attempt) and attempt > 0 and
+               map_size(details) == 2 ->
           {:ok, p |> Map.put("intent_id", job.id) |> Map.merge(details)}
 
         _ ->
@@ -163,7 +164,10 @@ defmodule BorsNG.Worker.CandidateCancellation do
                get_in(run, [k, "login"]) == "tau-ceti-bors[bot]" and
                get_in(run, [k, "type"]) == "Bot"
            end),
-         true <- is_integer(run["id"]) and run["id"] > 0 and run["run_attempt"] == 1,
+         true <-
+           is_integer(run["id"]) and run["id"] > 0 and
+             is_integer(run["run_attempt"]) and run["run_attempt"] > 0 and
+             run["run_attempt"] == Map.get(p, "run_attempt", run["run_attempt"]),
          {:ok, created, _} <- DateTime.from_iso8601(run["created_at"] || ""),
          true <-
            DateTime.to_unix(created, :microsecond) >= p["dispatch_at"] - 60_000_000 and
@@ -189,7 +193,7 @@ defmodule BorsNG.Worker.CandidateCancellation do
            if(is_nil(run), do: {:retry, :run_not_discovered}, else: validate_run(run, p)),
          :ok <- bind_run(p, run),
          :ok <- deliver_once(job, conn, p, run) do
-      # A 204 acknowledges dispatch, not cancellation. Reconcile on durable retry.
+      # A 202 acknowledges the request; reconcile GitHub completion on durable retry.
       throw({:cancellation_retry, :awaiting_ci_terminal})
     else
       {:terminal, reason} ->
@@ -210,6 +214,12 @@ defmodule BorsNG.Worker.CandidateCancellation do
         outcome(job, reason)
 
       {:error, _, code} when code in [401, 403, 404] ->
+        if code in [401, 403],
+          do:
+            Logger.warning(
+              "candidate cancellation permission denied intent=#{job.id} HTTP #{code}"
+            )
+
         outcome(job, {:http, code})
 
       false ->
@@ -228,38 +238,17 @@ defmodule BorsNG.Worker.CandidateCancellation do
         )
       )
 
-    attempts =
-      Repo.aggregate(
-        from(e in CandidateEvent,
-          where:
-            e.candidate_id == ^p["candidate_id"] and e.kind == "cancellation_delivery_attempted"
-        ),
-        :count
-      )
-
-    cond do
-      accepted ->
-        :ok
-
-      attempts >= 2 ->
-        throw({:cancellation_retry, :ambiguous_delivery_limit})
-
-      true ->
-        with :ok <- BorsNG.GitHub.cancellation_call(:cancellation_capability, conn, {}),
-             {:ok, _} <- authority(job.id) do
-          # A lost response can have accepted the dispatch. Permit at most one
-          # ambiguity replay; known204 delivery is never dispatched again.
-          record(p, "delivery_attempted", %{run_id: run["id"], run_attempt: 1})
-
-          case BorsNG.GitHub.cancellation_call(
-                 :cancellation_dispatch,
-                 conn,
-                 {job.id, run["id"], run["run_attempt"]}
-               ) do
-            :ok -> record(p, "requested", %{run_id: run["id"], run_attempt: 1})
-            error -> error
-          end
-        end
+    if accepted do
+      :ok
+    else
+      case BorsNG.GitHub.cancellation_call(
+             :cancel_candidate_run,
+             conn,
+             {job.id, run["id"], run["run_attempt"]}
+           ) do
+        :ok -> record(p, "requested", %{run_id: run["id"], run_attempt: run["run_attempt"]})
+        result -> result
+      end
     end
   end
 

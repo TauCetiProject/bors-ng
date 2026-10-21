@@ -15,9 +15,6 @@ defmodule BorsNG.Worker.CandidateCancellationTest do
   alias BorsNG.Worker.Orchestration.Outbox
   alias BorsNG.GitHub.ServerMock
 
-  import Phoenix.ConnTest
-  @endpoint BorsNG.Endpoint
-
   @head String.duplicate("a", 40)
   @base String.duplicate("b", 40)
   @conn {{:installation, 91}, 1_256_881_326}
@@ -233,16 +230,6 @@ defmodule BorsNG.Worker.CandidateCancellationTest do
     refute ServerMock.get_state()[:cancellations]
   end
 
-  test "public authority is read-only, uncached and revokes on terminal job", ctx do
-    conn = get(build_conn(), "/api/candidate-cancellations/#{ctx.job.id}")
-    assert conn.status == 200
-    assert Plug.Conn.get_resp_header(conn, "cache-control") == ["no-store"]
-    assert Jason.decode!(conn.resp_body)["generation"] == 1
-    ctx.job |> Ecto.Changeset.change(state: "done") |> Repo.update!()
-    assert get(build_conn(), "/api/candidate-cancellations/#{ctx.job.id}").status == 404
-    assert get(build_conn(), "/api/candidate-cancellations/bad").status == 404
-  end
-
   test "enqueue and withdrawal state commit atomically and never contact GitHub", ctx do
     Repo.delete!(ctx.job)
     running = ctx.batch |> Batch.changeset(%{state: :running}) |> Repo.update!()
@@ -264,17 +251,158 @@ defmodule BorsNG.Worker.CandidateCancellationTest do
   test "real adapter refuses stale authority before beginning HTTP", ctx do
     assert {:error, :unauthorized_or_expired} =
              BorsNG.GitHub.Server.do_handle_call(
-               :cancellation_dispatch,
+               :cancel_candidate_run,
                {{:raw, "test-token"}, 1_256_881_326},
                {ctx.job.id, 123, 1}
              )
 
     assert {:error, :unauthorized_or_expired} =
              BorsNG.GitHub.Server.do_handle_call(
-               :cancellation_dispatch,
+               :cancel_candidate_run,
                {{:raw, "test-token"}, 1_256_881_326},
                {999_999, 123, 1}
              )
+  end
+
+  defp cancellation_http(responses, fun, before_reply \\ fn -> :ok end) do
+    {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true])
+    {:ok, {_, port}} = :inet.sockname(listener)
+    old = Application.get_env(:bors, :api_github_root)
+    Application.put_env(:bors, :api_github_root, "http://127.0.0.1:#{port}")
+    parent = self()
+
+    server =
+      spawn_link(fn ->
+        Enum.each(responses, fn {status, data} ->
+          {:ok, socket} = :gen_tcp.accept(listener, 5000)
+          {:ok, request} = :gen_tcp.recv(socket, 0, 5000)
+          send(parent, {:cancel_http, request})
+          before_reply.()
+          body = Jason.encode!(data)
+
+          :gen_tcp.send(
+            socket,
+            "HTTP/1.1 #{status} Result\r\nContent-Type: application/json\r\nContent-Length: #{byte_size(body)}\r\nConnection: close\r\n\r\n#{body}"
+          )
+
+          :gen_tcp.close(socket)
+        end)
+      end)
+
+    try do
+      fun.()
+    after
+      :gen_tcp.close(listener)
+      Process.unlink(server)
+      Process.exit(server, :kill)
+      Application.put_env(:bors, :api_github_root, old)
+    end
+  end
+
+  test "direct adapter rechecks the run then posts normal cancellation without relay reads",
+       ctx do
+    assert catch_throw(CandidateCancellation.deliver(claim(ctx.job))) ==
+             {:cancellation_retry, :awaiting_ci_terminal}
+
+    assert :ok ==
+             cancellation_http([{200, ctx.run}, {202, %{}}], fn ->
+               BorsNG.GitHub.Server.do_handle_call(
+                 :cancel_candidate_run,
+                 {{:raw, "test-token"}, 1_256_881_326},
+                 {ctx.job.id, 123, 1}
+               )
+             end)
+
+    assert_receive {:cancel_http, get}
+    assert get =~ "GET /repositories/1256881326/actions/runs/123 "
+    assert_receive {:cancel_http, post}
+    assert post =~ "POST /repositories/1256881326/actions/runs/123/cancel "
+    refute post =~ "force-cancel"
+    refute_receive {:cancel_http, _}, 10
+  end
+
+  test "freshly observed rerun or terminal run prevents cancellation POST", ctx do
+    assert catch_throw(CandidateCancellation.deliver(claim(ctx.job))) ==
+             {:cancellation_retry, :awaiting_ci_terminal}
+
+    for {run, expected} <- [
+          {Map.put(ctx.run, "run_attempt", 2), {:error, :invalid_run_binding}},
+          {Map.merge(ctx.run, %{"status" => "completed", "conclusion" => "success"}),
+           {:terminal, "success"}}
+        ] do
+      assert expected ==
+               cancellation_http([{200, run}], fn ->
+                 BorsNG.GitHub.Server.do_handle_call(
+                   :cancel_candidate_run,
+                   {{:raw, "test-token"}, 1_256_881_326},
+                   {ctx.job.id, 123, 1}
+                 )
+               end)
+
+      assert_receive {:cancel_http, get}
+      assert get =~ "GET "
+      refute_receive {:cancel_http, _}, 10
+    end
+  end
+
+  test "authority revoked during the real adapter GET prevents the POST", ctx do
+    assert catch_throw(CandidateCancellation.deliver(claim(ctx.job))) ==
+             {:cancellation_retry, :awaiting_ci_terminal}
+
+    assert {:error, :unauthorized_or_expired} ==
+             cancellation_http(
+               [{200, ctx.run}],
+               fn ->
+                 BorsNG.GitHub.Server.do_handle_call(
+                   :cancel_candidate_run,
+                   {{:raw, "test-token"}, 1_256_881_326},
+                   {ctx.job.id, 123, 1}
+                 )
+               end,
+               fn -> CandidateJournal.event(ctx.candidate, "promotion_requested", "test") end
+             )
+
+    assert_receive {:cancel_http, _}
+    refute_receive {:cancel_http, _}, 10
+  end
+
+  test "a different id in the authoritative GET cannot redirect cancellation", ctx do
+    assert catch_throw(CandidateCancellation.deliver(claim(ctx.job))) ==
+             {:cancellation_retry, :awaiting_ci_terminal}
+
+    assert {:error, :invalid_run_binding} ==
+             cancellation_http([{200, Map.put(ctx.run, "id", 456)}], fn ->
+               BorsNG.GitHub.Server.do_handle_call(
+                 :cancel_candidate_run,
+                 {{:raw, "test-token"}, 1_256_881_326},
+                 {ctx.job.id, 123, 1}
+               )
+             end)
+
+    assert_receive {:cancel_http, _}
+    refute_receive {:cancel_http, _}, 10
+  end
+
+  test "normal cancellation conflict is terminal and permission denial is explicit", ctx do
+    assert catch_throw(CandidateCancellation.deliver(claim(ctx.job))) ==
+             {:cancellation_retry, :awaiting_ci_terminal}
+
+    for {status, expected} <- [
+          {409, {:terminal, :already_completed}},
+          {403, {:error, :cancel_candidate_run, 403}}
+        ] do
+      assert expected ==
+               cancellation_http([{200, ctx.run}, {status, %{}}], fn ->
+                 BorsNG.GitHub.Server.do_handle_call(
+                   :cancel_candidate_run,
+                   {{:raw, "test-token"}, 1_256_881_326},
+                   {ctx.job.id, 123, 1}
+                 )
+               end)
+
+      assert_receive {:cancel_http, _}
+      assert_receive {:cancel_http, _}
+    end
   end
 
   test "expired leases survive restart and still honor the finite attempt budget", ctx do
@@ -300,7 +428,7 @@ defmodule BorsNG.Worker.CandidateCancellationTest do
           Map.put(ctx.run, "event", "pull_request_target"),
           Map.put(ctx.run, "workflow_id", 1),
           Map.put(ctx.run, "path", ".github/workflows/other.yml"),
-          Map.put(ctx.run, "run_attempt", 2),
+          Map.put(ctx.run, "run_attempt", 0),
           Map.delete(ctx.run, "run_attempt"),
           put_in(ctx.run, ["actor", "id"], 1),
           put_in(ctx.run, ["triggering_actor", "id"], 1),
@@ -393,39 +521,40 @@ defmodule BorsNG.Worker.CandidateCancellationTest do
     unauthorized(ctx)
   end
 
-  test "unlanded or changed companion capability never activates dispatch", ctx do
-    for error <- [
-          {:error, :cancellation_sink_not_landed},
-          {:error, :cancellation_capability_mismatch}
-        ] do
-      ServerMock.put_state(Map.put(ServerMock.get_state(), :cancellation_capability_error, error))
-
-      job =
-        if Repo.get!(OrchestrationJob, ctx.job.id).state == "running",
-          do: Repo.get!(OrchestrationJob, ctx.job.id),
-          else: claim(ctx.job)
-
-      assert catch_throw(CandidateCancellation.deliver(job)) == {:cancellation_retry, error}
-      refute ServerMock.get_state()[:cancellations]
-    end
-  end
-
-  test "ambiguous API acceptance permits only one replay and never amplifies every retry", ctx do
+  test "ambiguous cancellation retries normally within the existing outbox budget", ctx do
     ServerMock.put_state(
-      Map.put(ServerMock.get_state(), :cancellation_dispatch_error, {:error, :dispatch, 503})
+      Map.put(ServerMock.get_state(), :cancel_candidate_run_error, {:error, :cancel, 503})
     )
 
     job = claim(ctx.job)
 
-    for _ <- 1..2 do
+    for _ <- 1..3 do
       assert catch_throw(CandidateCancellation.deliver(job)) ==
-               {:cancellation_retry, {:error, :dispatch, 503}}
+               {:cancellation_retry, {:error, :cancel, 503}}
     end
 
-    assert catch_throw(CandidateCancellation.deliver(job)) ==
-             {:cancellation_retry, :ambiguous_delivery_limit}
+    assert length(ServerMock.get_state().cancellations) == 3
+  end
 
-    assert length(ServerMock.get_state().cancellations) == 2
+  test "an existing fleet retry can bind its observed attempt without authorizing a later one",
+       ctx do
+    retried = Map.put(ctx.run, "run_attempt", 2)
+
+    ServerMock.put_state(
+      put_in(ServerMock.get_state(), [@conn, :staging_runs, {@head, ctx.batch.id}], retried)
+    )
+
+    job = claim(ctx.job)
+
+    assert catch_throw(CandidateCancellation.deliver(job)) ==
+             {:cancellation_retry, :awaiting_ci_terminal}
+
+    assert [{_, 123, 2}] = ServerMock.get_state().cancellations
+    assert {:ok, bound} = CandidateCancellation.authority(ctx.job.id)
+    assert bound["run_attempt"] == 2
+
+    assert {:error, :invalid_run_binding} ==
+             CandidateCancellation.validate_run(Map.put(retried, "run_attempt", 3), bound)
   end
 
   test "a run appearing after first lookup is discovered on retry", ctx do

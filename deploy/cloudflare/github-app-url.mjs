@@ -8,6 +8,7 @@ const values = {
   public: "false",
   webhook_active: "true",
   webhook_url: "https://bors.taucetiproject.org/webhook/github",
+  actions: "write",
   contents: "write",
   issues: "write",
   pull_requests: "write",

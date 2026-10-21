@@ -49,6 +49,18 @@ TauCeti installation too. Bors refreshes failed installation tokens and its
 existing restart recovery retries retained batches; no PR reapproval or direct
 merge is needed. Check actual staging progress after the recovery backoff.
 
+Direct cancellation of withdrawn staging runs also requires repository
+`Actions: write` on both the App registration and its installation. This is
+separate from `Workflows: write` and `Variables: write`. Set Actions to
+Read and write in the
+[App permissions](https://github.com/organizations/TauCetiProject/settings/apps/tau-ceti-bors/permissions),
+save, then accept the update on the
+[TauCeti installation](https://github.com/organizations/TauCetiProject/settings/installations/167441900).
+Both were verified to grant Actions write on 2026-10-21. For a new installation,
+the setup manifest and registration URL request it. See
+[candidate cancellation](../candidate-cancellation.md) for exact-run checks and
+the production verification procedure.
+
 Cloudflare Builds is connected to `TauCetiProject/bors-ng` and automatically
 builds pushes to `master`. The build command is `npm ci`, the deploy command is
 `npx wrangler deploy`, and the root directory is `/`. Workers Builds has Docker
