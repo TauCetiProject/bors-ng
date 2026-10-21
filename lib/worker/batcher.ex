@@ -471,8 +471,12 @@ defmodule BorsNG.Worker.Batcher do
           |> Repo.update_all(set: [state: state, url: url, identifier: identifier])
         end
 
-      if updated > 0 and batch.state == :running do
-        CandidateJournal.status(batch, identifier, state, "github.status_webhook", url)
+      # Completion may defer after the status is persisted. A terminal replay
+      # must resume that work even when the database write is a duplicate.
+      if batch.state == :running and
+           (updated > 0 or (not is_nil(previous) and state in [:ok, :error])) do
+        if updated > 0,
+          do: CandidateJournal.status(batch, identifier, state, "github.status_webhook", url)
 
         if (Process.get(:orchestration_executor, false) and state in [:ok, :error]) or
              (expired_staging?(batch) and

@@ -453,6 +453,8 @@ defmodule BorsNG.Worker.SpeculativeTrainTest do
   } do
     {a, ca, _} = candidate(project, 1)
     Train.reserve(ca, @conn)
+    {:ok, job} = Outbox.claim(Outbox.enqueue(project.id, "info", {:poll, :once}).id)
+    Process.put(:orchestration_job, job)
 
     GitHub.ServerMock.put_state(
       put_in(GitHub.ServerMock.get_state(), [@conn, :statuses, a.commit], %{"build" => :ok})
@@ -464,6 +466,9 @@ defmodule BorsNG.Worker.SpeculativeTrainTest do
       assert Repo.get!(Batch, a.id).state == :running
       refute Train.event?(ca, "promotion_requested")
     end
+
+    Outbox.finish(job)
+    Process.delete(:orchestration_job)
   end
 
   for workflow_status <- ["queued", "in_progress"] do
