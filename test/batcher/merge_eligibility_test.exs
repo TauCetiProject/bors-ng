@@ -1254,6 +1254,25 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
     assert Repo.exists?(Batch.all_for_project(p.id, :incomplete))
   end
 
+  test "a repeated approval after dispatch failure directs an explicit CI retry", %{project: p} do
+    scope_ci()
+    update_repo(:pr_build_dispatch_error, {:error, :unavailable})
+    first = manual_review(p)
+    update_repo(:pr_build_dispatch_error, nil)
+    repeated = manual_review(p)
+
+    assert repeated.manual_approval == first.manual_approval
+    state = GitHub.ServerMock.get_state()[@conn]
+    assert Map.get(state, :pr_build_dispatches, []) == []
+
+    assert Enum.any?(
+             state.comments[1],
+             &String.contains?(&1, "rerun the trusted PR build workflow")
+           )
+
+    refute Repo.exists?(Batch.all_for_project(p.id, :incomplete))
+  end
+
   test "candidate bors.toml cannot remove main's scope and build requirements", %{project: p} do
     scope_ci()
     state = GitHub.ServerMock.get_state()
