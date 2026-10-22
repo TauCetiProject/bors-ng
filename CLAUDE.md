@@ -9,11 +9,13 @@ queuing, batching, and automatic merging via the GitHub API.
 
 | Component | Required version |
 |-----------|-----------------|
-| Elixir    | 1.16.3 or 1.17.3 |
-| OTP       | 26.x (with Elixir 1.16) or 27.x (with Elixir 1.17) |
+| Elixir    | 1.17.3 |
+| OTP       | 27.x |
 | PostgreSQL | 13+ (primary DB; MySQL is also supported via BORS_DATABASE=mysql) |
 
-**OTP 25 is NOT supported** – see the `jose` pin below.
+**OTP 26 and older are NOT supported**: cowboy 2.19+ and ranch 2.3 call
+`proc_lib:set_label/1`, which arrived in OTP 27, so on OTP 26 no HTTP listener
+starts.
 
 ## Installing Elixir
 
@@ -43,8 +45,8 @@ If you can't use asdf, install from the GitHub prebuilt ZIPs (pick the ZIP
 that matches your installed OTP version):
 
 ```bash
-# Example: Elixir 1.17.3 for OTP 26
-curl -sL https://github.com/elixir-lang/elixir/releases/download/v1.17.3/elixir-otp-26.zip \
+# Example: Elixir 1.17.3 for OTP 27
+curl -sL https://github.com/elixir-lang/elixir/releases/download/v1.17.3/elixir-otp-27.zip \
      -o /tmp/elixir.zip
 mkdir -p /opt/elixir-1.17.3
 unzip -q /tmp/elixir.zip -d /opt/elixir-1.17.3
@@ -55,7 +57,7 @@ export ELIXIR_ERL_OPTIONS="+fnu"
 ```
 
 Available ZIP names follow the pattern `elixir-otp-{OTP_MAJOR}.zip`, e.g.
-`elixir-otp-26.zip` for OTP 26.
+`elixir-otp-27.zip` for OTP 27.
 
 ## Hex & rebar: Erlang httpc / TLS-inspection proxy workaround
 
@@ -110,14 +112,14 @@ HEX_UNSAFE_REGISTRY=1 mix deps.get
 
 ## Key dependency notes
 
-### `jose` must be pinned to `== 1.11.10`
+### Outgoing TLS trusts the system's certificate store
 
-`jose 1.11.11+` uses Erlang's `dynamic()` type (OTP 27 only). The project's
-CI matrix includes OTP 26, so we pin:
-
-```elixir
-{:jose, "== 1.11.10", override: true}
-```
+Every outgoing request goes through hackney (Tesla's hackney adapter, and
+`oauth2`'s) and passes `ssl_options: BorsNG.TLS.hackney_ssl_options()`. Without
+it, hackney trusts the roots of `certifi`, compiled into hackney, and a root
+distrusted after a CA compromise stays trusted until `certifi` releases a fix
+and `mix.lock` takes it, which hackney's `~> 2.15.0` requirement prevents
+without an override. A new HTTP client or adapter needs the same options.
 
 ## Known compiler warnings
 
@@ -133,17 +135,6 @@ The project uses the legacy `phoenix_view` package and `.eex` templates rather
 than the Phoenix 1.7 `Phoenix.Component` / HEEx pattern. Fixing this requires
 migrating all controllers, views, and templates — a non-trivial task tracked
 separately.
-
-### `use Tesla.Builder` soft-deprecation
-
-```
-warning: `use Tesla.Builder` and `use Tesla` are soft-deprecated
-```
-
-Comes from the `oauth2` dependency pulling in Tesla's builder macro. Our own
-code (`lib/github/github/server.ex`) does not use `use Tesla` — it calls
-`Tesla.get!` etc. directly. The proper fix is migrating to Tesla's runtime
-configuration API, which affects `github/server.ex` and is tracked separately.
 
 ### Charlist sigil in `toml` dep
 
@@ -203,8 +194,8 @@ The CI workflow is `.github/workflows/main.yml`. Key jobs:
 
 | Job | Elixir | OTP | Notes |
 |-----|--------|-----|-------|
-| test (matrix) | 1.16.3, 1.17.3 | 26.2.5, 27.3.4.13 | PostgreSQL + MySQL |
-| exfmt | 1.16.3 | 26.2.5 | `mix format --check-formatted` |
+| test (matrix) | 1.17.3 | 27.3.4.13 | PostgreSQL + MySQL |
+| exfmt | 1.17.3 | 27.3.4.13 | `mix format --check-formatted` |
 | lint-test | — | — | Helm chart linting only |
 
 The `ci-success` aggregator job is what bors itself waits for.

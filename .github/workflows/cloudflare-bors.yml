@@ -53,7 +53,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build the production release image
-        run: docker build --tag tauceti-bors:test .
+        run: docker buildx build --no-cache-filter runtime --load --tag tauceti-bors:test .
+      - name: Check outgoing TLS from the release image
+        run: |
+          docker run --rm --entrypoint /app/bin/bors tauceti-bors:test eval '
+            {:ok, _} = Application.ensure_all_started(:hackney)
+            options = [ssl_options: BorsNG.TLS.hackney_ssl_options(),
+                       connect_timeout: 15_000, recv_timeout: 15_000]
+
+            for url <- ["https://api.github.com/", "https://github.com/login/oauth/authorize",
+                        "https://leanprover.zulipchat.com/"] do
+              case :hackney.get(url, [], <<>>, options) do
+                {:ok, status, _, ref} ->
+                  :hackney.close(ref)
+                  IO.puts("TLS accepted: #{url} (HTTP #{status})")
+                result -> raise "TLS failed for #{url}: #{inspect(result)}"
+              end
+            end
+
+            for url <- ["https://dv-g3b-emudhra.we-have-a-problem.com/",
+                        "https://dv-g3b-aaa-emudhra.we-have-a-problem.com/"] do
+              case :hackney.get(url, [], <<>>, options) do
+                {:error, {:tls_alert, {reason, _}}} when reason in [:unknown_ca, :bad_certificate] ->
+                  IO.puts("TLS rejected compromised chain: #{url}")
+                result -> raise "Expected a certificate rejection for #{url}: #{inspect(result)}"
+              end
+            end
+          '
 
   worker:
     runs-on: ubuntu-latest
