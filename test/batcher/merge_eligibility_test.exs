@@ -748,6 +748,113 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
     update_repo(:statuses, %{@head => %{"build" => :ok, "bump-guard" => :ok, "scope" => :error}})
   end
 
+  test "repeated human approval preserves pending CI and merge intent", %{project: p} do
+    scope_ci()
+    first = manual_review(p)
+    statuses = %{@head => %{"build" => :running, "bump-guard" => :ok, "scope" => :running}}
+    update_repo(:statuses, statuses)
+
+    repeated = manual_review(p)
+    state = GitHub.ServerMock.get_state()[@conn]
+    assert repeated.manual_approval == first.manual_approval
+    assert repeated.queue_pending
+    assert repeated.queue_approval["state"] == "approved"
+    assert state.pr_build_dispatches == [1]
+    assert state.statuses == statuses
+    refute Repo.exists?(Batch.all_for_project(p.id, :incomplete))
+    assert Enum.any?(state.comments[1], &String.contains?(&1, "Keeping existing CI"))
+  end
+
+  test "repeated human approval preserves green scope and an existing admission", %{project: p} do
+    first = manual_review(p)
+    batch = Repo.one!(Batch.all_for_project(p.id, :incomplete))
+    link = Repo.one!(LinkPatchBatch.from_batch(batch.id))
+    admission = BorsNG.Worker.CandidateJournal.admission(link.id)
+    statuses = %{@head => %{"build" => :ok, "bump-guard" => :ok, "scope" => :ok}}
+    update_repo(:statuses, statuses)
+
+    repeated = manual_review(p)
+    assert repeated.manual_approval == first.manual_approval
+    assert Repo.one!(Batch.all_for_project(p.id, :incomplete)).id == batch.id
+    assert BorsNG.Worker.CandidateJournal.admission(link.id) == admission
+    assert GitHub.ServerMock.get_state()[@conn].pr_build_dispatches == [1]
+    assert GitHub.ServerMock.get_state()[@conn].statuses == statuses
+  end
+
+  test "a changed merge base requests fresh CI even with the same head and actor", %{project: p} do
+    scope_ci()
+    first = manual_review(p)
+    base = String.duplicate("c", 40)
+    update_repo(:merge_bases, %{{1, @head} => {:ok, base}})
+    update_repo(:statuses, %{@head => %{"scope" => :ok}})
+
+    changed = manual_review(p)
+    refute changed.manual_approval == first.manual_approval
+    assert changed.manual_approval["merge_base_sha"] == base
+    assert GitHub.ServerMock.get_state()[@conn].pr_build_dispatches == [1, 1]
+    assert GitHub.ServerMock.get_state()[@conn].statuses[@head]["scope"] == :running
+  end
+
+  test "a new approving actor requests fresh CI", %{project: p} do
+    scope_ci()
+    first = manual_review(p)
+    update_repo(:admin_permissions, %{1002 => {:ok, true}})
+
+    Batcher.do_handle_cast(
+      {:maintainer_reviewed, first.id, @head, 1002, "new-admin", DateTime.utc_now()},
+      p.id
+    )
+
+    assert Repo.get!(Patch, first.id).manual_approval["actor_id"] == 1002
+    assert GitHub.ServerMock.get_state()[@conn].pr_build_dispatches == [1, 1]
+  end
+
+  test "approval of a new head requests fresh CI", %{project: p} do
+    scope_ci()
+    first = manual_review(p)
+    head = String.duplicate("c", 40)
+    pr = GitHub.ServerMock.get_state()[@conn].pulls[1]
+    update_repo(:pulls, %{1 => %{pr | head_sha: head}})
+    update_repo(:merge_bases, %{{1, head} => {:ok, @base}})
+    patch = Syncer.sync_patch(p.id, %{pr | head_sha: head})
+
+    Batcher.do_handle_cast(
+      {:maintainer_reviewed, patch.id, head, 1001, "maintainer", DateTime.utc_now()},
+      p.id
+    )
+
+    approval = Repo.get!(Patch, patch.id).manual_approval
+    refute approval == first.manual_approval
+    assert approval["head_sha"] == head
+    assert GitHub.ServerMock.get_state()[@conn].pr_build_dispatches == [1, 1]
+  end
+
+  test "approval after explicit revocation requests fresh CI", %{project: p} do
+    scope_ci()
+    first = manual_review(p)
+    Batcher.do_handle_cast({:cancel, first.id, :requested}, p.id)
+    assert is_nil(Repo.get!(Patch, first.id).manual_approval)
+
+    renewed = manual_review(p)
+    assert renewed.manual_approval == first.manual_approval
+    assert GitHub.ServerMock.get_state()[@conn].pr_build_dispatches == [1, 1]
+  end
+
+  test "a repeated command still rechecks live admin authority", %{project: p} do
+    scope_ci()
+    manual_review(p)
+    update_repo(:admin_permissions, %{1001 => {:ok, false}})
+    manual_review(p)
+    assert GitHub.ServerMock.get_state()[@conn].pr_build_dispatches == [1]
+
+    assert Enum.any?(
+             GitHub.ServerMock.get_state()[@conn].comments[1],
+             &String.contains?(&1, "could not be verified")
+           )
+
+    refute Repo.exists?(Batch.all_for_project(p.id, :incomplete))
+  end
+
   test "scope authority follows the actual GitHub user ID, not a claimed reviewer name", %{
     project: p
   } do

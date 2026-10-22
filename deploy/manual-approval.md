@@ -5,6 +5,12 @@ or `bors merge` command. Bors checks the actual authenticated command author's
 current GitHub repository admin role, records their user ID and the live head and
 merge base when accepting the command, and requests a rerun of TauCeti's trusted
 `pr-build` workflow. Bors confirms the accepted head and merge base in a comment.
+Repeating approval by the same admin for the same head and merge base preserves
+existing CI and scope status while still requesting merge admission. Bors still
+checks the admin's live permissions and the current PR revision. A new, changed,
+or previously revoked approval requests fresh CI. To retry CI explicitly (also
+after a failed dispatch), rerun the trusted `pr-build` workflow for the PR rather
+than repeating the approval command.
 Plain comments follow bors's live-head semantics,
 with an additional check that the comment does not predate a head or target change
 observed by bors. Review and inline review commands also pin the reviewed commit ID.
@@ -18,8 +24,9 @@ only the restricted-path rule. Build, axiom/lint audits, Lake configuration
 attestation, pin validation, size guards and incomplete-read failures retain their
 existing behavior. In particular, a Lakefile edit still fails configuration
 attestation; this mechanism does not authorize executing proposed build tooling.
-Bors posts pending `scope` when granting or revoking approval, and waits for an
-actual green verdict from trusted CI rather than skipping the check. New red scope
+Bors posts pending `scope` when granting a new or changed approval or revoking
+approval, and waits for an actual green verdict from trusted CI rather than
+skipping the check. New red scope
 verdicts reject admission normally. TauCeti main uses the trusted base's
 `bors.toml` requirements, so candidate changes cannot remove its required checks.
 

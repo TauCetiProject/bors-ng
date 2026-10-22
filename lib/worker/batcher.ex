@@ -348,18 +348,24 @@ defmodule BorsNG.Worker.Batcher do
     if patch.project_id == project_id do
       case BorsNG.Worker.ManualApproval.grant(conn, project, patch, actor_id, head, created_at) do
         {:ok, approved} ->
+          unchanged? = patch.manual_approval == approved.manual_approval
+
           send_message(
             conn,
             [approved],
-            {:manual_approved, head, approved.manual_approval["merge_base_sha"]}
+            {if(unchanged?, do: :manual_approval_unchanged, else: :manual_approved), head,
+             approved.manual_approval["merge_base_sha"]}
           )
 
-          # This is a request to reconsider policy, never a green scope status.
-          # The trusted workflow reads the approval back from bors and still runs all guards.
-          GitHub.reset_scope(conn, head)
+          # Repeating the same validated approval must not cancel healthy CI.
+          unless unchanged? do
+            # This requests policy reconsideration, never a green scope status.
+            # Trusted CI reads the approval back and still runs all guards.
+            GitHub.reset_scope(conn, head)
 
-          if GitHub.dispatch_pr_build(conn, approved.pr_xref) != :ok,
-            do: send_message(conn, [approved], {:preflight, :manual_build_dispatch})
+            if GitHub.dispatch_pr_build(conn, approved.pr_xref) != :ok,
+              do: send_message(conn, [approved], {:preflight, :manual_build_dispatch})
+          end
 
           do_handle_cast({:reviewed, patch_id, reviewer}, project_id)
 
