@@ -79,6 +79,10 @@ defmodule BorsNG.Worker.Batcher.Message do
     "Human approval recorded for head `#{head}` against merge base `#{base}`. Requesting trusted CI; restricted paths are approved, and all other checks remain required."
   end
 
+  def generate_message({:manual_approval_unchanged, head, base}) do
+    "Human approval is unchanged for head `#{head}` against merge base `#{base}`. Keeping existing CI; all merge checks remain required. To retry CI explicitly, rerun the trusted PR build workflow."
+  end
+
   def generate_message({:preflight, :manual_approval_unavailable}) do
     "Could not verify human scope approval. Ordinary merge checks still apply; run `bors r+` or `bors merge` again to retry approval."
   end
@@ -88,7 +92,7 @@ defmodule BorsNG.Worker.Batcher.Message do
   end
 
   def generate_message({:preflight, :manual_build_dispatch}) do
-    "Human approval was recorded, but bors could not request trusted CI. Run `bors r+` or `bors merge` again to retry."
+    "Human approval was recorded, but bors could not request trusted CI. Rerun the trusted PR build workflow to retry CI."
   end
 
   def generate_message({:preflight, :pr_status}) do
