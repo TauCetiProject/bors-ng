@@ -633,8 +633,12 @@ defmodule BorsNG.GitHub.Server do
     _ -> {:error, :scope_reset_failed}
   end
 
-  def do_handle_call(:dispatch_pr_build, conn, {pr}) do
-    body = Jason.encode!(%{event_type: "tauceti-bors-pr-approved", client_payload: %{pr: pr}})
+  def do_handle_call(:dispatch_pr_build, conn, {pr, head}) do
+    body =
+      Jason.encode!(%{
+        event_type: "tauceti-bors-pr-approved",
+        client_payload: %{pr: pr, head_sha: head}
+      })
 
     case post!(conn, "dispatches", body) do
       %{status: 204} -> :ok

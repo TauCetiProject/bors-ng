@@ -256,7 +256,7 @@ defmodule BorsNG.GitHub.ServerMock do
     {:ok, Map.put(state, conn, Map.put(repo, :statuses, statuses))}
   end
 
-  def do_handle_call(:dispatch_pr_build, conn, {pr}, state) do
+  def do_handle_call(:dispatch_pr_build, conn, {pr, head}, state) do
     repo = Map.fetch!(state, conn)
 
     case Map.get(repo, :pr_build_dispatch_error) do
@@ -265,7 +265,9 @@ defmodule BorsNG.GitHub.ServerMock do
          Map.put(
            state,
            conn,
-           Map.put(repo, :pr_build_dispatches, [pr | Map.get(repo, :pr_build_dispatches, [])])
+           Map.put(repo, :pr_build_dispatches, [
+             {pr, head} | Map.get(repo, :pr_build_dispatches, [])
+           ])
          )}
 
       error ->

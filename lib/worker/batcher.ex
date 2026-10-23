@@ -363,7 +363,7 @@ defmodule BorsNG.Worker.Batcher do
             # Trusted CI reads the approval back and still runs all guards.
             GitHub.reset_scope(conn, head)
 
-            if GitHub.dispatch_pr_build(conn, approved.pr_xref) != :ok,
+            if GitHub.dispatch_pr_build(conn, approved.pr_xref, head) != :ok,
               do: send_message(conn, [approved], {:preflight, :manual_build_dispatch})
           end
 
