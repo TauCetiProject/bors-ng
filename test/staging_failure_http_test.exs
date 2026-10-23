@@ -71,40 +71,6 @@ defmodule BorsNG.StagingFailureHttpTest do
     )
   end
 
-  test "recovered finalization reads only the exact run attempt jobs" do
-    jobs = [
-      %{"name" => "sandboxed-build", "status" => "completed", "conclusion" => "success"},
-      %{
-        "name" => "publish-merge-group-cache / publish",
-        "status" => "completed",
-        "conclusion" => "success",
-        "steps" => [
-          %{
-            "name" => "Confirm the exact revision map on the public endpoint",
-            "status" => "completed",
-            "conclusion" => "success"
-          }
-        ]
-      },
-      %{
-        "name" => "finalize-merge-group-build",
-        "status" => "completed",
-        "conclusion" => "failure"
-      }
-    ]
-
-    fetch = fn ->
-      Server.do_handle_call(:recovered_staging_finalization, {{:raw, "test-token"}, 14}, {123, 2})
-    end
-
-    assert {:ok, true} = responses([{200, %{"jobs" => jobs, "total_count" => 3}}], fetch)
-    assert_receive {:staging_request, request}
-    assert request =~ "/repositories/14/actions/runs/123/attempts/2/jobs?per_page=100"
-    refute_receive {:staging_request, _}, 10
-    assert {:error, :staging_finalization_jobs, 503} = responses([{503, %{}}], fetch)
-    assert_receive {:staging_request, _}
-  end
-
   test "classification needs at most one status page and one run lookup" do
     assert {:ok, {:infrastructure, %{conclusion: "cancelled"}}} =
              responses([{200, build()}, {200, run()}], &classify/0)

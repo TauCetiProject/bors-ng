@@ -267,10 +267,6 @@ defmodule BorsNG.GitHub do
     safe_genserver_call(:staging_run, conn, {head, base, batch, branch, since}, 15_000)
   end
 
-  def recovered_staging_finalization(conn, run_id, attempt) do
-    safe_genserver_call(:recovered_staging_finalization, conn, {run_id, attempt}, 15_000)
-  end
-
   @doc "Request existing trusted PR CI after a maintainer approves its scope."
   def dispatch_pr_build(repo_conn, pr) do
     call_with_retry(:dispatch_pr_build, repo_conn, {pr})

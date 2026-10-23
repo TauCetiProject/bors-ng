@@ -209,48 +209,4 @@ defmodule BorsNG.Worker.StagingFailure do
   end
 
   def classify_jobs(_, _), do: :unavailable
-
-  # Called only after this generation's required commit statuses are green.
-  # A resumed status does not change the original workflow's failed conclusion.
-  def recovered_finalization?(%{"jobs" => jobs, "total_count" => total})
-      when is_list(jobs) and is_integer(total) and total <= 100 do
-    finalizer = "finalize-merge-group-build"
-
-    complete =
-      total == length(jobs) and
-        Enum.all?(jobs, fn job ->
-          is_map(job) and job["status"] == "completed" and
-            (job["conclusion"] in ["success", "skipped"] or
-               (job["name"] == finalizer and job["conclusion"] == "failure"))
-        end)
-
-    if complete do
-      case {
-        Enum.filter(jobs, &(&1["name"] == "sandboxed-build")),
-        Enum.filter(jobs, &(&1["name"] == "publish-merge-group-cache / publish")),
-        Enum.filter(jobs, &(&1["name"] == finalizer))
-      } do
-        {[%{"conclusion" => "success"}], [%{"conclusion" => "success", "steps" => steps}],
-         [%{"conclusion" => "failure"}]}
-        when is_list(steps) ->
-          Enum.any?(steps, fn step ->
-            match?(
-              %{
-                "name" => "Confirm the exact revision map on the public endpoint",
-                "status" => "completed",
-                "conclusion" => "success"
-              },
-              step
-            )
-          end)
-
-        _ ->
-          false
-      end
-    else
-      false
-    end
-  end
-
-  def recovered_finalization?(_), do: false
 end

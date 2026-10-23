@@ -493,22 +493,6 @@ defmodule BorsNG.GitHub.Server do
     end
   end
 
-  def do_handle_call(:recovered_staging_finalization, conn, {run_id, attempt})
-      when is_integer(run_id) and run_id > 0 and is_integer(attempt) and attempt > 0 do
-    path = "actions/runs/#{run_id}/attempts/#{attempt}/jobs?per_page=100"
-
-    case get!(conn, path) do
-      %{status: 200, body: raw} ->
-        case Jason.decode(raw) do
-          {:ok, jobs} -> {:ok, BorsNG.Worker.StagingFailure.recovered_finalization?(jobs)}
-          _ -> {:error, :staging_finalization_jobs}
-        end
-
-      %{status: status} ->
-        {:error, :staging_finalization_jobs, status}
-    end
-  end
-
   def do_handle_call(:merge_backend_snapshot, {{:raw, token}, _} = conn, {}) do
     {:ok, setting} = backend_selection(conn)
     backend = setting.backend

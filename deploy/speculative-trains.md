@@ -32,9 +32,11 @@ base, candidate and generation), derives the immutable ref, and verifies its
 GitHub object and base ancestry. Payload fields cannot select a ref or authority.
 The existing workflow concurrency key isolates repository/batch/head/base/branch.
 
-A green commit status alone cannot promote a train candidate. Its exact named
-repository_dispatch workflow must be completed/successful. Duplicate matches,
-truncated pages, unavailable evidence and unknown dispatch acceptance hold work.
+The required exact-commit statuses authorize normal promotion checks. The trusted
+CI finalizer reports green only after audits, exact public-cache confirmation
+when configured, and current-generation validation. A status-only recovery can
+deliver that verdict even though the original workflow remains failed; workflow
+housekeeping is not an additional promotion gate.
 After dispatch intent has been recorded, a train never resends an ambiguous
 request merely because Actions has not exposed the run yet. An operator must
 reconcile a persistently unconfirmed dispatch; do not delete its reservation or
@@ -55,8 +57,8 @@ never annexed. Immutable history survives. Stale approval/cancel commands carry
 the captured head and approval token, allocated atomically at durable command
 receipt. Reapproval/withdrawal supersedes older intent even when cancellation
 priority reorders execution; ordinary worker writes cannot overwrite that token.
-Commit-only observations cannot authorize promotion without the exact generation's
-successful workflow. Old canceled generations cannot promote successors.
+Green statuses do not bypass these checks. Old canceled generations cannot
+promote successors.
 
 ## Hard limits and cost
 

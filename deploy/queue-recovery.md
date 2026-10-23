@@ -47,13 +47,13 @@ Transient database or status-read failures retain a prompt retry instead of
 losing the wake-up or breaking worker startup. Infrastructure retries report
 their members as waiting in queue; repeated-problem alerts remain separate.
 
-For a tracked candidate, green commit statuses can arrive before its exact
-workflow's finalizer and cache publisher have finished. A queued or running
-workflow therefore retains the candidate and schedules a durable recheck after
-120 seconds, rather than relying on the 30-minute regular batch poll. The retry
-uses the existing batch/head-bound promotion handler: it revalidates the exact
-workflow, live members, withdrawal intent and current base before any push.
-This does not dispatch another build or treat green statuses as a landing.
+For a tracked candidate, the required green statuses are the CI verdict. The
+trusted finalizer waits for exact cache confirmation before reporting success,
+and status-only recovery may deliver that result after the original workflow
+has failed. Bors therefore does not require a second workflow-success verdict.
+Normal promotion still revalidates live members, withdrawal intent, predecessor
+order and the current base, and uses the existing push lease. Green statuses are
+not evidence that the push itself landed.
 
 A confirmed cancelled build retains approval and creates a native retry child
 with the same exact-head membership through the existing transactional divider.

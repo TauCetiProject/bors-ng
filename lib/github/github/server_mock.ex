@@ -827,11 +827,6 @@ defmodule BorsNG.GitHub.ServerMock do
     {{:ok, get_in(state, [conn, :staging_runs, {head, batch}])}, state}
   end
 
-  def do_handle_call(:recovered_staging_finalization, conn, {run_id, attempt}, state) do
-    jobs = get_in(state, [conn, :staging_jobs, {run_id, attempt}])
-    {{:ok, BorsNG.Worker.StagingFailure.recovered_finalization?(jobs)}, state}
-  end
-
   def do_handle_call(
         :staging_dispatch_seen,
         repo_conn,
