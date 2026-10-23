@@ -381,7 +381,7 @@ defmodule BorsNG.Worker.SourceCompatibility do
           reason =
             case failure do
               %{"details" => %{"kind" => kind}}
-              when kind in ~w(timeout lock_timeout git_failed mirror_limit output_limit helper_failed helper_or_auth_failed helper_unavailable missing_commit cold_mirror_unavailable) ->
+              when kind in ~w(timeout lock_timeout git_failed mirror_limit output_limit helper_failed git_auth_unavailable helper_exit invalid_helper_json helper_unavailable missing_commit cold_mirror_unavailable) ->
                 "source_helper_" <> kind
 
               _ ->

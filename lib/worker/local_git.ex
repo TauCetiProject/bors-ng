@@ -1,4 +1,5 @@
 defmodule BorsNG.Worker.LocalGit do
+  require Logger
   @moduledoc "Bounded, disposable bare mirrors behind the immutable candidate contract."
   @behaviour BorsNG.Worker.CandidateAssembler
   alias BorsNG.Worker.CandidateAssembler
@@ -89,8 +90,16 @@ defmodule BorsNG.Worker.LocalGit do
            expected: batch.base_sha,
            ref: "refs/heads/main"
          }) do
-      %{"status" => "ok"} -> {:ok, batch.commit}
-      _ -> {:error, :push, 503, "Exact-base Git promotion unavailable"}
+      %{"status" => "ok"} ->
+        {:ok, batch.commit}
+
+      %{"details" => details} ->
+        diagnostic = "Exact-base Git promotion unavailable: " <> Jason.encode!(details)
+        Logger.warning("bors Git promotion failed batch=#{batch.id}: #{diagnostic}")
+        {:error, :push, 503, diagnostic}
+
+      _ ->
+        {:error, :push, 503, "Exact-base Git promotion unavailable"}
     end
   end
 
@@ -174,19 +183,45 @@ defmodule BorsNG.Worker.LocalGit do
            do: {:ok, ""},
            else: GitHub.git_token(context.conn)
 
-      with {:ok, token} <- token_result,
-           {output, 0} <-
-             System.cmd("python3", [Application.app_dir(:bors, "priv/local_git.py"), input],
+      with {:ok, token} <- token_result do
+        case System.cmd("python3", [Application.app_dir(:bors, "priv/local_git.py"), input],
                env: [{"BORS_GIT_TOKEN", token}],
                stderr_to_stdout: false
-             ),
-           {:ok, result} <- Jason.decode(output) do
-        result
+             ) do
+          {output, 0} ->
+            case Jason.decode(output) do
+              {:ok, result} -> result
+              _ -> %{"status" => "error", "details" => %{"kind" => "invalid_helper_json"}}
+            end
+
+          {_, status} ->
+            %{
+              "status" => "error",
+              "details" => %{"kind" => "helper_exit", "exit_status" => status}
+            }
+        end
       else
-        _ -> %{"status" => "error", "details" => %{"kind" => "helper_or_auth_failed"}}
+        {:error, reason, _action} when is_atom(reason) ->
+          %{
+            "status" => "error",
+            "details" => %{"kind" => "git_auth_unavailable", "reason" => Atom.to_string(reason)}
+          }
+
+        {:error, reason, _action, _private_details} when is_atom(reason) ->
+          %{
+            "status" => "error",
+            "details" => %{"kind" => "git_auth_unavailable", "reason" => Atom.to_string(reason)}
+          }
+
+        _ ->
+          %{"status" => "error", "details" => %{"kind" => "git_auth_unavailable"}}
       end
     rescue
-      _ -> %{"status" => "error", "details" => %{"kind" => "helper_unavailable"}}
+      error ->
+        %{
+          "status" => "error",
+          "details" => %{"kind" => "helper_unavailable", "exception" => inspect(error.__struct__)}
+        }
     after
       File.rm(input)
     end

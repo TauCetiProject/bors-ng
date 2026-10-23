@@ -1,7 +1,7 @@
 defmodule BorsNG.Worker.LocalGitTest do
   use ExUnit.Case, async: false
   alias BorsNG.Worker.LocalGit
-  alias BorsNG.Database.{Candidate, Project}
+  alias BorsNG.Database.{Batch, Candidate, Project}
   alias BorsNG.GitHub.ServerMock
 
   test "real Git assembly, conflicts, immutable inputs, restart, concurrency and leased push" do
@@ -15,6 +15,45 @@ defmodule BorsNG.Worker.LocalGitTest do
       System.cmd("python3", ["test/failure_diagnostics_test.py"], stderr_to_stdout: true)
 
     assert status == 0, output
+  end
+
+  test "promotion surfaces sanitized Git diagnostics rather than a generic 503" do
+    root = Path.join(System.tmp_dir!(), "bors-promotion-#{System.unique_integer([:positive])}")
+    bin = Path.join(root, "bin")
+    File.mkdir_p!(bin)
+
+    File.write!(
+      Path.join(bin, "git"),
+      "#!/bin/sh\necho 'fatal: diagnostic failure' >&2\necho 'Authorization: test-token' >&2\nexit 128\n"
+    )
+
+    File.chmod!(Path.join(bin, "git"), 0o755)
+    old_path = System.get_env("PATH")
+    old_root = System.get_env("BORS_GIT_MIRROR_ROOT")
+    System.put_env("PATH", bin <> ":" <> old_path)
+    System.put_env("BORS_GIT_MIRROR_ROOT", Path.join(root, "mirrors"))
+
+    on_exit(fn ->
+      System.put_env("PATH", old_path)
+
+      if old_root,
+        do: System.put_env("BORS_GIT_MIRROR_ROOT", old_root),
+        else: System.delete_env("BORS_GIT_MIRROR_ROOT")
+
+      File.rm_rf!(root)
+    end)
+
+    batch = %Batch{
+      project: %Project{name: "test/repo"},
+      base_sha: String.duplicate("a", 40),
+      commit: String.duplicate("b", 40)
+    }
+
+    assert {:error, :push, 503, diagnostic} = LocalGit.promote(batch, {{:installation, 91}, 14})
+    assert diagnostic =~ "git_failed"
+    assert diagnostic =~ "diagnostic failure"
+    assert diagnostic =~ "128"
+    refute diagnostic =~ "test-token"
   end
 
   test "collision identity never requests GitHub credentials or bootstraps a cold mirror" do

@@ -28,7 +28,10 @@ configuration, external credentials, replacement objects, file transport,
 submodules and automatic background maintenance are disabled. Only the existing
 bors installation credential enters the Git subprocess environment. No token is
 written to disk, a remote URL, command arguments, logs, or candidate metadata.
-Errors report operation/status rather than potentially sensitive Git diagnostics.
+Errors retain operation/status and bounded Git stderr/porcelain output, with
+installation credentials, authorization headers and URL credentials redacted.
+Promotion reports those details instead of replacing them with a generic 503;
+helper startup/exit, invalid JSON and credential lookup failures remain distinct.
 
 Mirrors live at `BORS_GIT_MIRROR_ROOT` (default `/tmp/bors-git-mirrors`) and persist
 across assembler/BEAM restarts on that filesystem. They are an expendable source
