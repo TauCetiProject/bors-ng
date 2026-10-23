@@ -1137,8 +1137,9 @@ class LocalGitTest(unittest.TestCase):
         git(self.upstream, 'update-ref', 'refs/heads/main', intermediate)
         push = self.request | dict(operation='promote', ref='refs/heads/main',
                                    commit=result, expected=self.base)
-        with self.assertRaises(local.Failure):
+        with self.assertRaises(local.Failure) as failure:
             TestMirror(push, self.upstream).run()
+        self.assertIn('stale info', failure.exception.details['stdout'])
         self.assertEqual(git(self.upstream, 'rev-parse', 'main'), intermediate)
 
     def test_publication_ref_and_input_validation(self):
@@ -1160,6 +1161,42 @@ class LocalGitTest(unittest.TestCase):
             mirror.git('fetch', mirror.url, self.base)
         self.assertEqual(failure.exception.details['exit_status'], 128)
         self.assertNotIn('secret', json.dumps(failure.exception.details))
+        self.assertIn('Authorization: [REDACTED]', failure.exception.details['stderr'])
+
+    def test_git_diagnostic_retains_failure_and_redacts_transport_credentials(self):
+        from unittest.mock import patch
+        token = 'installation-secret'
+        encoded = local.base64.b64encode(('x-access-token:' + token).encode()).decode()
+        message = (f'remote: GH013: Repository rule violations found\n'
+                   f'Authorization: Basic {encoded}\n'
+                   f'fatal: unable to access https://user:{token}@github.com/test/repo.git\n'
+                   f'{token} ghp_othersecret github_pat_othersecret\n')
+        with patch.dict(os.environ, BORS_GIT_TOKEN=token):
+            result = local.git_diagnostic(message.encode())
+        self.assertIn('GH013: Repository rule violations found', result)
+        self.assertIn('https://[REDACTED]@github.com/test/repo.git', result)
+        for secret in [token, encoded, 'ghp_othersecret', 'github_pat_othersecret']:
+            self.assertNotIn(secret, result)
+        self.assertEqual(len(local.git_diagnostic(b'x' * 10000)), 4096)
+
+    def test_failed_promotion_preserves_push_rejection_and_leaves_main_unchanged(self):
+        one = self.commit(self.base, {'a': 'a'})
+        self.request['members'] = [self.member(1, one)]
+        candidate = self.run_mirror()['result']['commit']
+        TestMirror(self.request | dict(operation='publish', ref='refs/heads/staging',
+                   commit=candidate, expected='0' * 40), self.upstream).run()
+        git(self.upstream, 'update-ref', 'refs/heads/main', self.base)
+        hook = self.upstream / '.git/hooks/pre-receive'
+        hook.write_text('#!/bin/sh\necho "GH013: main requires approved workflow changes" >&2\nexit 1\n')
+        hook.chmod(0o755)
+        promote = self.request | dict(operation='promote', ref='refs/heads/main',
+                                     commit=candidate, expected=self.base)
+        with self.assertRaises(local.Failure) as failure:
+            TestMirror(promote, self.upstream).run()
+        details = failure.exception.details
+        self.assertEqual(details['phase'], 'promote')
+        self.assertIn('GH013: main requires approved workflow changes', details['stderr'])
+        self.assertEqual(git(self.upstream, 'rev-parse', 'main'), self.base)
 
 
 if __name__ == '__main__':

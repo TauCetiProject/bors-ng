@@ -32,6 +32,19 @@ PROVIDER_LIMITS = dict(max_depth=5, max_headers=64, max_file_bytes=256 * 1024,
                        max_evidence_bytes=64 * 1024, total_timeout_ms=5000)
 
 
+def git_diagnostic(data):
+    """Keep the actual Git failure, without publishing transport credentials."""
+    text = data.decode('utf-8', errors='replace')
+    token = os.environ.get('BORS_GIT_TOKEN', '')
+    if token:
+        for secret in [base64.b64encode(('x-access-token:' + token).encode()).decode(), token]:
+            text = text.replace(secret, '[REDACTED]')
+    text = re.sub(r'(?im)(authorization\s*[:=]\s*)[^\r\n]*', r'\1[REDACTED]', text)
+    text = re.sub(r'(https?://)[^/\s@]+@', r'\1[REDACTED]@', text)
+    text = re.sub(r'\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)', '[REDACTED]', text)
+    return re.sub(r'[\x00-\x08\x0b-\x1f\x7f]', '', text).strip()[:4096]
+
+
 class Failure(Exception):
     def __init__(self, kind, **details):
         self.details = dict(kind=kind, **details)
@@ -111,8 +124,10 @@ class Mirror:
             if len(result) > output_limit:
                 raise Failure('output_limit', operation=args[0])
             if check and proc.returncode:
-                # Never emit stderr: Git/HTTP diagnostics may contain credentials.
-                raise Failure('git_failed', operation=args[0], exit_status=proc.returncode)
+                err.seek(0)
+                raise Failure('git_failed', operation=args[0], exit_status=proc.returncode,
+                              stderr=git_diagnostic(err.read(output_limit)),
+                              **({'stdout': git_diagnostic(result)} if 'push' in args else {}))
             return (result if binary else result.decode('utf-8', errors='replace')), proc.returncode
 
     def enforce_budget(self):
@@ -1108,8 +1123,9 @@ def main():
             result = mirror.provider_error_result(error)
         else:
             result = dict(status='error', details=error.details)
-    except Exception:
-        result = dict(status='error', details=dict(kind='helper_failed'))
+    except Exception as error:
+        result = dict(status='error', details=dict(kind='helper_failed',
+                      exception=type(error).__name__, message=git_diagnostic(str(error).encode())))
     if (isinstance(locals().get('request'), dict)
             and request.get('operation') == 'bounded_import_providers'
             and result.get('status') == 'error'):
