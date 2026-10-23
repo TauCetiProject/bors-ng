@@ -18,7 +18,7 @@ jobs:
       matrix:
         elixir: ["1.17.3"]
         otp_release: ["27.3.4.13"]
-        os: [ubuntu-latest]
+        os: [ubuntu-24.04]
         database: [postgresql, mysql]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -92,7 +92,7 @@ jobs:
 
   assets:
     name: assets
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: erlef/setup-beam@fc68ffb90438ef2936bbb3251622353b3dcb2f93 # v1.24.0
@@ -112,7 +112,7 @@ jobs:
 
   exfmt:
     name: exfmt
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
     - uses: erlef/setup-beam@fc68ffb90438ef2936bbb3251622353b3dcb2f93 # v1.24.0
@@ -128,13 +128,13 @@ jobs:
       - assets
       - exfmt
       - test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - run: jq --exit-status 'all(.result == "success")' <<< '${{ toJson(needs) }}'
       - name: Done
         run: exit 0
   lint-test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2

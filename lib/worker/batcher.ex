@@ -3570,6 +3570,21 @@ defmodule BorsNG.Worker.Batcher do
         {:ok, %{"status" => "completed", "conclusion" => "success"}} ->
           complete_verified_batch(batch, statuses, conn)
 
+        {:ok,
+         %{
+           "status" => "completed",
+           "conclusion" => "failure",
+           "id" => run_id,
+           "run_attempt" => attempt
+         }}
+        when is_integer(run_id) and run_id > 0 and is_integer(attempt) and attempt > 0 ->
+          # Status recovery can complete delivery without changing the original
+          # workflow conclusion. Require this attempt's green build and confirmed
+          # publisher; an old green status cannot excuse a later failed build.
+          if GitHub.recovered_staging_finalization(conn, run_id, attempt) == {:ok, true},
+            do: complete_verified_batch(batch, statuses, conn),
+            else: :running
+
         {:ok, %{"status" => status}}
         when status in ["queued", "in_progress", "waiting", "pending", "requested"] ->
           # Build statuses can turn green before the finalizer/publisher finishes.

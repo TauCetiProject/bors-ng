@@ -471,6 +471,68 @@ defmodule BorsNG.Worker.SpeculativeTrainTest do
     Process.delete(:orchestration_job)
   end
 
+  test "recovered finalizer promotes through the existing gate only with this attempt's green jobs",
+       %{
+         project: project
+       } do
+    {a, ca, _} = candidate(project, 1)
+    Train.reserve(ca, @conn)
+    run(ca, "completed", "failure")
+    state = GitHub.ServerMock.get_state()
+    state = put_in(state, [@conn, :statuses, a.commit], %{"build" => :ok})
+
+    state =
+      update_in(
+        state,
+        [@conn, :staging_runs, {a.commit, a.id}],
+        &Map.merge(&1, %{"id" => 123, "run_attempt" => 2})
+      )
+
+    GitHub.ServerMock.put_state(state)
+    {:ok, job} = Outbox.claim(Outbox.enqueue(project.id, "info", {:poll, :once}).id)
+    Process.put(:orchestration_job, job)
+
+    # The old green commit status alone cannot excuse a newer failed attempt.
+    Batcher.do_handle_cast({:status, {a.commit, "build", :ok, "url"}}, project.id)
+    refute Train.event?(ca, "promotion_requested")
+
+    jobs = %{
+      "total_count" => 3,
+      "jobs" => [
+        %{"name" => "sandboxed-build", "status" => "completed", "conclusion" => "success"},
+        %{
+          "name" => "publish-merge-group-cache / publish",
+          "status" => "completed",
+          "conclusion" => "success",
+          "steps" => [
+            %{
+              "name" => "Confirm the exact revision map on the public endpoint",
+              "status" => "completed",
+              "conclusion" => "success"
+            }
+          ]
+        },
+        %{
+          "name" => "finalize-merge-group-build",
+          "status" => "completed",
+          "conclusion" => "failure"
+        }
+      ]
+    }
+
+    state = GitHub.ServerMock.get_state()
+    state = update_in(state, [@conn], &Map.put(&1, :staging_jobs, %{{123, 2} => jobs}))
+    GitHub.ServerMock.put_state(state)
+    Batcher.do_handle_cast({:status, {a.commit, "build", :ok, "url"}}, project.id)
+    assert Train.event?(ca, "promotion_requested")
+    # The fixture has no Git publisher; all ordinary promotion checks still run.
+    assert Repo.get!(Batch, a.id).promotion_failures == 1
+    refute Train.event?(ca, "promoted")
+    assert GitHub.ServerMock.get_state()[@conn].branches["main"] == @base
+    Outbox.finish(job)
+    Process.delete(:orchestration_job)
+  end
+
   for workflow_status <- ["queued", "in_progress"] do
     @workflow_status workflow_status
     test "green statuses durably retry a #{@workflow_status} exact workflow", %{project: project} do

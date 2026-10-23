@@ -2,6 +2,85 @@ defmodule BorsNG.StagingFailureTest do
   use ExUnit.Case, async: true
   alias BorsNG.Worker.StagingFailure
 
+  defp recovered_jobs do
+    jobs = [
+      %{"name" => "pick-runner / pick", "status" => "completed", "conclusion" => "success"},
+      %{"name" => "sandboxed-build", "status" => "completed", "conclusion" => "success"},
+      %{
+        "name" => "publish-merge-group-cache / publish",
+        "status" => "completed",
+        "conclusion" => "success",
+        "steps" => [
+          %{
+            "name" => "Confirm the exact revision map on the public endpoint",
+            "status" => "completed",
+            "conclusion" => "success"
+          }
+        ]
+      },
+      %{
+        "name" => "finalize-merge-group-build",
+        "status" => "completed",
+        "conclusion" => "failure"
+      }
+    ]
+
+    %{"jobs" => jobs, "total_count" => length(jobs)}
+  end
+
+  test "recovered delivery permits a failed finalizer only after build and publication passed" do
+    assert StagingFailure.recovered_finalization?(recovered_jobs())
+
+    for name <- ["sandboxed-build", "publish-merge-group-cache / publish"],
+        conclusion <- ["failure", "cancelled", "timed_out", "skipped", nil] do
+      data =
+        update_in(recovered_jobs(), ["jobs"], fn jobs ->
+          Enum.map(jobs, fn job ->
+            if job["name"] == name, do: Map.put(job, "conclusion", conclusion), else: job
+          end)
+        end)
+
+      refute StagingFailure.recovered_finalization?(data)
+    end
+  end
+
+  test "missing confirmation, incomplete coverage and in-progress jobs cannot excuse failure" do
+    data = recovered_jobs()
+    refute StagingFailure.recovered_finalization?(Map.put(data, "total_count", 5))
+    refute StagingFailure.recovered_finalization?(Map.put(data, "total_count", 101))
+    refute StagingFailure.recovered_finalization?(%{})
+    refute StagingFailure.recovered_finalization?(nil)
+
+    for name <- [
+          "sandboxed-build",
+          "publish-merge-group-cache / publish",
+          "finalize-merge-group-build"
+        ] do
+      refute StagingFailure.recovered_finalization?(
+               update_in(data, ["jobs"], fn jobs ->
+                 Enum.map(jobs, fn job ->
+                   if job["name"] == name, do: Map.put(job, "status", "in_progress"), else: job
+                 end)
+               end)
+             )
+    end
+
+    for steps <- [
+          [],
+          [
+            %{
+              "name" => "Confirm the exact revision map on the public endpoint",
+              "status" => "completed",
+              "conclusion" => "skipped"
+            }
+          ]
+        ] do
+      refute StagingFailure.recovered_finalization?(
+               put_in(data, ["jobs", Access.at(2), "steps"], steps)
+             )
+    end
+  end
+
   @head String.duplicate("a", 40)
   @base String.duplicate("b", 40)
   @repo "TauCetiProject/TauCeti"
