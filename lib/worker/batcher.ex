@@ -3562,28 +3562,10 @@ defmodule BorsNG.Worker.Batcher do
 
   @spec complete_batch(Status.state(), Batch.t(), [Status.t()]) :: Batch.state() | :ci_retry
   defp complete_batch(:ok, batch, statuses) do
-    conn = get_repo_conn(batch.project)
-    candidate = CandidateJournal.current(batch)
-
-    if Train.tracked?(candidate) do
-      case Train.run(candidate, conn) do
-        {:ok, %{"status" => "completed", "conclusion" => "success"}} ->
-          complete_verified_batch(batch, statuses, conn)
-
-        {:ok, %{"status" => status}}
-        when status in ["queued", "in_progress", "waiting", "pending", "requested"] ->
-          # Build statuses can turn green before the finalizer/publisher finishes.
-          # Keep the exact generation behind its workflow gate, with a durable
-          # wakeup instead of waiting for the coarse regular poll interval.
-          schedule_recheck(batch, DateTime.to_unix(DateTime.utc_now()) + 120)
-          :running
-
-        _ ->
-          :running
-      end
-    else
-      complete_verified_batch(batch, statuses, conn)
-    end
+    # Required exact-commit statuses are the CI verdict. Status-only recovery
+    # cannot change the original workflow conclusion; housekeeping is not a
+    # second build verdict. Keep live approval, train/base and push checks below.
+    complete_verified_batch(batch, statuses, get_repo_conn(batch.project))
   end
 
   defp complete_batch(:error, batch, statuses) do
