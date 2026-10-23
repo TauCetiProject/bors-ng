@@ -30,7 +30,7 @@ defmodule BorsNG.StagingFailureTest do
     }
   end
 
-  test "only the latest trusted exact-head build selects a run" do
+  test "latest exact-head required statuses select a run independently of writer identity" do
     assert StagingFailure.build_source(status(), @head, @repo) == {:lookup, 123}
     assert StagingFailure.build_source(status(), @base, @repo) == :unavailable
     assert StagingFailure.build_source(status(), @head, "another/repo") == :unavailable
@@ -51,7 +51,7 @@ defmodule BorsNG.StagingFailureTest do
     end
 
     data = put_in(status(), ["statuses", Access.at(0), "creator", "id"], 123)
-    assert StagingFailure.build_source(data, @head, @repo) == :unavailable
+    assert StagingFailure.build_source(data, @head, @repo) == {:lookup, 123}
     assert StagingFailure.build_source(%{}, @head, @repo) == :unavailable
   end
 
@@ -194,6 +194,46 @@ defmodule BorsNG.StagingFailureTest do
       assert {:conclusive, %{diagnostic: "unknown_terminal_failure_bisect"}} =
                StagingFailure.classify_jobs(run, %{"total_count" => 1, "jobs" => [job]})
     end
+  end
+
+  test "explicit quota failure after green audits is infrastructure, not a source bisection" do
+    run = %{"id" => 123, "run_attempt" => 2, "conclusion" => "failure"}
+
+    build = %{
+      "name" => "Build exact candidate under bwrap with workflow-pinned audits, offline",
+      "number" => 1,
+      "conclusion" => "success"
+    }
+
+    failed = fn name -> %{"name" => name, "number" => 2, "conclusion" => "failure"} end
+
+    sandbox = %{
+      "run_id" => 123,
+      "id" => 1,
+      "status" => "completed",
+      "name" => "sandboxed-build",
+      "conclusion" => "failure",
+      "steps" => [
+        build,
+        failed.("Report build and bump-guard statuses to the PR head commit"),
+        failed.("GitHub API quota unavailable")
+      ]
+    }
+
+    finalizer = %{
+      sandbox
+      | "id" => 2,
+        "name" => "finalize-merge-group-build",
+        "steps" => [failed.("Post the terminal merge-group build status")]
+    }
+
+    jobs = %{"total_count" => 2, "jobs" => [sandbox, finalizer]}
+    assert {:infrastructure, _} = StagingFailure.classify_jobs(run, jobs)
+    red_build = %{build | "conclusion" => "failure"}
+    source_failure = %{sandbox | "steps" => [red_build | tl(sandbox["steps"])]}
+
+    assert {:conclusive, _} =
+             StagingFailure.classify_jobs(run, %{jobs | "jobs" => [source_failure, finalizer]})
   end
 
   test "green workflow with a red required scope status retains native failure isolation" do

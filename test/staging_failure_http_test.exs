@@ -90,6 +90,21 @@ defmodule BorsNG.StagingFailureHttpTest do
     end
   end
 
+  test "a dedicated CI writer still requires the exact trusted staging run" do
+    app = put_in(build(), [Access.at(0), "creator", "id"], 123)
+    assert {:ok, {:infrastructure, _}} = responses([{200, app}, {200, run()}], &classify/0)
+    assert_receive {:staging_request, _}
+    assert_receive {:staging_request, _}
+
+    mismatched =
+      Map.put(run(), "display_title", "bors branch=main batch=8 head=#{@head} base=#{@base}")
+
+    assert {:ok, :unavailable} = responses([{200, app}, {200, mismatched}], &classify/0)
+    assert_receive {:staging_request, _}
+    assert_receive {:staging_request, _}
+    refute_receive {:staging_request, _}, 10
+  end
+
   test "read failure and a mismatching run remain inconclusive" do
     assert {:ok, :unavailable} = responses([{503, %{}}], &classify/0)
     assert_receive {:staging_request, _}
