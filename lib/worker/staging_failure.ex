@@ -9,7 +9,9 @@ defmodule BorsNG.Worker.StagingFailure do
            &(&1["context"] in ["build", "bump-guard", "scope"] and
                &1["state"] in ["failure", "error"])
          ) do
-      %{"state" => state, "creator" => %{"id" => 41_898_282}, "target_url" => url}
+      # Status writers can be the workflow token or the dedicated CI App.
+      # The following run lookup verifies the immutable staging identity.
+      %{"state" => state, "target_url" => url}
       when state in ["failure", "error"] and is_binary(url) ->
         uri = URI.parse(url)
         prefix = "/#{repo}/actions/runs/"
@@ -85,6 +87,7 @@ defmodule BorsNG.Worker.StagingFailure do
   ]
 
   @infrastructure_prefixes [
+    "GitHub API quota unavailable",
     "Set up job",
     "Raise vm.",
     "Resolve PR head",

@@ -633,8 +633,12 @@ defmodule BorsNG.GitHub.Server do
     _ -> {:error, :scope_reset_failed}
   end
 
-  def do_handle_call(:dispatch_pr_build, conn, {pr}) do
-    body = Jason.encode!(%{event_type: "tauceti-bors-pr-approved", client_payload: %{pr: pr}})
+  def do_handle_call(:dispatch_pr_build, conn, {pr, head}) do
+    body =
+      Jason.encode!(%{
+        event_type: "tauceti-bors-pr-approved",
+        client_payload: %{pr: pr, head_sha: head}
+      })
 
     case post!(conn, "dispatches", body) do
       %{status: 204} -> :ok
@@ -851,8 +855,8 @@ defmodule BorsNG.GitHub.Server do
   def do_handle_call(:staging_failure, repo_conn, {head, repo, batch, branch, base}) do
     alias BorsNG.Worker.StagingFailure
 
-    # The combined /status response omits creator identity. The exact-head
-    # status list includes it and is returned newest first. Limit this
+    # The exact-head status list is returned newest first, so classification
+    # uses the latest verdict for each required context. Limit this
     # failure-only lookup to one page; incomplete evidence remains a hold.
     with %{status: 200, body: raw} <- get!(repo_conn, "commits/#{head}/statuses?per_page=100"),
          {:ok, statuses} when is_list(statuses) <- Jason.decode(raw) do

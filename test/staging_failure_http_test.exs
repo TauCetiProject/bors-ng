@@ -71,6 +71,24 @@ defmodule BorsNG.StagingFailureHttpTest do
     )
   end
 
+  test "approval dispatch includes the head needed by PR placement and recovery" do
+    assert :ok =
+             responses([{204, %{}}], fn ->
+               Server.do_handle_call(:dispatch_pr_build, {{:raw, "test-token"}, 14}, {7, @head})
+             end)
+
+    assert_receive {:staging_request, request}
+    assert request =~ "POST /repositories/14/dispatches"
+    [_, body] = String.split(request, "\r\n\r\n", parts: 2)
+
+    assert %{
+             "event_type" => "tauceti-bors-pr-approved",
+             "client_payload" => %{"pr" => 7, "head_sha" => @head}
+           } = Jason.decode!(body)
+
+    refute_receive {:staging_request, _}, 10
+  end
+
   test "classification needs at most one status page and one run lookup" do
     assert {:ok, {:infrastructure, %{conclusion: "cancelled"}}} =
              responses([{200, build()}, {200, run()}], &classify/0)
@@ -88,6 +106,21 @@ defmodule BorsNG.StagingFailureHttpTest do
       assert_receive {:staging_request, _}
       refute_receive {:staging_request, _}, 10
     end
+  end
+
+  test "a dedicated CI writer still requires the exact trusted staging run" do
+    app = put_in(build(), [Access.at(0), "creator", "id"], 123)
+    assert {:ok, {:infrastructure, _}} = responses([{200, app}, {200, run()}], &classify/0)
+    assert_receive {:staging_request, _}
+    assert_receive {:staging_request, _}
+
+    mismatched =
+      Map.put(run(), "display_title", "bors branch=main batch=8 head=#{@head} base=#{@base}")
+
+    assert {:ok, :unavailable} = responses([{200, app}, {200, mismatched}], &classify/0)
+    assert_receive {:staging_request, _}
+    assert_receive {:staging_request, _}
+    refute_receive {:staging_request, _}, 10
   end
 
   test "read failure and a mismatching run remain inconclusive" do

@@ -759,7 +759,7 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
     assert repeated.manual_approval == first.manual_approval
     assert repeated.queue_pending
     assert repeated.queue_approval["state"] == "approved"
-    assert state.pr_build_dispatches == [1]
+    assert state.pr_build_dispatches == [{1, @head}]
     assert state.statuses == statuses
     refute Repo.exists?(Batch.all_for_project(p.id, :incomplete))
     assert Enum.any?(state.comments[1], &String.contains?(&1, "Keeping existing CI"))
@@ -777,7 +777,7 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
     assert repeated.manual_approval == first.manual_approval
     assert Repo.one!(Batch.all_for_project(p.id, :incomplete)).id == batch.id
     assert BorsNG.Worker.CandidateJournal.admission(link.id) == admission
-    assert GitHub.ServerMock.get_state()[@conn].pr_build_dispatches == [1]
+    assert GitHub.ServerMock.get_state()[@conn].pr_build_dispatches == [{1, @head}]
     assert GitHub.ServerMock.get_state()[@conn].statuses == statuses
   end
 
@@ -791,7 +791,7 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
     changed = manual_review(p)
     refute changed.manual_approval == first.manual_approval
     assert changed.manual_approval["merge_base_sha"] == base
-    assert GitHub.ServerMock.get_state()[@conn].pr_build_dispatches == [1, 1]
+    assert GitHub.ServerMock.get_state()[@conn].pr_build_dispatches == [{1, @head}, {1, @head}]
     assert GitHub.ServerMock.get_state()[@conn].statuses[@head]["scope"] == :running
   end
 
@@ -806,7 +806,7 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
     )
 
     assert Repo.get!(Patch, first.id).manual_approval["actor_id"] == 1002
-    assert GitHub.ServerMock.get_state()[@conn].pr_build_dispatches == [1, 1]
+    assert GitHub.ServerMock.get_state()[@conn].pr_build_dispatches == [{1, @head}, {1, @head}]
   end
 
   test "approval of a new head requests fresh CI", %{project: p} do
@@ -826,7 +826,7 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
     approval = Repo.get!(Patch, patch.id).manual_approval
     refute approval == first.manual_approval
     assert approval["head_sha"] == head
-    assert GitHub.ServerMock.get_state()[@conn].pr_build_dispatches == [1, 1]
+    assert GitHub.ServerMock.get_state()[@conn].pr_build_dispatches == [{1, head}, {1, @head}]
   end
 
   test "approval after explicit revocation requests fresh CI", %{project: p} do
@@ -837,7 +837,7 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
 
     renewed = manual_review(p)
     assert renewed.manual_approval == first.manual_approval
-    assert GitHub.ServerMock.get_state()[@conn].pr_build_dispatches == [1, 1]
+    assert GitHub.ServerMock.get_state()[@conn].pr_build_dispatches == [{1, @head}, {1, @head}]
   end
 
   test "a repeated command still rechecks live admin authority", %{project: p} do
@@ -845,7 +845,7 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
     manual_review(p)
     update_repo(:admin_permissions, %{1001 => {:ok, false}})
     manual_review(p)
-    assert GitHub.ServerMock.get_state()[@conn].pr_build_dispatches == [1]
+    assert GitHub.ServerMock.get_state()[@conn].pr_build_dispatches == [{1, @head}]
 
     assert Enum.any?(
              GitHub.ServerMock.get_state()[@conn].comments[1],
@@ -894,7 +894,7 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
     assert approved.manual_approval["head_sha"] == @head
     assert approved.manual_approval["merge_base_sha"] == @base
     assert :ok == ManualApproval.preflight(@conn, approved)
-    assert get_in(GitHub.ServerMock.get_state(), [@conn, :pr_build_dispatches]) == [1]
+    assert get_in(GitHub.ServerMock.get_state(), [@conn, :pr_build_dispatches]) == [{1, @head}]
     refute Repo.exists?(Batch.all_for_project(p.id, :incomplete))
     :ok = DynamicSupervisor.terminate_child(Batcher.Supervisor, pid)
 
@@ -1080,7 +1080,7 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
     assert ManualApproval.valid?(patch)
     assert patch.manual_approval["merge_base_sha"] == @base
     assert patch.bundle_reviewer == "maintainer"
-    assert get_in(GitHub.ServerMock.get_state(), [@conn, :pr_build_dispatches]) == [1]
+    assert get_in(GitHub.ServerMock.get_state(), [@conn, :pr_build_dispatches]) == [{1, @head}]
     refute Repo.exists?(Batch.all_for_project(p.id, :incomplete))
     update_repo(:statuses, %{@head => %{"build" => :ok, "bump-guard" => :ok, "scope" => :ok}})
     Batcher.do_handle_cast({:reviewed, patch.id, "maintainer"}, p.id)
@@ -1221,7 +1221,7 @@ defmodule BorsNG.Worker.MergeEligibilityTest do
     pid = Batcher.Registry.get(p.id)
     :sys.get_state(pid)
     assert is_nil(Repo.get!(Patch, patch.id).manual_approval)
-    assert get_in(GitHub.ServerMock.get_state(), [@conn, :pr_build_dispatches]) == [1]
+    assert get_in(GitHub.ServerMock.get_state(), [@conn, :pr_build_dispatches]) == [{1, @head}]
     refute Repo.exists?(Batch.all_for_project(p.id, :incomplete))
     :ok = DynamicSupervisor.terminate_child(Batcher.Supervisor, pid)
   end

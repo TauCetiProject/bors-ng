@@ -268,8 +268,8 @@ defmodule BorsNG.GitHub do
   end
 
   @doc "Request existing trusted PR CI after a maintainer approves its scope."
-  def dispatch_pr_build(repo_conn, pr) do
-    call_with_retry(:dispatch_pr_build, repo_conn, {pr})
+  def dispatch_pr_build(repo_conn, pr, head) do
+    call_with_retry(:dispatch_pr_build, repo_conn, {pr, head})
   end
 
   def reset_scope(repo_conn, head) do
