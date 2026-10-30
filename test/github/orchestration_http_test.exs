@@ -338,7 +338,7 @@ defmodule BorsNG.OrchestrationHttpTest do
              BorsNG.GitHub.close_pr_bounded(conn, 1, "Title", deadline)
   end
 
-  test "bounded batch reads use one GraphQL request and validate repository identity" do
+  test "batch reads use one GraphQL request and validate repository identity" do
     head = String.duplicate("a", 40)
 
     data = %{
@@ -358,7 +358,12 @@ defmodule BorsNG.OrchestrationHttpTest do
 
     assert {:reply, {:ok, %{1 => %BorsNG.GitHub.Pr{head_sha: ^head}}}, %{}} =
              response(200, data, fn ->
-               advisory(:batch_read, {"TauCetiProject/TauCeti", [1], :identity})
+               Server.handle_call(
+                 {:batch_read, {{:raw, "test-token"}, 14},
+                  {"TauCetiProject/TauCeti", [1], :identity}},
+                 nil,
+                 %{}
+               )
              end)
 
     assert_receive {:request, request}

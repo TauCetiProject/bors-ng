@@ -332,8 +332,9 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
   # enough recent attempts to distinguish service, retry backoff and lease wait
   # even when a later claim overwrites the row's current-attempt timestamps.
   defp attempt_timing(job, event) do
-    recent = (job.attempt_timing || %{}) |> Map.get("recent", [])
-    %{"recent" => Enum.take([event | recent], 8)}
+    timing = job.attempt_timing || %{}
+    recent = Map.get(timing, "recent", [])
+    Map.put(timing, "recent", Enum.take([event | recent], 8))
   end
 
   def record_shutdown_result(job) do
@@ -477,18 +478,55 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
           )
         )
 
-      owned(job)
-      |> Repo.update_all(
-        set: [
-          state: "pending",
-          token: nil,
-          lease_until: 0,
-          available_at: max(now() + 1, pending_at || 0),
-          attempts: max(job.attempts - 1, 0),
-          completed_at_ms: System.system_time(:millisecond),
-          last_error: "deferred:#{reason}"
-        ]
-      )
+      if current = Repo.one(owned(job)) do
+        timing = current.attempt_timing || %{}
+        reads = match?({:live_members_unavailable, _}, reason)
+        count = if reads, do: Map.get(timing, "read_deferrals", 0) + 1, else: 0
+        delay = if reads, do: min(30 * Integer.pow(2, min(count - 1, 7)), 3600), else: 1
+
+        timing =
+          if reads do
+            current
+            |> attempt_timing(%{
+              "event" => "read_defer",
+              "count" => count,
+              "delay_sec" => delay,
+              "at_ms" => System.system_time(:millisecond)
+            })
+            |> Map.put("read_deferrals", count)
+          else
+            Map.delete(timing, "read_deferrals")
+          end
+
+        if reads and count >= 6,
+          do:
+            Logger.warning("outbox_read_deferred job=#{job.id} count=#{count} retry_in=#{delay}")
+
+        message =
+          if is_atom(reason) or is_binary(reason),
+            do: to_string(reason),
+            else: inspect(reason, limit: 8, printable_limit: 120)
+
+        owned(job)
+        |> Repo.update_all(
+          set: [
+            state: "pending",
+            token: nil,
+            lease_until: 0,
+            available_at: max(now() + delay, pending_at || 0),
+            attempts: max(current.attempts - 1, 0),
+            attempt_timing: timing,
+            completed_at_ms: System.system_time(:millisecond),
+            last_error:
+              ("deferred:" <> message)
+              |> String.to_charlist()
+              |> Enum.take(255)
+              |> List.to_string()
+          ]
+        )
+      else
+        {0, nil}
+      end
     end)
   end
 

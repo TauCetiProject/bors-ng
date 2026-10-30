@@ -1607,6 +1607,10 @@ defmodule BorsNG.Worker.Batcher do
 
   defp poll_one_running(batch) do
     cond do
+      Process.get(:orchestration_executor, false) and
+          Outbox.pending?(batch.project_id, "dispatch:#{batch.id}") ->
+        :ok
+
       (batch.recovery_after || 0) > DateTime.to_unix(DateTime.utc_now()) ->
         :ok
 
@@ -2278,23 +2282,20 @@ defmodule BorsNG.Worker.Batcher do
 
     metadata =
       phase(batch, :preparation_metadata, fn ->
-        deadline = System.monotonic_time(:millisecond) + 8_000
-
         prefetched =
           if GitHub.BatchRead.enabled?(batch.project) do
             GitHub.BatchRead.fetch(
               conn,
               batch.project.name,
               Enum.map(links, & &1.patch.pr_xref),
-              :metadata,
-              deadline
+              :metadata
             )
           else
             {:ok, %{}}
           end
 
         with {:ok, prefetched} <- prefetched,
-             {:ok, prefetched} <- resolve_prefetched_authors(conn, prefetched, deadline) do
+             {:ok, prefetched} <- resolve_prefetched_authors(conn, prefetched) do
           Enum.reduce_while(links, {:ok, []}, fn link, {:ok, members} ->
             if link.head_sha != link.patch.commit do
               {:halt, :race}
@@ -2305,9 +2306,20 @@ defmodule BorsNG.Worker.Batcher do
                      toml,
                      Map.get(prefetched, link.patch.pr_xref)
                    ) do
-                {:ok, data} -> {:cont, {:ok, members ++ [Map.put(data, :pr, link.patch.pr_xref)]}}
-                {:error, :head_changed} -> {:halt, :race}
-                error -> {:halt, error}
+                {:ok, data} ->
+                  {:cont, {:ok, members ++ [Map.put(data, :pr, link.patch.pr_xref)]}}
+
+                {:error, :head_changed} ->
+                  {:halt, :race}
+
+                error ->
+                  {:halt,
+                   {:error,
+                    %{
+                      kind: "metadata_unavailable",
+                      pr: link.patch.pr_xref,
+                      cause: inspect(error, limit: 12, printable_limit: 512)
+                    }}}
               end
             end
           end)
@@ -2336,31 +2348,15 @@ defmodule BorsNG.Worker.Batcher do
   end
 
   defp local_live_heads(conn, links, project) do
-    read =
-      if GitHub.BatchRead.enabled?(project) do
-        live =
-          case GitHub.BatchRead.fetch(
-                 conn,
-                 project.name,
-                 Enum.map(links, & &1.patch.pr_xref),
-                 :identity
-               ) do
-            {:ok, live} -> live
-            _ -> %{}
-          end
-
-        fn number -> Map.fetch(live, number) end
-      else
-        fn number -> GitHub.get_pr(conn, number) end
-      end
-
-    Enum.reduce_while(links, :ok, fn link, :ok ->
-      case read.(link.patch.pr_xref) do
-        {:ok, pr} when pr.head_sha == link.head_sha -> {:cont, :ok}
-        {:ok, _} -> {:halt, :race}
-        _ -> {:halt, {:error, :live_head_unavailable}}
-      end
-    end)
+    with {:ok, live} <- live_member_reads(conn, project, links) do
+      Enum.reduce_while(links, :ok, fn link, :ok ->
+        case Map.fetch(live, link.patch.pr_xref) do
+          {:ok, pr} when pr.head_sha == link.head_sha -> {:cont, :ok}
+          {:ok, _} -> {:halt, :race}
+          _ -> {:halt, GitHub.BatchRead.identity_error(link.patch.pr_xref, :missing_response)}
+        end
+      end)
+    end
   end
 
   # A read-only shadow of an already running immutable generation avoids
@@ -3240,7 +3236,7 @@ defmodule BorsNG.Worker.Batcher do
     Logger.warning("race: PR ##{patch.pr_xref} has no user; skipping re-sync")
   end
 
-  defp resolve_prefetched_authors(conn, prefetched, deadline) do
+  defp resolve_prefetched_authors(conn, prefetched) do
     Enum.reduce_while(prefetched, {:ok, %{}, %{}}, fn
       {number, :rest}, {:ok, data, authors} ->
         {:cont, {:ok, Map.put(data, number, :rest), authors}}
@@ -3250,7 +3246,7 @@ defmodule BorsNG.Worker.Batcher do
 
         result =
           Map.get_lazy(authors, key, fn ->
-            squash_author_profile(pr, GitHub.public_user_bounded(conn, pr.user.login, deadline))
+            best_effort_author(pr, GitHub.public_user(conn, pr.user.login))
           end)
 
         case result do
@@ -3296,12 +3292,24 @@ defmodule BorsNG.Worker.Batcher do
     end
   end
 
+  defp squash_pr_read(conn, number) do
+    if Process.get(:orchestration_executor, false),
+      do: GitHub.read_pr(conn, number),
+      else: GitHub.get_pr(conn, number)
+  end
+
+  defp squash_commits_read(conn, number) do
+    if Process.get(:orchestration_executor, false),
+      do: GitHub.read_pr_commits(conn, number),
+      else: GitHub.get_pr_commits(conn, number)
+  end
+
   defp get_squash_pr_data(repo_conn, patch, toml) do
-    with {:ok, pr} <- GitHub.get_pr(repo_conn, patch.pr_xref),
+    with {:ok, pr} <- squash_pr_read(repo_conn, patch.pr_xref),
          true <- pr.head_sha == patch.commit,
-         {:ok, commits} <- GitHub.get_pr_commits(repo_conn, patch.pr_xref),
+         {:ok, commits} <- squash_commits_read(repo_conn, patch.pr_xref),
          {:ok, user_email, user_name} <- get_squash_author(repo_conn, pr),
-         {:ok, current_pr} <- GitHub.get_pr(repo_conn, patch.pr_xref),
+         {:ok, current_pr} <- squash_pr_read(repo_conn, patch.pr_xref),
          true <- current_pr.head_sha == patch.commit do
       commit_message =
         Batcher.Message.generate_squash_commit_message(
@@ -3324,17 +3332,39 @@ defmodule BorsNG.Worker.Batcher do
     end
   end
 
-  defp get_squash_author({token, _repo_xref}, pr) when not is_nil(pr.user),
-    do: squash_author_profile(pr, GitHub.get_user_by_login(token, pr.user.login))
+  defp get_squash_author({token, _repo_xref} = conn, pr) when not is_nil(pr.user) do
+    profile =
+      if Process.get(:orchestration_executor, false),
+        do: GitHub.public_user(conn, pr.user.login),
+        else: GitHub.get_user_by_login(token, pr.user.login)
+
+    best_effort_author(pr, profile)
+  end
 
   defp get_squash_author(_, _), do: {:error, :missing_pr_user}
+
+  # Profile enrichment does not establish author identity or merge authority. GitHub's PR
+  # response already supplies the numeric ID and login needed for its canonical noreply address.
+  defp best_effort_author(pr, result) do
+    case squash_author_profile(pr, result) do
+      {:ok, _, _} = author ->
+        author
+
+      error ->
+        Logger.warning("author profile fallback login=#{pr.user.login} reason=#{inspect(error)}")
+        squash_author_profile(pr, {:ok, nil})
+    end
+  end
 
   defp squash_author_profile(pr, result) do
     case result do
       {:ok, nil} ->
         {:ok, "#{pr.user.id}+#{pr.user.login}@users.noreply.github.com", pr.user.login}
 
-      {:ok, user} ->
+      {:ok, %GitHub.FullUser{} = user}
+      when user.id == pr.user.id and user.login == pr.user.login and
+             (is_nil(user.email) or is_binary(user.email)) and
+             (is_nil(user.name) or is_binary(user.name)) ->
         user_email =
           if user.email != nil do
             user.email
@@ -3345,7 +3375,7 @@ defmodule BorsNG.Worker.Batcher do
         user_name = user.name || user.login
         {:ok, user_email, user_name}
 
-      {:error, _} = error ->
+      error ->
         error
     end
   end
@@ -4138,23 +4168,30 @@ defmodule BorsNG.Worker.Batcher do
 
   defp live_member_reads(conn, project, links) do
     if GitHub.BatchRead.enabled?(project) do
-      {:ok, live} =
-        GitHub.BatchRead.fetch(conn, project.name, Enum.map(links, & &1.patch.pr_xref), :identity)
-
-      fn number -> Map.fetch!(live, number) end
+      GitHub.BatchRead.fetch(conn, project.name, Enum.map(links, & &1.patch.pr_xref), :identity)
     else
-      fn number -> GitHub.get_pr!(conn, number) end
+      Enum.reduce_while(links, {:ok, %{}}, fn link, {:ok, live} ->
+        case GitHub.get_pr(conn, link.patch.pr_xref) do
+          {:ok, pr} -> {:cont, {:ok, Map.put(live, link.patch.pr_xref, pr)}}
+          error -> {:halt, GitHub.BatchRead.identity_error(link.patch.pr_xref, error)}
+        end
+      end)
     end
   end
 
   defp ensure_live_members!(batch, conn) do
     links = Repo.all(LinkPatchBatch.from_batch(batch.id))
-    live = live_member_reads(conn, batch.project, links)
+
+    live =
+      case live_member_reads(conn, batch.project, links) do
+        {:ok, live} -> live
+        {:error, reason} -> throw({:live_members_unavailable, reason})
+      end
 
     Enum.each(links, fn link ->
       # Fail closed on an unavailable live read. Cached webhook heads cannot
       # authorize a prioritized dispatch while a push/close is still in transit.
-      pr = live.(link.patch.pr_xref)
+      pr = Map.fetch!(live, link.patch.pr_xref)
 
       if link.patch.commit != link.head_sha or pr.head_sha != link.head_sha or
            pr.state != :open or pr.draft or pr.base_ref != batch.into_branch do
@@ -4359,6 +4396,17 @@ defmodule BorsNG.Worker.Batcher do
 
         :running
     end
+  catch
+    :throw, {:live_members_unavailable, reason} ->
+      CandidateJournal.event(
+        CandidateJournal.current(batch),
+        "promotion_read_deferred",
+        "bors.live_read",
+        %{error: reason}
+      )
+
+      defer_promotion(batch, {:live_members_unavailable, reason})
+      :running
   end
 
   defp defer_promotion(batch, reason) do

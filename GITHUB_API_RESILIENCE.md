@@ -47,6 +47,36 @@ the Tesla HTTP receive timeout. With a 180 s retry window, a single timeout
 exhausts most of the window — in practice the number of retries for write
 operations has been low.
 
+## Async candidate reads
+
+Candidate GraphQL batches, REST metadata recovery and public-profile lookups use
+an independent read coordinator. It caches installation tokens and runs HTTP work
+in monitored tasks; a slow caller does not hold up unrelated reads. Tasks end if
+their caller exits. Each request has the configured transport timeout and retries
+transport failures, HTTP 408/429 and 5xx responses. Retry-After is respected for
+short waits; longer waits return to the caller for fallback or deferral. A 401
+refreshes the installation token and replays the read. Other unsuccessful read
+responses do not trigger an unnecessary token refresh.
+
+There is no deadline shared across an entire batch's chunks and author profiles.
+Healthy GraphQL aliases and completed chunks remain available while failed
+aliases/chunks use REST. REST identity recovery explicitly validates all required
+fields; it does not infer an absent draft flag from a parser default. Public
+profiles are optional enrichment, with the known PR author ID and login supplying
+a canonical GitHub noreply identity if enrichment fails.
+
+An unavailable required live identity defers dispatch or promotion with the PR
+number and a bounded diagnostic recorded. Repeated dispatch read deferrals back off from
+30 seconds to one hour and remain visible in the job's timing history and logs.
+An unavailable response (including 404) does not establish that a PR was closed or
+its approval withdrawn. Deferral does not spend the outbox retry count,
+fail proof CI, or discard approvals. Promotion read failures defer the individual
+batch using the existing promotion retry cadence, so polling continues for other
+running batches. An undispatched candidate
+cannot exhaust its CI timeout while waiting for required reads. Every operation still obtains its own fresh
+identity evidence; successful reads do not become cached merge authority. See
+[ORCHESTRATION.md](ORCHESTRATION.md#recoverable-live-read-batches).
+
 ## Resilience layers
 
 ### Layer 1 — Tolerate notification failures (implemented)
