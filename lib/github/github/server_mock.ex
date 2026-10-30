@@ -1191,7 +1191,7 @@ defmodule BorsNG.GitHub.ServerMock do
     )
     |> case do
       # A test maps a login to `:error` to simulate a failed lookup.
-      {:ok, :error} -> {{:error, :get_user_by_login}, state}
+      {:ok, :error} -> {{:error, {:get_user_by_login, 503}}, state}
       {:ok, error} when is_tuple(error) and elem(error, 0) == :error -> {error, state}
       {:ok, user} -> {{:ok, user}, state}
       _ -> {{:ok, nil}, state}

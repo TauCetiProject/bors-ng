@@ -70,7 +70,9 @@ number and a bounded diagnostic recorded. Repeated read deferrals back off from
 30 seconds to one hour and remain visible in the job's timing history and logs.
 An unavailable response (including 404) does not establish that a PR was closed or
 its approval withdrawn. Deferral does not spend the outbox retry count,
-fail proof CI, or discard approvals. Every operation still obtains its own fresh
+fail proof CI, or discard approvals. Promotion read failures defer the individual
+batch, so polling continues for other running batches. An undispatched candidate
+cannot exhaust its CI timeout while waiting for required reads. Every operation still obtains its own fresh
 identity evidence; successful reads do not become cached merge authority. See
 [ORCHESTRATION.md](ORCHESTRATION.md#recoverable-live-read-batches).
 

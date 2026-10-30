@@ -482,6 +482,36 @@ defmodule BorsNG.Worker.SpeculativeTrainTest do
     end
   end
 
+  test "an unavailable predecessor identity does not stop polling its running successor", %{
+    project: project
+  } do
+    {a, ca, _} = candidate(project, 1)
+    {b, cb, _} = candidate(project, 2, a.commit, ca)
+    Train.reserve(ca, @conn)
+    Train.reserve(cb, @conn)
+    mock = GitHub.ServerMock.get_state()
+
+    GitHub.ServerMock.put_state(
+      mock
+      |> put_in([@conn, :statuses, a.commit], %{"build" => :ok})
+      |> put_in([@conn, :statuses, b.commit], %{"build" => :ok})
+      |> Map.put(:batch_read_error, {:identity, {:error, :unavailable}})
+      |> Map.put(:identity_read_error, {:error, :get_pr, 502, 1})
+    )
+
+    {:ok, job} = Outbox.claim(Outbox.enqueue(project.id, "info", {:poll, :once}).id)
+    Process.put(:orchestration_job, job)
+    Batcher.handle_info({:poll, :once}, project.id)
+    assert Repo.get!(Batch, a.id).promotion_retry_at > Outbox.now()
+    assert Repo.get!(Batch, a.id).state == :running
+    assert Repo.one!(Status.all_for_batch(b.id)).state == :ok
+    assert Repo.get!(Batch, b.id).state == :running
+    refute Train.event?(ca, "promotion_requested")
+    refute Train.event?(cb, "promotion_requested")
+    Outbox.finish(job)
+    Process.delete(:orchestration_job)
+  end
+
   test "green statuses still honor pending withdrawal without a workflow gate", %{
     project: project
   } do

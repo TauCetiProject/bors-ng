@@ -10,7 +10,18 @@ defmodule BorsNG.GitHub.ReadOnlyTest do
 
     def call(conn, handler) do
       {:ok, body, conn} = Plug.Conn.read_body(conn)
-      {status, data} = handler.(conn, body)
+
+      {status, data, headers} =
+        case handler.(conn, body) do
+          {status, data} -> {status, data, []}
+          response -> response
+        end
+
+      conn =
+        Enum.reduce(headers, conn, fn {name, value}, conn ->
+          Plug.Conn.put_resp_header(conn, name, value)
+        end)
+
       Plug.Conn.send_resp(conn, status, Jason.encode!(data))
     end
   end
@@ -269,6 +280,28 @@ defmodule BorsNG.GitHub.ReadOnlyTest do
 
     assert_receive {:limited_path, "/graphql"}
     refute_receive {:limited_path, _}
+  end
+
+  test "profile HTTP failures preserve the public two-tuple error contract" do
+    serve(fn _, _ -> {403, %{}} end)
+    assert {:error, {:get_user_by_login, 403}} = GitHub.public_user(@conn, "ada")
+  end
+
+  for header <- [{"retry-after", "60"}, {"x-ratelimit-remaining", "0"}] do
+    test "GraphQL 403 rate limit with #{elem(header, 0)} does not fan out" do
+      parent = self()
+
+      serve(fn conn, _ ->
+        send(parent, {:limited_path, conn.request_path})
+        {403, %{}, [unquote(header)]}
+      end)
+
+      assert {:error, %{kind: "github_rate_limited"}} =
+               BatchRead.fetch(@conn, "owner/repo", [1, 2], :identity)
+
+      assert_receive {:limited_path, "/graphql"}
+      refute_receive {:limited_path, _}
+    end
   end
 
   test "unexpected messages are harmless and status reports redact cached tokens" do

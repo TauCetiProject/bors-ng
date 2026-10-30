@@ -483,7 +483,20 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
         reads = match?({:live_members_unavailable, _}, reason)
         count = if reads, do: Map.get(timing, "read_deferrals", 0) + 1, else: 0
         delay = if reads, do: min(30 * Integer.pow(2, min(count - 1, 7)), 3600), else: 1
-        timing = if reads, do: Map.put(timing, "read_deferrals", count), else: timing
+
+        timing =
+          if reads do
+            current
+            |> attempt_timing(%{
+              "event" => "read_defer",
+              "count" => count,
+              "delay_sec" => delay,
+              "at_ms" => System.system_time(:millisecond)
+            })
+            |> Map.put("read_deferrals", count)
+          else
+            Map.delete(timing, "read_deferrals")
+          end
 
         if reads and count >= 6,
           do:
@@ -504,7 +517,11 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
             attempts: max(current.attempts - 1, 0),
             attempt_timing: timing,
             completed_at_ms: System.system_time(:millisecond),
-            last_error: String.slice("deferred:" <> message, 0, 255)
+            last_error:
+              ("deferred:" <> message)
+              |> String.to_charlist()
+              |> Enum.take(255)
+              |> List.to_string()
           ]
         )
       else

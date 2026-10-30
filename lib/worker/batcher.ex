@@ -1607,6 +1607,10 @@ defmodule BorsNG.Worker.Batcher do
 
   defp poll_one_running(batch) do
     cond do
+      Process.get(:orchestration_executor, false) and
+          Outbox.pending?(batch.project_id, "dispatch:#{batch.id}") ->
+        :ok
+
       (batch.recovery_after || 0) > DateTime.to_unix(DateTime.utc_now()) ->
         :ok
 
@@ -2311,7 +2315,11 @@ defmodule BorsNG.Worker.Batcher do
                 error ->
                   {:halt,
                    {:error,
-                    %{kind: "metadata_unavailable", pr: link.patch.pr_xref, cause: inspect(error)}}}
+                    %{
+                      kind: "metadata_unavailable",
+                      pr: link.patch.pr_xref,
+                      cause: inspect(error, limit: 12, printable_limit: 512)
+                    }}}
               end
             end
           end)
@@ -4388,6 +4396,17 @@ defmodule BorsNG.Worker.Batcher do
 
         :running
     end
+  catch
+    :throw, {:live_members_unavailable, reason} ->
+      CandidateJournal.event(
+        CandidateJournal.current(batch),
+        "promotion_read_deferred",
+        "bors.live_read",
+        %{error: reason}
+      )
+
+      defer_promotion(batch, {:live_members_unavailable, reason})
+      :running
   end
 
   defp defer_promotion(batch, reason) do

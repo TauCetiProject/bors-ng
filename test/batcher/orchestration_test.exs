@@ -1189,6 +1189,26 @@ defmodule BorsNG.Worker.OrchestrationTest do
     end
   end
 
+  test "an undispatched batch does not spend its CI timeout while reads are deferred", ctx do
+    dispatch = construct(ctx)
+    approval = Repo.get!(Patch, ctx.patch.id).queue_approval
+    ctx.batch |> Batch.changeset(%{timeout_at: 1, last_polled: 0}) |> Repo.update!()
+    assert :ok == execute(ctx.worker, Outbox.enqueue(ctx.project.id, "info", {:poll, :once}))
+    assert Repo.get!(Batch, ctx.batch.id).state == :running
+    assert Outbox.pending?(ctx.project.id, "dispatch:#{ctx.batch.id}")
+    assert Repo.get!(Patch, ctx.patch.id).queue_approval == approval
+    assert :ok == execute(ctx.worker, dispatch)
+    assert Repo.get!(Batch, ctx.batch.id).timeout_at > Outbox.now()
+  end
+
+  test "diagnostic truncation counts database characters rather than graphemes", ctx do
+    dispatch = construct(ctx)
+    {:ok, claimed} = Outbox.claim(dispatch.id)
+    assert {1, nil} = Outbox.defer(claimed, String.duplicate("a\u0301", 300))
+    error = Repo.get!(OrchestrationJob, dispatch.id).last_error
+    assert length(String.to_charlist(error)) <= 255
+  end
+
   test "stale green never promotes over current red", ctx do
     dispatch = construct(ctx)
     assert :ok == execute(ctx.worker, dispatch)
@@ -1891,11 +1911,16 @@ defmodule BorsNG.Worker.OrchestrationTest do
     )
 
     job = Outbox.enqueue(ctx.project.id, "cast", {:status, {batch.commit, "ci", :ok, "url"}})
-    assert {:defer, {:live_members_unavailable, %{pr: 1}}} = execute(ctx.worker, job)
+    assert :ok == execute(ctx.worker, job)
     assert Repo.get!(Batch, batch.id).state == :running
     assert Enum.all?(Repo.all(Status.all_for_batch(batch.id)), &(&1.state == :ok))
     assert get_in(GitHub.ServerMock.get_state(), [ctx.conn, :branches, "master"]) == "ini"
-    assert Repo.get!(OrchestrationJob, job.id).attempts == 0
+    held = Repo.get!(Batch, batch.id)
+    assert held.promotion_retry_at > Outbox.now()
+    assert held.promotion_failures == 1
+    events = hd(CandidateJournal.diagnostics(ctx.project.id, "master", batch.id)).events
+    assert Enum.any?(events, &(&1.kind == "promotion_read_deferred"))
+    held |> Batch.changeset(%{promotion_retry_at: 0}) |> Repo.update!()
 
     assert :ok == execute(ctx.worker, job)
     assert Repo.get!(Batch, batch.id).state == :ok

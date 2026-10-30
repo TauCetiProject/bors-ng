@@ -275,8 +275,10 @@ defmodule BorsNG.GitHub.Server do
           {:error, _} -> {:error, :batch_response_invalid}
         end
 
-      {:ok, %{status: status}} ->
-        {:error, :batch_read, status}
+      {:ok, %{status: status} = response} ->
+        if rate_limited_response?(response),
+          do: {:error, :github_rate_limited},
+          else: {:error, :batch_read, status}
 
       {:error, reason} ->
         {:error, :batch_transport, reason}
@@ -1206,7 +1208,7 @@ defmodule BorsNG.GitHub.Server do
         {:ok, nil}
 
       %{status: status} ->
-        {:error, :get_user_by_login, status}
+        {:error, {:get_user_by_login, status}}
     end
   end
 
@@ -1829,7 +1831,9 @@ defmodule BorsNG.GitHub.Server do
         {:reply, result, state}
 
       _ ->
-        unauthorized = match?({:error, _, 401}, result) or match?({:error, _, 401, _}, result)
+        unauthorized =
+          match?({:error, {_, 401}}, result) or match?({:error, _, 401}, result) or
+            match?({:error, _, 401, _}, result)
 
         if Process.get(:github_read_only, false) and not unauthorized do
           {:reply, result, state}
@@ -1955,14 +1959,19 @@ defmodule BorsNG.GitHub.Server do
     end
   end
 
-  defp cancellation_error(%{status: 403, headers: headers}) do
-    limited =
-      Enum.any?(headers, fn {name, value} ->
-        String.downcase(name) == "retry-after" or
-          (String.downcase(name) == "x-ratelimit-remaining" and value == "0")
-      end)
+  defp rate_limited_response?(%{status: 429}), do: true
 
-    if limited,
+  defp rate_limited_response?(%{status: 403, headers: headers}) do
+    Enum.any?(headers, fn {name, value} ->
+      String.downcase(name) == "retry-after" or
+        (String.downcase(name) == "x-ratelimit-remaining" and value == "0")
+    end)
+  end
+
+  defp rate_limited_response?(_), do: false
+
+  defp cancellation_error(%{status: 403} = response) do
+    if rate_limited_response?(response),
       do: {:error, :cancel_candidate_rate_limit, 429},
       else: {:error, :cancel_candidate_run, 403}
   end
