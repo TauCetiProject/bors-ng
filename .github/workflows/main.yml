@@ -7,7 +7,6 @@ on:
       - staging
       - trying
   pull_request:
-  workflow_dispatch:
   merge_group:
 
 jobs:
