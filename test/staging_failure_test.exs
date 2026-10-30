@@ -196,6 +196,64 @@ defmodule BorsNG.StagingFailureTest do
     end
   end
 
+  test "lost runner with unfinished steps cannot make its red finalizer blame the candidate" do
+    run = %{"id" => 123, "run_attempt" => 1, "conclusion" => "failure"}
+    build = "Build exact candidate under bwrap with workflow-pinned audits, offline"
+
+    # Both production failures lost the runner before compilation, at different
+    # preparation steps. GitHub completed the jobs but not their remaining steps.
+    for interrupted_at <- [
+          "Dot-notation namespace lint (Mathlib type namespaces stay at root)",
+          "Fetch TauCeti's own oleans from the Lake cache"
+        ] do
+      sandbox = %{
+        "id" => 1,
+        "run_id" => 123,
+        "name" => "sandboxed-build",
+        "status" => "completed",
+        "conclusion" => "failure",
+        "steps" => [
+          %{"name" => interrupted_at, "status" => "in_progress", "conclusion" => nil},
+          %{"name" => build, "status" => "queued", "conclusion" => nil}
+        ]
+      }
+
+      finalizer = %{
+        sandbox
+        | "id" => 2,
+          "name" => "finalize-merge-group-build",
+          "steps" => [
+            %{
+              "name" => "Post the terminal merge-group build status",
+              "status" => "completed",
+              "conclusion" => "failure"
+            }
+          ]
+      }
+
+      jobs = %{"total_count" => 2, "jobs" => [sandbox, finalizer]}
+
+      assert {:infrastructure, %{diagnostic: "interrupted_runner"}} =
+               StagingFailure.classify_jobs(run, jobs)
+
+      # Losing a runner during candidate execution can be candidate-caused.
+      # Preserve the existing isolation path for that distinct case.
+      executing = %{"name" => build, "status" => "in_progress", "conclusion" => nil}
+      building = %{sandbox | "steps" => [executing]}
+
+      assert {:conclusive, %{diagnostic: "unknown_terminal_failure_bisect"}} =
+               StagingFailure.classify_jobs(run, %{jobs | "jobs" => [building, finalizer]})
+
+      # An actual candidate failure remains conclusive even if the runner also
+      # disappears before finishing cleanup or reporting.
+      failed = %{"name" => build, "status" => "completed", "conclusion" => "failure"}
+      sandbox = %{sandbox | "steps" => [failed | sandbox["steps"]]}
+
+      assert {:conclusive, _} =
+               StagingFailure.classify_jobs(run, %{jobs | "jobs" => [sandbox, finalizer]})
+    end
+  end
+
   test "explicit quota failure after green audits is infrastructure, not a source bisection" do
     run = %{"id" => 123, "run_attempt" => 2, "conclusion" => "failure"}
 
