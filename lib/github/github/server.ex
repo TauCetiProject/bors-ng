@@ -58,8 +58,6 @@ defmodule BorsNG.GitHub.Server do
              :get_pr,
              :close_merged_pr,
              :cleanup_policy,
-             :batch_read,
-             :public_user,
              :cancellation_lookup,
              :cancel_candidate_run
            ] do
@@ -226,6 +224,19 @@ defmodule BorsNG.GitHub.Server do
     end
   end
 
+  def do_handle_call(:get_pr_identity, {_, repo_id} = conn, {number}) do
+    case get!(conn, "pulls/#{number}") do
+      %{body: raw, status: 200} ->
+        case Jason.decode(raw) do
+          {:ok, json} -> GitHub.BatchRead.decode_rest(json, repo_id, number)
+          _ -> {:error, :identity_response_invalid}
+        end
+
+      %{status: status} ->
+        {:error, :get_pr, status, number}
+    end
+  end
+
   def do_handle_call(:update_pr_base, repo_conn, pr) do
     repo_conn
     |> patch!(
@@ -259,13 +270,16 @@ defmodule BorsNG.GitHub.Server do
 
     case Tesla.post(tesla_client("token #{token}"), "/graphql", Jason.encode!(request)) do
       {:ok, %{status: 200, body: body}} ->
-        GitHub.BatchRead.decode(Jason.decode!(body), repo_id, numbers, mode)
+        case Jason.decode(body) do
+          {:ok, response} -> GitHub.BatchRead.decode(response, repo_id, numbers, mode)
+          {:error, _} -> {:error, :batch_response_invalid}
+        end
 
       {:ok, %{status: status}} ->
         {:error, :batch_read, status}
 
-      _ ->
-        {:error, :batch_read_unavailable}
+      {:error, reason} ->
+        {:error, :batch_transport, reason}
     end
   end
 
@@ -1191,8 +1205,8 @@ defmodule BorsNG.GitHub.Server do
       %{status: 404} ->
         {:ok, nil}
 
-      _ ->
-        {:error, :get_user_by_login}
+      %{status: status} ->
+        {:error, :get_user_by_login, status}
     end
   end
 
@@ -1491,12 +1505,11 @@ defmodule BorsNG.GitHub.Server do
           [next] -> get_pr_commits_(token, next.url, append ++ commits)
         end
 
-      {:error, %{status: status}} ->
+      {:ok, %{status: status}} ->
         {:error, :get_pr_commits, status, url}
 
-      error ->
-        IO.inspect(error)
-        {:error, :get_pr_commits}
+      {:error, reason} ->
+        {:error, :get_pr_commits, reason}
     end
   end
 
@@ -1804,8 +1817,8 @@ defmodule BorsNG.GitHub.Server do
   """
   @spec use_token!(ttoken, ttokenreg, (ttoken -> term)) ::
           {:reply, term, ttokenreg}
-  def use_token!({:installation, installation_xref} = token, state, fun) do
-    {token, state} = raw_token!(token, state)
+  def use_token!({:installation, installation_xref} = installation, state, fun) do
+    {token, state} = raw_token!(installation, state)
     result = fun.(token)
 
     case result do
@@ -1816,10 +1829,16 @@ defmodule BorsNG.GitHub.Server do
         {:reply, result, state}
 
       _ ->
-        state = Map.delete(state, installation_xref)
-        {token, state} = raw_token!(token, state)
-        result = fun.(token)
-        {:reply, result, state}
+        unauthorized = match?({:error, _, 401}, result) or match?({:error, _, 401, _}, result)
+
+        if Process.get(:github_read_only, false) and not unauthorized do
+          {:reply, result, state}
+        else
+          state = Map.delete(state, installation_xref)
+          {token, state} = raw_token!(installation, state)
+          result = fun.(token)
+          {:reply, result, state}
+        end
     end
   end
 
@@ -1872,7 +1891,7 @@ defmodule BorsNG.GitHub.Server do
     middleware =
       if deadline,
         do: middleware,
-        else: middleware ++ [{Tesla.Middleware.Retry, delay: 100, max_retries: 5}]
+        else: middleware ++ [{Tesla.Middleware.Retry, read_retry_options()}]
 
     middleware =
       if Confex.get_env(:bors, :log_outgoing, false) do
@@ -1909,6 +1928,23 @@ defmodule BorsNG.GitHub.Server do
       middleware,
       {Tesla.Adapter.Hackney, params}
     )
+  end
+
+  defp read_retry_options do
+    if Process.get(:github_read_only, false) do
+      [
+        delay: 100,
+        max_retries: 5,
+        use_retry_after_header: true,
+        should_retry: fn
+          {:error, _} -> true
+          {:ok, %{status: status}} -> status in [408, 429] or status >= 500
+          _ -> false
+        end
+      ]
+    else
+      [delay: 100, max_retries: 5]
+    end
   end
 
   defp cleanup_policy_file(conn, commit, path) do

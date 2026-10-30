@@ -68,6 +68,7 @@ defmodule BorsNG.Worker.LocalGitIntegrationTest do
         pulls: %{
           1 => %GitHub.Pr{
             number: 1,
+            base_repo_id: 14,
             title: "Title",
             body: "Body",
             state: :open,
@@ -741,6 +742,8 @@ defmodule BorsNG.Worker.LocalGitIntegrationTest do
 
   for {profile, email, name} <- [
         {nil, "6+author@users.noreply.github.com", "author"},
+        {:error, "6+author@users.noreply.github.com", "author"},
+        {{:error, :read_transport, :timeout}, "6+author@users.noreply.github.com", "author"},
         {%GitHub.FullUser{id: 6, login: "author", email: nil, name: nil},
          "6+author@users.noreply.github.com", "author"},
         {%GitHub.FullUser{
@@ -752,7 +755,7 @@ defmodule BorsNG.Worker.LocalGitIntegrationTest do
         {%GitHub.FullUser{id: 6, login: "author", email: "public@example.invalid", name: nil},
          "public@example.invalid", "author"}
       ] do
-    test "async batched metadata preserves REST attribution (email=#{email}, name=#{name}, missing=#{is_nil(profile)})",
+    test "async batched metadata preserves REST attribution (email=#{email}, name=#{name}, profile=#{inspect(profile)})",
          ctx do
       :sys.suspend(BorsNG.Worker.Orchestration.Dispatcher)
       System.put_env("BORS_ASYNC_ORCHESTRATION", "true")
@@ -863,7 +866,7 @@ defmodule BorsNG.Worker.LocalGitIntegrationTest do
     end
   end
 
-  test "unavailable batched metadata stops construction without a dispatch or proof failure",
+  test "unavailable batched metadata falls back to REST and dispatches",
        ctx do
     :sys.suspend(BorsNG.Worker.Orchestration.Dispatcher)
     System.put_env("BORS_ASYNC_ORCHESTRATION", "true")
@@ -880,11 +883,65 @@ defmodule BorsNG.Worker.LocalGitIntegrationTest do
     try do
       Batcher.handle_info({:poll, :once}, ctx.project.id)
       batch = Repo.get!(Batch, ctx.batch.id)
-      assert batch.state == :waiting
-      assert batch.recovery_after >= BorsNG.Worker.Orchestration.Outbox.now() + 290
-      assert Enum.any?(events(batch), &(&1.kind == "construction_stopped"))
-      refute Enum.any?(events(batch), &(&1.kind in ["constructed", "failure_classified"]))
-      refute BorsNG.Worker.Orchestration.Outbox.pending?(ctx.project.id, "dispatch:#{batch.id}")
+      assert batch.state == :running
+      assert Enum.any?(events(batch), &(&1.kind == "constructed"))
+      refute Enum.any?(events(batch), &(&1.kind == "failure_classified"))
+      assert BorsNG.Worker.Orchestration.Outbox.pending?(ctx.project.id, "dispatch:#{batch.id}")
+    after
+      Process.delete(:orchestration_executor)
+      System.delete_env("BORS_ASYNC_ORCHESTRATION")
+      :sys.resume(BorsNG.Worker.Orchestration.Dispatcher)
+    end
+  end
+
+  test "unavailable REST metadata journals the affected PR and keeps its approval", ctx do
+    :sys.suspend(BorsNG.Worker.Orchestration.Dispatcher)
+    System.put_env("BORS_ASYNC_ORCHESTRATION", "true")
+    Process.put(:orchestration_executor, true)
+    mock = GitHub.ServerMock.get_state()
+    mock = put_in(mock, [@conn, :pr_commits], %{})
+    GitHub.ServerMock.put_state(mock)
+
+    try do
+      Batcher.handle_info({:poll, :once}, ctx.project.id)
+      assert Repo.get!(Batch, ctx.batch.id).state == :waiting
+      error = Enum.find(events(ctx.batch), &(&1.kind == "local_error"))
+      assert error.details["error"]["pr"] == 1
+      assert error.details["error"]["cause"] =~ "get_pr_commits"
+      assert Repo.get!(Patch, ctx.patch.id).manual_approval == ctx.patch.manual_approval
+    after
+      Process.delete(:orchestration_executor)
+      System.delete_env("BORS_ASYNC_ORCHESTRATION")
+      :sys.resume(BorsNG.Worker.Orchestration.Dispatcher)
+    end
+  end
+
+  test "unavailable required identity retains approvals and journals the specific cause", ctx do
+    :sys.suspend(BorsNG.Worker.Orchestration.Dispatcher)
+    System.put_env("BORS_ASYNC_ORCHESTRATION", "true")
+    Process.put(:orchestration_executor, true)
+    mock = GitHub.ServerMock.get_state()
+
+    GitHub.ServerMock.put_state(
+      Map.merge(mock, %{
+        batch_read_error: {:identity, {:error, :batch_read, 502}},
+        identity_read_error: {:error, :get_pr, 502, 1}
+      })
+    )
+
+    try do
+      Batcher.handle_info({:poll, :once}, ctx.project.id)
+      assert Repo.get!(Batch, ctx.batch.id).state == :waiting
+      error = Enum.find(events(ctx.batch), &(&1.kind == "local_error"))
+      assert error.details["error"]["pr"] == 1
+      assert error.details["error"]["cause"] =~ "502"
+      refute Enum.any?(events(ctx.batch), &(&1.kind == "failure_classified"))
+      assert Repo.get!(Patch, ctx.patch.id).manual_approval == ctx.patch.manual_approval
+
+      refute BorsNG.Worker.Orchestration.Outbox.pending?(
+               ctx.project.id,
+               "dispatch:#{ctx.batch.id}"
+             )
     after
       Process.delete(:orchestration_executor)
       System.delete_env("BORS_ASYNC_ORCHESTRATION")

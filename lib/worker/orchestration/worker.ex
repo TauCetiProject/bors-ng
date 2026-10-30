@@ -108,13 +108,29 @@ defmodule BorsNG.Worker.Orchestration.Worker do
       rescue
         error -> {:error, error.__struct__}
       catch
-        :throw, {:cancellation_retry, reason} -> {:error, reason}
-        :throw, :withdrawal_pending -> {:defer, :withdrawal_pending}
-        :throw, {:notification_terminal, status} -> {:terminal, {:http_status, status}}
-        :throw, {:cleanup_terminal, reason} -> {:terminal, reason}
-        :throw, :comment_lookup_truncated -> {:terminal, :comment_lookup_truncated}
-        kind, reason when is_atom(reason) -> {:error, {kind, reason}}
-        kind, _reason -> {:error, kind}
+        :throw, {:cancellation_retry, reason} ->
+          {:error, reason}
+
+        :throw, :withdrawal_pending ->
+          {:defer, :withdrawal_pending}
+
+        :throw, {:live_members_unavailable, reason} ->
+          {:defer, {:live_members_unavailable, reason}}
+
+        :throw, {:notification_terminal, status} ->
+          {:terminal, {:http_status, status}}
+
+        :throw, {:cleanup_terminal, reason} ->
+          {:terminal, reason}
+
+        :throw, :comment_lookup_truncated ->
+          {:terminal, :comment_lookup_truncated}
+
+        kind, reason when is_atom(reason) ->
+          {:error, {kind, reason}}
+
+        kind, _reason ->
+          {:error, kind}
       end
 
     service_ms = System.monotonic_time(:millisecond) - started

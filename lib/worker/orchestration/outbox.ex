@@ -486,7 +486,12 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
           available_at: max(now() + 1, pending_at || 0),
           attempts: max(job.attempts - 1, 0),
           completed_at_ms: System.system_time(:millisecond),
-          last_error: "deferred:#{reason}"
+          last_error:
+            "deferred:" <>
+              if(is_atom(reason) or is_binary(reason),
+                do: to_string(reason),
+                else: inspect(reason)
+              )
         ]
       )
     end)

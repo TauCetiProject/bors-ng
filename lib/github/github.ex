@@ -513,27 +513,18 @@ defmodule BorsNG.GitHub do
     call_with_retry(:post_commit_status, repo_conn, {sha, status, msg, url}, 500, 4_000)
   end
 
-  def batch_read_bounded(conn, repository, numbers, mode, deadline),
-    do: bounded_read_call(:batch_read, conn, {repository, numbers, mode}, deadline)
+  def batch_read(conn, repository, numbers, mode),
+    do: BorsNG.GitHub.ReadOnly.request(:batch_read, conn, {repository, numbers, mode})
 
-  def public_user_bounded(conn, login, deadline),
-    do: bounded_read_call(:public_user, conn, {login}, deadline)
+  def public_user(conn, login), do: BorsNG.GitHub.ReadOnly.request(:public_user, conn, {login})
 
-  defp bounded_read_call(type, conn, data, deadline) do
-    remaining = deadline - System.monotonic_time(:millisecond)
+  def read_pr(conn, number), do: BorsNG.GitHub.ReadOnly.request(:get_pr, conn, {number})
 
-    if remaining > 0 do
-      GenServer.call(
-        BorsNG.GitHub.ReadOnly,
-        {:advisory, type, conn, data, deadline},
-        remaining + 2_000
-      )
-    else
-      {:error, :batch_read_deadline}
-    end
-  catch
-    :exit, _ -> {:error, :batch_read_unavailable}
-  end
+  def read_pr_identity(conn, number),
+    do: BorsNG.GitHub.ReadOnly.request(:get_pr_identity, conn, {number})
+
+  def read_pr_commits(conn, number),
+    do: BorsNG.GitHub.ReadOnly.request(:get_pr_commits, conn, {number})
 
   def get_pr_bounded(conn, number, deadline),
     do: bounded_cleanup_call(:get_pr, conn, {number}, deadline)

@@ -1144,6 +1144,28 @@ defmodule BorsNG.Worker.OrchestrationTest do
     assert Repo.get!(Batch, ctx.batch.id).state == :canceled
   end
 
+  test "unavailable live identity defers dispatch without consuming retries or losing the cause",
+       ctx do
+    dispatch = construct(ctx)
+    old = Application.get_env(:bors, :api_github_retry_max_elapsed_ms)
+    Application.put_env(:bors, :api_github_retry_max_elapsed_ms, 0)
+    on_exit(fn -> Application.put_env(:bors, :api_github_retry_max_elapsed_ms, old) end)
+    GitHub.ServerMock.put_state(Map.put(GitHub.ServerMock.get_state(), :get_pr_error, 1))
+
+    assert {:defer,
+            {:live_members_unavailable,
+             %{kind: "live_identity_unavailable", pr: 1, cause: "{:error, :get_pr, 502, 1}"}}} ==
+             execute(ctx.worker, dispatch)
+
+    deferred = Repo.get!(OrchestrationJob, dispatch.id)
+    assert deferred.attempts == 0
+    assert deferred.last_error =~ "502"
+    assert Repo.get!(Batch, ctx.batch.id).state == :running
+    assert get_in(GitHub.ServerMock.get_state(), [ctx.conn, :branches, "staging"]) == "old"
+    assert :ok == execute(ctx.worker, deferred)
+    assert Repo.get!(Batch, ctx.batch.id).state == :running
+  end
+
   test "stale green never promotes over current red", ctx do
     dispatch = construct(ctx)
     assert :ok == execute(ctx.worker, dispatch)
@@ -1829,6 +1851,32 @@ defmodule BorsNG.Worker.OrchestrationTest do
     assert get_in(GitHub.ServerMock.get_state(), [ctx.conn, :branches, "master"]) == batch.commit
     events = hd(CandidateJournal.diagnostics(ctx.project.id, "master", batch.id)).events
     assert length(Enum.filter(events, &(&1.kind == "promoted"))) == 1
+  end
+
+  test "a failed final identity read retains green CI and replays promotion", ctx do
+    dispatch = construct(ctx)
+    assert :ok == execute(ctx.worker, dispatch)
+    batch = Repo.get!(Batch, ctx.batch.id)
+    old = Application.get_env(:bors, :api_github_retry_max_elapsed_ms)
+    Application.put_env(:bors, :api_github_retry_max_elapsed_ms, 0)
+    on_exit(fn -> Application.put_env(:bors, :api_github_retry_max_elapsed_ms, old) end)
+
+    GitHub.ServerMock.put_state(
+      GitHub.ServerMock.get_state()
+      |> put_in([ctx.conn, :statuses, batch.commit], %{"ci" => :ok, "cd" => :ok})
+      |> Map.put(:get_pr_error, 2)
+    )
+
+    job = Outbox.enqueue(ctx.project.id, "cast", {:status, {batch.commit, "ci", :ok, "url"}})
+    assert {:defer, {:live_members_unavailable, %{pr: 1}}} = execute(ctx.worker, job)
+    assert Repo.get!(Batch, batch.id).state == :running
+    assert Enum.all?(Repo.all(Status.all_for_batch(batch.id)), &(&1.state == :ok))
+    assert get_in(GitHub.ServerMock.get_state(), [ctx.conn, :branches, "master"]) == "ini"
+    assert Repo.get!(OrchestrationJob, job.id).attempts == 0
+
+    assert :ok == execute(ctx.worker, job)
+    assert Repo.get!(Batch, batch.id).state == :ok
+    assert get_in(GitHub.ServerMock.get_state(), [ctx.conn, :branches, "master"]) == batch.commit
   end
 
   test "promotion accepted before crash is recovered without reviving the batch", ctx do

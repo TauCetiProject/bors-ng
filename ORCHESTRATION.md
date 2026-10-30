@@ -382,26 +382,29 @@ rollback to code without these handlers must drain `post_merge_cleanup`,
 as well as earlier versioned wakeups, projections and service continuations.
 Do not delete queued work or clear keys to manufacture drainage.
 
-## Bounded live read batches
+## Recoverable live read batches
 
-TauCeti's public-GitHub async lane groups metadata and live PR identities in serial GraphQL
-requests of at most20PRs. The whole group shares an eight-second deadline through
-an isolated single API client, without hidden HTTP retries or a mutable read
-cache. Queries validate the numeric repository identity and every requested PR;
-partial GraphQL errors, missing identities and malformed fields fail closed.
-A second live identity read still follows metadata collection. Dispatch and
-promotion retain their separate final live-head/open/draft/base checks and all
-existing generation, approval and pending-command fences.
+TauCeti's public-GitHub async lane groups metadata and live PR identities into
+GraphQL requests of at most 20 PRs. Reads run independently in monitored tasks,
+using the normal HTTP transport timeout, retries and installation-token refresh.
+There is no deadline shared by the entire collection or by unrelated callers.
+The coordinator caches tokens, never PR identity or merge authority.
 
-Complete metadata includes current title/body, public author identity and every
-commit author. Author profile attribution uses the existing REST endpoint once
-per distinct author within the same eight-second metadata deadline; public
-profile reuse ends with the operation and never carries approval authority.
-The REST fallback retains every page in chronological order. Histories beyond100commits, pagination, unsupported author types
-or inconsistent head coverage retain the complete REST path. This conservative
-fallback can still exceed the service target; it never silently truncates
-attribution. Native and other-repository paths retain their serial reads.
-No status verdict, approval decision or command is combined by these queries.
+Healthy aliases and completed chunks survive a partial response. Missing or
+malformed aliases use fresh REST reads; a failed GraphQL request falls back for
+that chunk only. Metadata recovery retains every commit page in chronological
+order, including histories beyond 100 commits and unsupported GraphQL author
+types. Author profiles are optional enrichment: a failed lookup uses the PR's
+known login and numeric ID for GitHub's canonical noreply attribution. A public
+profile is reused once per distinct author within an operation.
+
+Required identity evidence still validates repository, PR number, full head SHA,
+base, open/closed state and draft flag. Failure of both read paths defers the
+operation with the affected PR and underlying error recorded. Dispatch and
+promotion retain separate fresh identity reads and all generation, approval,
+pending-command and withdrawal fences. No successful earlier read authorizes a
+later operation, and no status verdict, approval decision or command is combined
+by these queries.
 
 The dispatcher skips additional rows for a repository already active in the same
 lane during its current launch turn. A single due page can contain32rows from
