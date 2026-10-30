@@ -15,24 +15,34 @@ defmodule BorsNG.GitHub.BatchRead do
     |> Enum.uniq()
     |> Enum.chunk_every(20)
     |> Enum.reduce_while({:ok, %{}}, fn chunk, {:ok, acc} ->
-      {result, missing} =
-        case GitHub.batch_read(conn, repository, chunk, mode) do
-          {:ok, result} ->
-            {result, Enum.filter(chunk, &(Map.get(result, &1, :rest) == :rest))}
-
-          error ->
-            Logger.warning(
-              "batch read fallback mode=#{mode} prs=#{inspect(chunk, charlists: :as_lists)} reason=#{inspect(error)}"
-            )
-
-            {%{}, chunk}
-        end
-
-      case recover_chunk(conn, missing, mode) do
-        {:ok, recovered} -> {:cont, {:ok, acc |> Map.merge(result) |> Map.merge(recovered)}}
+      case fetch_chunk(conn, repository, chunk, mode) do
+        {:ok, result} -> {:cont, {:ok, Map.merge(acc, result)}}
         error -> {:halt, error}
       end
     end)
+  end
+
+  defp fetch_chunk(conn, repository, chunk, mode) do
+    case GitHub.batch_read(conn, repository, chunk, mode) do
+      {:ok, result} ->
+        missing = Enum.filter(chunk, &(Map.get(result, &1, :rest) == :rest))
+
+        with {:ok, recovered} <- recover_chunk(conn, missing, mode),
+             do: {:ok, Map.merge(result, recovered)}
+
+      {:error, reason} when reason == :github_rate_limited ->
+        {:error, %{kind: "github_rate_limited"}}
+
+      {:error, :batch_read, 429} ->
+        {:error, %{kind: "github_rate_limited"}}
+
+      error ->
+        Logger.warning(
+          "batch read fallback mode=#{mode} prs=#{inspect(chunk, charlists: :as_lists)} reason=#{inspect(error)}"
+        )
+
+        recover_chunk(conn, chunk, mode)
+    end
   end
 
   # Metadata can use the full REST transcription path for just the affected PRs. Identity
@@ -55,7 +65,13 @@ defmodule BorsNG.GitHub.BatchRead do
   end
 
   def identity_error(number, cause),
-    do: {:error, %{kind: "live_identity_unavailable", pr: number, cause: inspect(cause)}}
+    do:
+      {:error,
+       %{
+         kind: "live_identity_unavailable",
+         pr: number,
+         cause: inspect(cause, limit: 12, printable_limit: 512)
+       }}
 
   defp valid_identity?(pr, {_token, repo_id}, number) do
     pr.number == number and pr.base_repo_id == repo_id and
@@ -121,6 +137,9 @@ defmodule BorsNG.GitHub.BatchRead do
   def decode(%{"data" => %{"repository" => repo}} = response, repo_id, numbers, mode)
       when is_map(repo) do
     cond do
+      rate_limited?(response) ->
+        {:error, :github_rate_limited}
+
       repo["databaseId"] != repo_id ->
         {:error, :batch_repository_mismatch}
 
@@ -146,7 +165,19 @@ defmodule BorsNG.GitHub.BatchRead do
     _ -> {:error, :batch_response_invalid}
   end
 
-  def decode(_, _, _, _), do: {:error, :batch_response_invalid}
+  def decode(response, _, _, _) do
+    if is_map(response) and rate_limited?(response),
+      do: {:error, :github_rate_limited},
+      else: {:error, :batch_response_invalid}
+  end
+
+  defp rate_limited?(response) do
+    Enum.any?(Map.get(response, "errors") || [], fn error ->
+      error["type"] == "RATE_LIMITED" or get_in(error, ["extensions", "code"]) == "RATE_LIMITED"
+    end)
+  rescue
+    _ -> false
+  end
 
   # A bad alias does not discard its healthy neighbours. The caller must replace every
   # :rest marker with a complete fresh REST read before using identity evidence.

@@ -743,6 +743,8 @@ defmodule BorsNG.Worker.LocalGitIntegrationTest do
   for {profile, email, name} <- [
         {nil, "6+author@users.noreply.github.com", "author"},
         {:error, "6+author@users.noreply.github.com", "author"},
+        {%GitHub.FullUser{id: 99, login: "author", email: "other@example.invalid", name: "Other"},
+         "6+author@users.noreply.github.com", "author"},
         {{:error, :read_transport, :timeout}, "6+author@users.noreply.github.com", "author"},
         {%GitHub.FullUser{id: 6, login: "author", email: nil, name: nil},
          "6+author@users.noreply.github.com", "author"},

@@ -1166,6 +1166,29 @@ defmodule BorsNG.Worker.OrchestrationTest do
     assert Repo.get!(Batch, ctx.batch.id).state == :running
   end
 
+  test "read deferrals back off durably and long diagnostics fit the database", ctx do
+    dispatch = construct(ctx)
+
+    reason =
+      {:live_members_unavailable, %{pr: 1, cause: String.duplicate("long TLS error ", 300)}}
+
+    for count <- 1..8 do
+      Repo.get!(OrchestrationJob, dispatch.id)
+      |> Ecto.Changeset.change(available_at: 0)
+      |> Repo.update!()
+
+      {:ok, claimed} = Outbox.claim(dispatch.id)
+      before = Outbox.now()
+      assert {1, nil} = Outbox.defer(claimed, reason)
+      deferred = Repo.get!(OrchestrationJob, dispatch.id)
+      assert deferred.available_at >= before + min(30 * Integer.pow(2, count - 1), 3600)
+      assert deferred.attempt_timing["read_deferrals"] == count
+      assert deferred.attempts == 0
+      assert String.length(deferred.last_error) <= 255
+      assert deferred.last_error =~ "deferred:"
+    end
+  end
+
   test "stale green never promotes over current red", ctx do
     dispatch = construct(ctx)
     assert :ok == execute(ctx.worker, dispatch)

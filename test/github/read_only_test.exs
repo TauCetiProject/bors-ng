@@ -256,6 +256,36 @@ defmodule BorsNG.GitHub.ReadOnlyTest do
     assert {:error, :get_pr_commits, 403, _url} = GitHub.read_pr_commits(@conn, 1)
   end
 
+  test "GraphQL rate limiting defers without REST fan-out or token refresh" do
+    parent = self()
+
+    serve(fn conn, _ ->
+      send(parent, {:limited_path, conn.request_path})
+      {200, %{"data" => nil, "errors" => [%{"type" => "RATE_LIMITED", "message" => "limit"}]}}
+    end)
+
+    assert {:error, %{kind: "github_rate_limited"}} =
+             BatchRead.fetch(@conn, "owner/repo", [1, 2], :identity)
+
+    assert_receive {:limited_path, "/graphql"}
+    refute_receive {:limited_path, _}
+  end
+
+  test "unexpected messages are harmless and status reports redact cached tokens" do
+    state = :sys.get_state(ReadOnly)
+    on_exit(fn -> :sys.replace_state(ReadOnly, fn _ -> state end) end)
+
+    :sys.replace_state(
+      ReadOnly,
+      &%{&1 | tokens: %{91 => {"secret-test-token", Joken.current_time()}}}
+    )
+
+    send(ReadOnly, :unexpected)
+    send(ReadOnly, {make_ref(), {:forged, %{91 => {"forged", Joken.current_time()}}}})
+    refute inspect(:sys.get_status(ReadOnly)) =~ "secret-test-token"
+    assert Process.alive?(Process.whereis(ReadOnly))
+  end
+
   test "a killed read task returns an error and the coordinator stays available" do
     parent = self()
 

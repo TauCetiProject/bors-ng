@@ -400,7 +400,9 @@ profile is reused once per distinct author within an operation.
 
 Required identity evidence still validates repository, PR number, full head SHA,
 base, open/closed state and draft flag. Failure of both read paths defers the
-operation with the affected PR and underlying error recorded. Dispatch and
+operation with the affected PR and underlying error recorded. Repeated deferrals
+back off from 30 seconds to one hour without dropping approvals; rate-limited
+GraphQL responses defer without fanning out into REST requests. Dispatch and
 promotion retain separate fresh identity reads and all generation, approval,
 pending-command and withdrawal fences. No successful earlier read authorizes a
 later operation, and no status verdict, approval decision or command is combined

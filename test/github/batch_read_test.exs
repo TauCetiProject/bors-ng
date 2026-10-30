@@ -116,6 +116,14 @@ defmodule BorsNG.GitHub.BatchReadTest do
     assert {:error, :identity_response_invalid} = BatchRead.decode_rest(raw, 14, 2)
   end
 
+  test "GraphQL rate-limit codes survive partial and absent data" do
+    for data <- [nil, %{"repository" => %{"databaseId" => 14, "p1" => raw()}}],
+        error <- [%{"type" => "RATE_LIMITED"}, %{"extensions" => %{"code" => "RATE_LIMITED"}}] do
+      assert {:error, :github_rate_limited} =
+               BatchRead.decode(%{"data" => data, "errors" => [error]}, 14, [1], :identity)
+    end
+  end
+
   test "complete metadata retains exact author and full commit attribution" do
     assert {:ok,
             %{

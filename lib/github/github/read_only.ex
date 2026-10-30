@@ -49,7 +49,8 @@ defmodule BorsNG.GitHub.ReadOnly do
     {:noreply, %{state | pending: pending, callers: Map.put(state.callers, caller, task.ref)}}
   end
 
-  def handle_info({ref, {result, tokens}}, state) do
+  def handle_info({ref, {result, tokens}}, %{pending: active} = state)
+      when is_reference(ref) and is_map(tokens) and is_map_key(active, ref) do
     Process.demonitor(ref, [:flush])
     {entry, pending} = Map.pop(state.pending, ref)
 
@@ -93,5 +94,14 @@ defmodule BorsNG.GitHub.ReadOnly do
         GenServer.reply(entry.from, {:error, :read_worker_unavailable})
         {:noreply, %{state | pending: pending, callers: Map.delete(state.callers, entry.caller)}}
     end
+  end
+
+  def handle_info(_, state), do: {:noreply, state}
+
+  def format_status(status) do
+    status
+    |> Map.put(:state, %{status.state | tokens: :redacted})
+    |> Map.put(:message, :redacted)
+    |> Map.put(:log, [])
   end
 end

@@ -66,7 +66,10 @@ profiles are optional enrichment, with the known PR author ID and login supplyin
 a canonical GitHub noreply identity if enrichment fails.
 
 An unavailable required live identity defers dispatch or promotion with the PR
-number and underlying cause recorded. It does not spend the outbox retry count,
+number and a bounded diagnostic recorded. Repeated read deferrals back off from
+30 seconds to one hour and remain visible in the job's timing history and logs.
+An unavailable response (including 404) does not establish that a PR was closed or
+its approval withdrawn. Deferral does not spend the outbox retry count,
 fail proof CI, or discard approvals. Every operation still obtains its own fresh
 identity evidence; successful reads do not become cached merge authority. See
 [ORCHESTRATION.md](ORCHESTRATION.md#recoverable-live-read-batches).

@@ -3353,7 +3353,10 @@ defmodule BorsNG.Worker.Batcher do
       {:ok, nil} ->
         {:ok, "#{pr.user.id}+#{pr.user.login}@users.noreply.github.com", pr.user.login}
 
-      {:ok, %GitHub.FullUser{} = user} ->
+      {:ok, %GitHub.FullUser{} = user}
+      when user.id == pr.user.id and user.login == pr.user.login and
+             (is_nil(user.email) or is_binary(user.email)) and
+             (is_nil(user.name) or is_binary(user.name)) ->
         user_email =
           if user.email != nil do
             user.email
