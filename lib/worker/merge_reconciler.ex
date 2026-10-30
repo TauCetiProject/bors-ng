@@ -61,14 +61,17 @@ defmodule BorsNG.Worker.MergeReconciler do
     BorsNG.Worker.SourceCompatibility.wake(project)
     send(Batcher.Registry.get(project.id), :recover_queue)
     conn = Project.installation_connection(project.repo_xref, Repo)
-    {bump, state} = offer_bump(project, state)
     deadline = System.monotonic_time(:millisecond) + 40_000
+    {bump, state} = offer_bump(project, state)
+    offer_known_candidates(project, bump)
 
     with {:ok, before_handoff} <-
            bounded_read(deadline, 15_000, &GitHub.merge_backend_snapshot(conn, &1)),
          released <- BorsNG.Worker.QueueHandoff.trim(conn, before_handoff, deadline),
          {:ok, snapshot} <- handoff_snapshot(conn, before_handoff, deadline),
          {:ok, candidates, state} <- candidate_page(conn, state, deadline) do
+      offer_missing_candidates(project, candidates)
+
       batches =
         Repo.all(
           from(b in Batch.all_for_project(project.id, :incomplete),
@@ -80,28 +83,6 @@ defmodule BorsNG.Worker.MergeReconciler do
       # Reuse this heartbeat to ask the serialized batcher to reconsider its queue.
       # The normal start guard still rechecks the backend and every member.
       wake_idle_queue(Batcher.Registry.get(project.id), snapshot, batches)
-
-      # Bound recovery reads; webhooks handle changes immediately. Rotate across
-      # all open candidates so an absent/stale ready label cannot strand a check.
-      state =
-        if candidates != [] do
-          ordered = Enum.sort_by(candidates, & &1.pr)
-          cursor = Map.get(state, :eligibility_cursor, 0)
-          {older, newer} = Enum.split_while(ordered, &(&1.pr <= cursor))
-
-          regular =
-            Enum.reject(newer ++ older, &(bump && &1.pr == bump.pr))
-            |> Enum.take(if(bump, do: 3, else: 4))
-
-          Enum.each(regular, &Batcher.eligibility(Batcher.Registry.get(project.id), &1.pr))
-          # The cursor advances only when work is actually offered, so missed
-          # cron ticks do not systematically skip part of the candidate set.
-          if regular == [],
-            do: state,
-            else: Map.put(state, :eligibility_cursor, List.last(regular).pr)
-        else
-          state
-        end
 
       ready = Enum.filter(candidates, & &1.ready)
 
@@ -231,6 +212,77 @@ defmodule BorsNG.Worker.MergeReconciler do
     end
   end
 
+  # Discovery can restart or fail independently of recovery. Select from the
+  # existing patch inventory so an incomplete GitHub page never rewinds fairness.
+  # Offering a recheck grants no approval and needs no backend observation.
+  defp offer_known_candidates(project, bump) do
+    cursor = project.eligibility_cursor || 0
+    limit = if bump, do: 3, else: 4
+    excluded = if bump, do: bump.pr, else: 0
+
+    query =
+      from(p in Patch,
+        where: p.project_id == ^project.id and p.open and p.pr_xref != ^excluded,
+        order_by: p.pr_xref,
+        select: p.pr_xref
+      )
+
+    newer = Repo.all(from(p in query, where: p.pr_xref > ^cursor, limit: ^limit))
+    remaining = limit - length(newer)
+
+    older =
+      if remaining > 0,
+        do: Repo.all(from(p in query, where: p.pr_xref <= ^cursor, limit: ^remaining)),
+        else: []
+
+    offered = Enum.filter(newer ++ older, &offer_eligibility(project.id, &1))
+
+    case List.last(offered) do
+      nil ->
+        :ok
+
+      last ->
+        # A failed checkpoint only repeats reads; it cannot suppress ordinary
+        # admission. The next heartbeat rereads the durable position.
+        checkpoint(project.id, last)
+    end
+  rescue
+    error ->
+      Logger.warning("eligibility scan deferred #{inspect(error.__struct__)}")
+      :ok
+  end
+
+  defp checkpoint(project_id, cursor) do
+    Repo.update_all(from(p in Project, where: p.id == ^project_id),
+      set: [eligibility_cursor: cursor]
+    )
+  rescue
+    error -> Logger.warning("eligibility checkpoint deferred #{inspect(error.__struct__)}")
+  end
+
+  # An opened/reopened webhook can be missed. Discovery repairs that inventory
+  # gap through the same exact-head observer; known PRs use the durable scan.
+  # This bounded catch-up is normally empty and grants no admission itself.
+  defp offer_missing_candidates(project, candidates) do
+    known =
+      Repo.all(from(p in Patch, where: p.project_id == ^project.id and p.open, select: p.pr_xref))
+      |> MapSet.new()
+
+    candidates
+    |> Enum.reject(&MapSet.member?(known, &1.pr))
+    |> Enum.take(4)
+    |> Enum.each(&offer_eligibility(project.id, &1.pr))
+  end
+
+  defp offer_eligibility(project_id, pr) do
+    Batcher.eligibility(Batcher.Registry.get(project_id), pr)
+    true
+  catch
+    :exit, _ ->
+      Logger.warning("eligibility wake deferred pr=#{pr}")
+      false
+  end
+
   # Offer the known dependency bump even when GitHub candidate discovery fails.
   # One slot per five minutes, inside the existing four-candidate heartbeat budget.
   @doc false
@@ -255,8 +307,9 @@ defmodule BorsNG.Worker.MergeReconciler do
       bump = Repo.one(from(p in query, where: p.id > ^cursor)) || Repo.one(query)
 
       if bump do
-        Batcher.eligibility(Batcher.Registry.get(project.id), bump.pr)
-        {bump, Map.merge(state, %{last_bump_offer: now, bump_cursor: bump.id})}
+        if offer_eligibility(project.id, bump.pr),
+          do: {bump, Map.merge(state, %{last_bump_offer: now, bump_cursor: bump.id})},
+          else: {nil, state}
       else
         {nil, state}
       end

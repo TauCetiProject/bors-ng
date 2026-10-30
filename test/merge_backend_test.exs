@@ -1,6 +1,6 @@
 defmodule BorsNG.MergeBackendTest do
   use BorsNG.Worker.TestCase
-  alias BorsNG.Database.{Batch, Installation, Project, Repo}
+  alias BorsNG.Database.{Batch, Installation, Patch, Project, Repo}
   alias BorsNG.{GitHub, MergeBackend}
   alias BorsNG.Worker.Batcher
 
@@ -168,11 +168,12 @@ defmodule BorsNG.MergeBackendTest do
   test "heartbeat reads one candidate page and exposes incomplete scan coverage" do
     installation = Repo.insert!(%Installation{installation_xref: 91})
 
-    Repo.insert!(%Project{
-      name: "TauCetiProject/TauCeti",
-      repo_xref: 14,
-      installation_id: installation.id
-    })
+    project =
+      Repo.insert!(%Project{
+        name: "TauCetiProject/TauCeti",
+        repo_xref: 14,
+        installation_id: installation.id
+      })
 
     conn = {{:installation, 91}, 14}
     candidate = fn pr -> %{pr: pr, head_sha: "head", ready: false, queued: false} end
@@ -180,6 +181,17 @@ defmodule BorsNG.MergeBackendTest do
     GitHub.ServerMock.put_state(%{
       conn => %{
         backend_snapshot: {:ok, %{backend: "bors", updated_at: nil, github_count: 0}},
+        pulls:
+          Map.new(1..2, fn pr ->
+            {pr,
+             %GitHub.Pr{
+               number: pr,
+               state: :open,
+               base_ref: "main",
+               head_sha: "head",
+               user: %GitHub.User{id: 6, login: "author", avatar_url: "avatar"}
+             }}
+          end),
         merge_candidate_pages: %{
           nil => {:ok, %{candidates: [candidate.(1)], next_cursor: "page2"}},
           "page2" => {:ok, %{candidates: [candidate.(2)], next_cursor: nil}}
@@ -192,6 +204,8 @@ defmodule BorsNG.MergeBackendTest do
     refute first.candidate_scan_complete
     assert is_nil(first.candidate_snapshot_at)
     assert next.candidate_cursor == "page2"
+    :sys.get_state(Batcher.Registry.get(project.id))
+    assert Repo.get_by!(Patch, project_id: project.id, pr_xref: 1).open
 
     assert {:reply, second, complete} =
              BorsNG.Worker.MergeReconciler.handle_call(:tick, nil, next)
@@ -199,7 +213,52 @@ defmodule BorsNG.MergeBackendTest do
     assert second.candidate_scan_complete
     assert is_binary(second.candidate_snapshot_at)
     assert Enum.map(complete.candidate_snapshot, & &1.pr) == [1, 2]
+    :sys.get_state(Batcher.Registry.get(project.id))
+    assert Repo.get_by!(Patch, project_id: project.id, pr_xref: 2).open
     :persistent_term.put({BorsNG.Worker.MergeReconciler, :observation}, nil)
+  end
+
+  test "recovery resumes after restart even when backend and discovery observations fail" do
+    installation = Repo.insert!(%Installation{installation_xref: 91})
+
+    project =
+      Repo.insert!(%Project{
+        name: "TauCetiProject/TauCeti",
+        repo_xref: 14,
+        installation_id: installation.id
+      })
+
+    for pr <- 1..9 do
+      Repo.insert!(%Patch{
+        project_id: project.id,
+        pr_xref: pr,
+        open: true,
+        into_branch: if(pr == 9, do: "old-base-before-missed-retarget", else: "main"),
+        commit: "head"
+      })
+    end
+
+    GitHub.ServerMock.put_state(%{
+      {{:installation, 91}, 14} => %{backend_snapshot: {:error, :unavailable}}
+    })
+
+    initial = %{last_dispatch: nil, observation: nil}
+
+    assert {:reply, nil, _first} =
+             BorsNG.Worker.MergeReconciler.handle_call(:tick, nil, initial)
+
+    assert Repo.get!(Project, project.id).eligibility_cursor == 4
+
+    # A fresh process has neither a GitHub snapshot nor an in-memory cursor.
+    assert {:reply, nil, _restarted} =
+             BorsNG.Worker.MergeReconciler.handle_call(:tick, nil, initial)
+
+    assert Repo.get!(Project, project.id).eligibility_cursor == 8
+
+    assert {:reply, nil, _wrapped} =
+             BorsNG.Worker.MergeReconciler.handle_call(:tick, nil, initial)
+
+    assert Repo.get!(Project, project.id).eligibility_cursor == 3
   end
 
   test "a superseded timeout cannot revoke a renewed approval at the same head" do
