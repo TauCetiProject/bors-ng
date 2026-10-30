@@ -1,6 +1,6 @@
 defmodule BorsNG.MergeBackendTest do
   use BorsNG.Worker.TestCase
-  alias BorsNG.Database.{Batch, Installation, Project, Repo}
+  alias BorsNG.Database.{Batch, Installation, Patch, Project, Repo}
   alias BorsNG.{GitHub, MergeBackend}
   alias BorsNG.Worker.Batcher
 
@@ -200,6 +200,49 @@ defmodule BorsNG.MergeBackendTest do
     assert is_binary(second.candidate_snapshot_at)
     assert Enum.map(complete.candidate_snapshot, & &1.pr) == [1, 2]
     :persistent_term.put({BorsNG.Worker.MergeReconciler, :observation}, nil)
+  end
+
+  test "recovery resumes after restart even when backend and discovery observations fail" do
+    installation = Repo.insert!(%Installation{installation_xref: 91})
+
+    project =
+      Repo.insert!(%Project{
+        name: "TauCetiProject/TauCeti",
+        repo_xref: 14,
+        installation_id: installation.id
+      })
+
+    for pr <- 1..9 do
+      Repo.insert!(%Patch{
+        project_id: project.id,
+        pr_xref: pr,
+        open: true,
+        into_branch: "main",
+        commit: "head"
+      })
+    end
+
+    GitHub.ServerMock.put_state(%{
+      {{:installation, 91}, 14} => %{backend_snapshot: {:error, :unavailable}}
+    })
+
+    initial = %{last_dispatch: nil, observation: nil}
+
+    assert {:reply, nil, _first} =
+             BorsNG.Worker.MergeReconciler.handle_call(:tick, nil, initial)
+
+    assert Repo.get!(Project, project.id).eligibility_cursor == 4
+
+    # A fresh process has neither a GitHub snapshot nor an in-memory cursor.
+    assert {:reply, nil, _restarted} =
+             BorsNG.Worker.MergeReconciler.handle_call(:tick, nil, initial)
+
+    assert Repo.get!(Project, project.id).eligibility_cursor == 8
+
+    assert {:reply, nil, _wrapped} =
+             BorsNG.Worker.MergeReconciler.handle_call(:tick, nil, initial)
+
+    assert Repo.get!(Project, project.id).eligibility_cursor == 3
   end
 
   test "a superseded timeout cannot revoke a renewed approval at the same head" do

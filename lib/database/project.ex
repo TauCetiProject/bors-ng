@@ -49,6 +49,7 @@ defmodule BorsNG.Database.Project do
     field(:auto_member_required_perm, ProjectPermission, default: nil)
 
     field(:source_compatibility, :map)
+    field(:eligibility_cursor, :integer, default: 0)
     timestamps()
   end
 
