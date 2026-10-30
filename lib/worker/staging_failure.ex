@@ -164,6 +164,23 @@ defmodule BorsNG.Worker.StagingFailure do
     sandbox_green =
       Enum.any?(jobs, &(&1["name"] == "sandboxed-build" and &1["conclusion"] == "success"))
 
+    # Runner loss can finish the job as failure while leaving its executing
+    # and subsequent steps unfinished. The finalizer then posts red too,
+    # without compilation having started. Retry through the existing
+    # infrastructure path; no log download or annotation parsing is needed.
+    sandbox_interrupted =
+      Enum.any?(jobs, fn job ->
+        job["name"] == "sandboxed-build" and job["conclusion"] == "failure" and
+          not Enum.any?(job["steps"] || [], fn step ->
+            step["name"] ==
+              "Build exact candidate under bwrap with workflow-pinned audits, offline" and
+              step["status"] in ["in_progress", "completed"]
+          end) and
+          Enum.any?(job["steps"] || [], fn step ->
+            is_nil(step["conclusion"]) and step["status"] in ["queued", "in_progress"]
+          end)
+      end)
+
     cond do
       not valid ->
         :unavailable
@@ -179,6 +196,9 @@ defmodule BorsNG.Worker.StagingFailure do
 
       interrupted ->
         {:infrastructure, evidence}
+
+      sandbox_interrupted and run["conclusion"] == "failure" ->
+        {:infrastructure, Map.put(evidence, :diagnostic, "interrupted_runner")}
 
       # Optional telemetry can fail under continue-on-error after the verdict.
       # A green workflow cannot establish an infrastructure cause for red scope.
