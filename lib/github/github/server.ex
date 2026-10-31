@@ -474,39 +474,15 @@ defmodule BorsNG.GitHub.Server do
       |> DateTime.truncate(:second)
       |> DateTime.to_iso8601()
 
+    # Freeze this read's upper bound so new dispatches cannot keep extending
+    # pagination. This is a snapshot boundary, not a dispatch/CI time limit.
+    until = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+
     path =
       "actions/workflows/pr-build.yml/runs?event=repository_dispatch&per_page=100&created=" <>
-        ">=" <> created
+        created <> ".." <> until
 
-    case get!(conn, path) do
-      %{status: 200, body: raw} ->
-        body = Jason.decode!(raw)
-        runs = body["workflow_runs"]
-
-        cond do
-          not is_list(runs) or not is_integer(body["total_count"]) or body["total_count"] < 0 ->
-            {:error, :dispatch_lookup_invalid}
-
-          length(runs) < 100 and body["total_count"] == length(runs) ->
-            matches =
-              Enum.filter(
-                runs,
-                &(&1["display_title"] == expected and &1["event"] == "repository_dispatch")
-              )
-
-            case matches do
-              [] -> {:ok, nil}
-              [run] -> {:ok, run}
-              _ -> {:error, :duplicate_staging_runs}
-            end
-
-          true ->
-            {:error, :dispatch_lookup_truncated}
-        end
-
-      %{status: status} ->
-        {:error, :dispatch_lookup, status}
-    end
+    staging_run_page(conn, path, expected, 1, 0, [], MapSet.new())
   end
 
   def do_handle_call(:merge_backend_snapshot, {{:raw, token}, _} = conn, {}) do
@@ -880,7 +856,25 @@ defmodule BorsNG.GitHub.Server do
         {:lookup, id} ->
           with %{status: 200, body: raw} <- get!(repo_conn, "actions/runs/#{id}"),
                {:ok, run} <- Jason.decode(raw) do
-            {:ok, classify_staging_run(repo_conn, run, batch, head, branch, base)}
+            case StagingFailure.classify_run(run, batch, head, branch, base) do
+              :conclusive ->
+                attempt = run["run_attempt"]
+
+                with true <- is_integer(attempt) and attempt > 0,
+                     %{status: 200, body: jobs_raw} <-
+                       get!(repo_conn, "actions/runs/#{id}/attempts/#{attempt}/jobs?per_page=100"),
+                     {:ok, jobs} <- Jason.decode(jobs_raw) do
+                  {:ok, StagingFailure.classify_jobs(run, jobs)}
+                else
+                  _ -> {:ok, :unavailable}
+                end
+
+              :cancelled ->
+                {:ok, {:infrastructure, StagingFailure.run_evidence(run)}}
+
+              result ->
+                {:ok, result}
+            end
           else
             _ -> {:ok, :unavailable}
           end
@@ -895,18 +889,18 @@ defmodule BorsNG.GitHub.Server do
     _ -> {:ok, :unavailable}
   end
 
-  # A stopped runner may never publish a status URL. Discover the exact run
-  # through the existing dispatch lookup, then use the same trusted classifier.
+  # Only cancellation proves that a status-less attempt must be retried.
+  # A failed workflow may still have a saved green verdict being republished.
   def do_handle_call(:staging_failure, conn, {head, _repo, batch, branch, base, since}) do
-    case do_handle_call(:staging_run, conn, {head, base, batch, branch, since}) do
-      {:ok, %{"status" => "completed"} = run} ->
-        {:ok, classify_staging_run(conn, run, batch, head, branch, base)}
+    alias BorsNG.Worker.StagingFailure
 
-      {:ok, _} ->
-        {:ok, :pending}
-
-      _ ->
-        {:ok, :unavailable}
+    with {:ok, %{"status" => "completed", "conclusion" => "cancelled"} = run} <-
+           do_handle_call(:staging_run, conn, {head, base, batch, branch, since}),
+         :cancelled <- StagingFailure.classify_run(run, batch, head, branch, base) do
+      {:ok, {:infrastructure, StagingFailure.run_evidence(run)}}
+    else
+      {:error, _} -> {:ok, :unavailable}
+      _ -> {:ok, :pending}
     end
   rescue
     _ -> {:ok, :unavailable}
@@ -1876,28 +1870,56 @@ defmodule BorsNG.GitHub.Server do
     {raw, state}
   end
 
-  defp classify_staging_run(conn, run, batch, head, branch, base) do
-    alias BorsNG.Worker.StagingFailure
+  defp staging_run_page(conn, path, expected, page, seen, matches, seen_ids) do
+    case get!(conn, path <> "&page=#{page}") do
+      %{status: 200, body: raw} ->
+        body = Jason.decode!(raw)
+        runs = body["workflow_runs"]
+        total = body["total_count"]
 
-    case StagingFailure.classify_run(run, batch, head, branch, base) do
-      :conclusive ->
-        id = run["id"]
-        attempt = run["run_attempt"]
+        if is_list(runs) and is_integer(total) and total >= seen + length(runs) do
+          ids = Enum.map(runs, fn run -> if is_map(run), do: run["id"] end)
+          paginated = page > 1 or total > length(runs)
 
-        with true <- is_integer(id) and id > 0 and is_integer(attempt) and attempt > 0,
-             %{status: 200, body: raw} <-
-               get!(conn, "actions/runs/#{id}/attempts/#{attempt}/jobs?per_page=100"),
-             {:ok, jobs} <- Jason.decode(raw) do
-          StagingFailure.classify_jobs(run, jobs)
+          invalid_page =
+            paginated and
+              (Enum.any?(ids, &(not is_integer(&1) or &1 <= 0)) or
+                 length(Enum.uniq(ids)) != length(ids) or
+                 Enum.any?(ids, &MapSet.member?(seen_ids, &1)))
+
+          seen_ids = Enum.reduce(ids, seen_ids, &MapSet.put(&2, &1))
+
+          matches =
+            matches ++
+              Enum.filter(runs, fn run ->
+                is_map(run) and run["display_title"] == expected and
+                  run["event"] == "repository_dispatch"
+              end)
+
+          seen = seen + length(runs)
+
+          cond do
+            invalid_page ->
+              {:error, :dispatch_lookup_invalid}
+
+            length(matches) > 1 ->
+              {:error, :duplicate_staging_runs}
+
+            seen == total ->
+              {:ok, List.first(matches)}
+
+            length(runs) == 100 ->
+              staging_run_page(conn, path, expected, page + 1, seen, matches, seen_ids)
+
+            true ->
+              {:error, :dispatch_lookup_truncated}
+          end
         else
-          _ -> :unavailable
+          {:error, :dispatch_lookup_invalid}
         end
 
-      :cancelled ->
-        {:infrastructure, StagingFailure.run_evidence(run)}
-
-      result ->
-        result
+      %{status: status} ->
+        {:error, :dispatch_lookup, status}
     end
   end
 

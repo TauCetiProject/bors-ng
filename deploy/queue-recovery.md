@@ -56,11 +56,13 @@ order and the current base, and uses the existing push lease. Green statuses are
 not evidence that the push itself landed.
 
 When required statuses remain pending, the normal running-batch poll also looks
-up the exact repository-dispatch run using the candidate's identity and creation
-window. A confirmed cancellation or infrastructure interruption enters native
-recovery even if the runner never published a status URL. Missing or unavailable
-run metadata leaves normal status reconciliation in control; it cannot establish
-a build verdict.
+up the exact repository-dispatch run using the candidate's identity and dispatch
+window, following pagination when necessary. A confirmed cancellation enters
+native recovery even if the runner never published a status URL. A failed
+workflow can still have a saved green verdict being republished, so it keeps its
+existing status/publication recovery path; ordinary infrastructure classification
+continues through failed statuses. Missing or unavailable run metadata leaves
+normal status reconciliation in control; it cannot establish a build verdict.
 
 A confirmed cancelled build retains approval and creates a native retry child
 with the same exact-head membership through the existing transactional divider.

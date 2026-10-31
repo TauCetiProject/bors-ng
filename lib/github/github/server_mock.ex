@@ -885,8 +885,7 @@ defmodule BorsNG.GitHub.ServerMock do
     outcome =
       case BorsNG.Worker.StagingFailure.classify_run(run, batch, head, branch, base) do
         :cancelled -> {:infrastructure, BorsNG.Worker.StagingFailure.run_evidence(run)}
-        :conclusive -> get_in(state, [conn, :staging_failures, head]) || :conclusive
-        result -> result
+        _ -> :pending
       end
 
     {{:ok, outcome}, state}
