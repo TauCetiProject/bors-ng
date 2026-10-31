@@ -487,7 +487,7 @@ defmodule BorsNG.GitHub.Server do
       "actions/workflows/pr-build.yml/runs?event=repository_dispatch&per_page=100&created=" <>
         created <> ".." <> until
 
-    staging_run_page(conn, path, expected, 1, 0, [], MapSet.new())
+    staging_run_page(conn, path, expected, 1, {0, nil, MapSet.new()}, [])
   end
 
   def do_handle_call(:merge_backend_snapshot, {{:raw, token}, _} = conn, {}) do
@@ -1876,14 +1876,15 @@ defmodule BorsNG.GitHub.Server do
     {raw, state}
   end
 
-  defp staging_run_page(conn, path, expected, page, seen, matches, seen_ids) do
+  defp staging_run_page(conn, path, expected, page, {seen, expected_total, seen_ids}, matches) do
     case get!(conn, path <> "&page=#{page}") do
       %{status: 200, body: raw} ->
         body = Jason.decode!(raw)
         runs = body["workflow_runs"]
         total = body["total_count"]
 
-        if is_list(runs) and is_integer(total) and total >= seen + length(runs) do
+        if is_list(runs) and is_integer(total) and total >= seen + length(runs) and
+             (is_nil(expected_total) or total == expected_total) do
           ids = Enum.map(runs, fn run -> if is_map(run), do: run["id"] end)
           paginated = page > 1 or total > length(runs)
 
@@ -1915,7 +1916,7 @@ defmodule BorsNG.GitHub.Server do
               {:ok, List.first(matches)}
 
             length(runs) == 100 ->
-              staging_run_page(conn, path, expected, page + 1, seen, matches, seen_ids)
+              staging_run_page(conn, path, expected, page + 1, {seen, total, seen_ids}, matches)
 
             true ->
               {:error, :dispatch_lookup_truncated}

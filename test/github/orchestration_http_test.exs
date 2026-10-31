@@ -185,6 +185,12 @@ defmodule BorsNG.OrchestrationHttpTest do
     assert {:error, :dispatch_lookup_invalid} == responses([first, repeated], &seen/0)
     assert_receive {:request, _}
     assert_receive {:request, _}
+
+    # Deletion between pages must not turn a skipped run into confirmed absence.
+    deleted = {200, %{"total_count" => 100, "workflow_runs" => []}}
+    assert {:error, :dispatch_lookup_invalid} == responses([first, deleted], &seen/0)
+    assert_receive {:request, _}
+    assert_receive {:request, _}
   end
 
   test "status-less recovery recognizes cancellation but preserves delayed verdict publication" do
