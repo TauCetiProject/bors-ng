@@ -880,25 +880,7 @@ defmodule BorsNG.GitHub.Server do
         {:lookup, id} ->
           with %{status: 200, body: raw} <- get!(repo_conn, "actions/runs/#{id}"),
                {:ok, run} <- Jason.decode(raw) do
-            case StagingFailure.classify_run(run, batch, head, branch, base) do
-              :conclusive ->
-                attempt = run["run_attempt"]
-
-                with true <- is_integer(attempt) and attempt > 0,
-                     %{status: 200, body: jobs_raw} <-
-                       get!(repo_conn, "actions/runs/#{id}/attempts/#{attempt}/jobs?per_page=100"),
-                     {:ok, jobs} <- Jason.decode(jobs_raw) do
-                  {:ok, StagingFailure.classify_jobs(run, jobs)}
-                else
-                  _ -> {:ok, :unavailable}
-                end
-
-              :cancelled ->
-                {:ok, {:infrastructure, StagingFailure.run_evidence(run)}}
-
-              result ->
-                {:ok, result}
-            end
+            {:ok, classify_staging_run(repo_conn, run, batch, head, branch, base)}
           else
             _ -> {:ok, :unavailable}
           end
@@ -908,6 +890,23 @@ defmodule BorsNG.GitHub.Server do
       end
     else
       _ -> {:ok, :unavailable}
+    end
+  rescue
+    _ -> {:ok, :unavailable}
+  end
+
+  # A stopped runner may never publish a status URL. Discover the exact run
+  # through the existing dispatch lookup, then use the same trusted classifier.
+  def do_handle_call(:staging_failure, conn, {head, _repo, batch, branch, base, since}) do
+    case do_handle_call(:staging_run, conn, {head, base, batch, branch, since}) do
+      {:ok, %{"status" => "completed"} = run} ->
+        {:ok, classify_staging_run(conn, run, batch, head, branch, base)}
+
+      {:ok, _} ->
+        {:ok, :pending}
+
+      _ ->
+        {:ok, :unavailable}
     end
   rescue
     _ -> {:ok, :unavailable}
@@ -1875,6 +1874,31 @@ defmodule BorsNG.GitHub.Server do
 
   def raw_token!({:raw, _} = raw, state) do
     {raw, state}
+  end
+
+  defp classify_staging_run(conn, run, batch, head, branch, base) do
+    alias BorsNG.Worker.StagingFailure
+
+    case StagingFailure.classify_run(run, batch, head, branch, base) do
+      :conclusive ->
+        id = run["id"]
+        attempt = run["run_attempt"]
+
+        with true <- is_integer(id) and id > 0 and is_integer(attempt) and attempt > 0,
+             %{status: 200, body: raw} <-
+               get!(conn, "actions/runs/#{id}/attempts/#{attempt}/jobs?per_page=100"),
+             {:ok, jobs} <- Jason.decode(raw) do
+          StagingFailure.classify_jobs(run, jobs)
+        else
+          _ -> :unavailable
+        end
+
+      :cancelled ->
+        {:infrastructure, StagingFailure.run_evidence(run)}
+
+      result ->
+        result
+    end
   end
 
   defp tesla_client(authorization, content_type \\ @content_type) do

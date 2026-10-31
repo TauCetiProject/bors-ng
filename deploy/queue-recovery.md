@@ -55,6 +55,13 @@ Normal promotion still revalidates live members, withdrawal intent, predecessor
 order and the current base, and uses the existing push lease. Green statuses are
 not evidence that the push itself landed.
 
+When required statuses remain pending, the normal running-batch poll also looks
+up the exact repository-dispatch run using the candidate's identity and creation
+window. A confirmed cancellation or infrastructure interruption enters native
+recovery even if the runner never published a status URL. Missing or unavailable
+run metadata leaves normal status reconciliation in control; it cannot establish
+a build verdict.
+
 A confirmed cancelled build retains approval and creates a native retry child
 with the same exact-head membership through the existing transactional divider.
 The old attempt retains historical links and CI records while releasing the
@@ -68,6 +75,8 @@ Restart never shortens an existing deadline. Other due waiting batches can use
 the slot during cancellation backoff. Withdrawals, changed heads and holds
 remain subject to preflight; no AI edit or rebase is requested. Conclusive
 build failures and workflow timeouts still bisect normally.
+If retry membership is already represented in a waiting batch containing other
+work, recovery does not add the interrupted attempt's backoff to that batch.
 
 Unavailable API reads or an unverifiable source briefly retain the running
 batch for another classification. Three infrastructure observations or the
@@ -85,8 +94,7 @@ a conclusive failure uses the normal source classification. Missing or pending
 CI, or a failed status read without already-green cached CI, releases staging
 through the same native retry and durable backoff without revoking approval.
 Delayed status events also refresh the verdict before releasing expired staging.
-This deadline path adds no metadata
-lookups for missing CI; failure classification retains its two-read bound. Other
+The deadline remains a fallback when no interruption can be established. Other
 projects retain their ordinary timeout policy.
 
 ## Deployment and verification

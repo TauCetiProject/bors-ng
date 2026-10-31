@@ -369,6 +369,10 @@ defmodule BorsNG.GitHub do
     call_with_retry(:staging_failure, repo_conn, {head, repo, batch, branch, base})
   end
 
+  def staging_failure(repo_conn, head, repo, batch, branch, base, since) do
+    call_with_retry(:staging_failure, repo_conn, {head, repo, batch, branch, base, since})
+  end
+
   @spec get_labels!(tconn, integer | bitstring) :: [bitstring]
   def get_labels!(repo_conn, issue_xref) do
     {:ok, labels} = get_labels(repo_conn, issue_xref)

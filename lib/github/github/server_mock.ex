@@ -879,6 +879,19 @@ defmodule BorsNG.GitHub.ServerMock do
       else: {:ok, state}
   end
 
+  def do_handle_call(:staging_failure, conn, {head, _, batch, branch, base, _since}, state) do
+    run = get_in(state, [conn, :staging_runs, {head, batch}])
+
+    outcome =
+      case BorsNG.Worker.StagingFailure.classify_run(run, batch, head, branch, base) do
+        :cancelled -> {:infrastructure, BorsNG.Worker.StagingFailure.run_evidence(run)}
+        :conclusive -> get_in(state, [conn, :staging_failures, head]) || :conclusive
+        result -> result
+      end
+
+    {{:ok, outcome}, state}
+  end
+
   def do_handle_call(:staging_failure, repo_conn, {head, _, _, _, _}, state) do
     outcome = get_in(state, [repo_conn, :staging_failures, head]) || :conclusive
     {{:ok, outcome}, state}

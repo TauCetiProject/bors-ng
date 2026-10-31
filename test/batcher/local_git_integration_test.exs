@@ -1163,6 +1163,82 @@ defmodule BorsNG.Worker.LocalGitIntegrationTest do
     assert Enum.any?(events(ctx.batch), &(&1.kind == "dispatched"))
   end
 
+  test "cancelled CI without statuses releases staging and dispatches unrelated queued work",
+       ctx do
+    old = System.get_env("BORS_STAGE_DISPATCH_PROJECT")
+    System.put_env("BORS_STAGE_DISPATCH_PROJECT", ctx.project.name)
+
+    on_exit(fn ->
+      if old,
+        do: System.put_env("BORS_STAGE_DISPATCH_PROJECT", old),
+        else: System.delete_env("BORS_STAGE_DISPATCH_PROJECT")
+    end)
+
+    Batcher.handle_info({:poll, :once}, ctx.project.id)
+    running = Repo.get!(Batch, ctx.batch.id)
+    assert running.state == :running
+    assert running.timeout_at > DateTime.to_unix(DateTime.utc_now())
+    assert Repo.one!(Status.all_for_batch(running.id)).state == :running
+
+    waiting = Repo.insert!(%Batch{Batch.new(ctx.project.id, "main") | last_polled: 0})
+
+    other =
+      Repo.insert!(%Patch{
+        project_id: ctx.project.id,
+        pr_xref: 2,
+        commit: @head,
+        into_branch: "main",
+        manual_approval: ctx.patch.manual_approval
+      })
+
+    CandidateJournal.insert_member(
+      LinkPatchBatch.changeset(%LinkPatchBatch{}, %{
+        batch_id: waiting.id,
+        patch_id: other.id,
+        head_sha: @head,
+        reviewer: "human",
+        manual_approval: other.manual_approval
+      })
+    )
+
+    run = %{
+      "id" => 123,
+      "run_attempt" => 1,
+      "event" => "repository_dispatch",
+      "path" => ".github/workflows/pr-build.yml",
+      "display_title" => "bors branch=main batch=#{running.id} head=#{@commit} base=#{@base}",
+      "status" => "completed",
+      "conclusion" => "cancelled"
+    }
+
+    mock = GitHub.ServerMock.get_state()
+
+    mock
+    |> put_in([@conn, :pulls, 2], %{mock[@conn].pulls[1] | number: 2})
+    |> put_in([@conn, :pr_commits, 2], mock[@conn].pr_commits[1])
+    |> put_in([@conn, :comments, 2], [])
+    |> put_in([@conn, :staging_runs], %{{@commit, running.id} => run})
+    |> GitHub.ServerMock.put_state()
+
+    running |> Batch.changeset(%{last_polled: 0}) |> Repo.update!()
+    Batcher.handle_info({:poll, :once}, ctx.project.id)
+    assert Repo.get!(Batch, running.id).state == :canceled
+    assert Repo.get!(Batch, running.id).commit == nil
+    assert Repo.get!(Patch, ctx.patch.id).manual_approval == ctx.patch.manual_approval
+
+    [retry] = Repo.all(Batch.all_for_patch(ctx.patch.id, :incomplete))
+    assert retry.sealed and retry.recovery_after > DateTime.to_unix(DateTime.utc_now())
+    assert [link] = Repo.all(LinkPatchBatch.from_batch(retry.id))
+    assert link.head_sha == @head and link.manual_approval == ctx.link.manual_approval
+
+    # Normal polling starts eligible work even while the interrupted members back off.
+    Batcher.handle_info({:poll, :once}, ctx.project.id)
+    assert Repo.get!(Batch, waiting.id).state == :running
+    assert Repo.get!(Batch, waiting.id).recovery_after == 0
+    assert {@commit, waiting.id} in GitHub.ServerMock.get_state()[@conn].dispatches
+    refute Enum.any?(events(running), &(&1.kind == "head_quarantined"))
+  end
+
   test "running shadow checks GitHub tree once without replacing CI identity", ctx do
     Batcher.handle_info({:poll, :once}, ctx.project.id)
     batch = Repo.get!(Batch, ctx.batch.id)

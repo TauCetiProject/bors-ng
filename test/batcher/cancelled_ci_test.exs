@@ -164,6 +164,43 @@ defmodule BorsNG.Worker.BatcherCancelledCITest do
     assert Repo.get!(LinkPatchBatch, ctx.link.id)
   end
 
+  test "an already represented retry does not delay unrelated waiting members", ctx do
+    waiting = Repo.insert!(%Batch{Batch.new(ctx.project.id, "master") | last_polled: 0})
+
+    Repo.insert!(%LinkPatchBatch{
+      batch_id: waiting.id,
+      patch_id: ctx.patch.id,
+      head_sha: "N",
+      reviewer: "rvr"
+    })
+
+    other =
+      Repo.insert!(%Patch{
+        project_id: ctx.project.id,
+        pr_xref: 2,
+        commit: "O",
+        into_branch: "master"
+      })
+
+    Repo.insert!(%LinkPatchBatch{
+      batch_id: waiting.id,
+      patch_id: other.id,
+      head_sha: "O",
+      reviewer: "rvr"
+    })
+
+    # Avoid dispatching this fixture; verify recovery does not change its existing schedule.
+    waiting
+    |> Batch.changeset(%{last_polled: DateTime.to_unix(DateTime.utc_now())})
+    |> Repo.update!()
+
+    Batcher.handle_info({:poll, :once}, ctx.project.id)
+    assert Repo.get!(Batch, ctx.batch.id).state == :canceled
+    observed = Repo.get!(Batch, waiting.id)
+    assert observed.recovery_after == 0 and observed.recovery_failures == 0
+    assert Repo.get!(Patch, ctx.patch.id).queue_approval == ctx.patch.queue_approval
+  end
+
   test "withdrawal during backoff remains withdrawn", ctx do
     Batcher.handle_info({:poll, :once}, ctx.project.id)
     child = active_child(ctx.project)
