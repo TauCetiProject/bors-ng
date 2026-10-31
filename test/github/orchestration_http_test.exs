@@ -46,6 +46,8 @@ defmodule BorsNG.OrchestrationHttpTest do
   end
 
   test "dispatch reconciliation uses one request-scoped page and exact identity" do
+    before = DateTime.utc_now()
+
     run = %{
       "event" => "repository_dispatch",
       "display_title" => "bors branch=main batch=7 head=head base=base"
@@ -65,7 +67,9 @@ defmodule BorsNG.OrchestrationHttpTest do
              |> DateTime.truncate(:second)
              |> DateTime.to_iso8601()
 
-    assert {:ok, _, 0} = DateTime.from_iso8601(until)
+    assert {:ok, upper, 0} = DateTime.from_iso8601(until)
+    assert DateTime.diff(upper, before, :second) >= 59
+    assert DateTime.diff(upper, DateTime.utc_now(), :second) <= 60
 
     refute_receive {:request, _}, 10
   end
@@ -73,6 +77,20 @@ defmodule BorsNG.OrchestrationHttpTest do
   test "an empty complete request window establishes no accepted dispatch" do
     assert {:ok, false} == response(200, %{"total_count" => 0, "workflow_runs" => []}, &seen/0)
     assert_receive {:request, _}
+  end
+
+  test "status-less recovery preserves HTTP lookup errors as unavailable" do
+    assert {:ok, :unavailable} ==
+             response(503, %{"message" => "temporarily unavailable"}, fn ->
+               Server.do_handle_call(
+                 :staging_failure,
+                 {{:raw, "test-token"}, 14},
+                 {"head", "repo", 7, "main", "base", @since}
+               )
+             end)
+
+    assert_receive {:request, _}
+    refute_receive {:request, _}, 10
   end
 
   test "truncated or malformed successful responses never establish absence" do

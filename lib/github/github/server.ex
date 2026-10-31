@@ -475,8 +475,13 @@ defmodule BorsNG.GitHub.Server do
       |> DateTime.to_iso8601()
 
     # Freeze this read's upper bound so new dispatches cannot keep extending
-    # pagination. This is a snapshot boundary, not a dispatch/CI time limit.
-    until = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+    # pagination. Allow the same clock skew as the lower bound so a newly
+    # accepted dispatch is not mistaken for absence. This is not a CI deadline.
+    until =
+      DateTime.utc_now()
+      |> DateTime.add(60, :second)
+      |> DateTime.truncate(:second)
+      |> DateTime.to_iso8601()
 
     path =
       "actions/workflows/pr-build.yml/runs?event=repository_dispatch&per_page=100&created=" <>
@@ -900,6 +905,7 @@ defmodule BorsNG.GitHub.Server do
       {:ok, {:infrastructure, StagingFailure.run_evidence(run)}}
     else
       {:error, _} -> {:ok, :unavailable}
+      {:error, _, _} -> {:ok, :unavailable}
       _ -> {:ok, :pending}
     end
   rescue

@@ -2987,7 +2987,7 @@ defmodule BorsNG.Worker.Batcher do
       conn = get_repo_conn(batch.project)
       phase(batch, :dispatch_live_members, fn -> ensure_live_members!(batch, conn) end)
       requested = Enum.find(events, &(&1.kind == "dispatch_requested"))
-      # A single bounded Actions page reconciles an ambiguous repository_dispatch.
+      # An Actions lookup in a fixed time window reconciles an ambiguous dispatch.
       # No retry is allowed on an unavailable or truncated lookup.
       seen =
         if requested && System.get_env("BORS_STAGE_DISPATCH_PROJECT") == batch.project.name do
