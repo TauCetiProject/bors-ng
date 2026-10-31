@@ -2987,7 +2987,7 @@ defmodule BorsNG.Worker.Batcher do
       conn = get_repo_conn(batch.project)
       phase(batch, :dispatch_live_members, fn -> ensure_live_members!(batch, conn) end)
       requested = Enum.find(events, &(&1.kind == "dispatch_requested"))
-      # A single bounded Actions page reconciles an ambiguous repository_dispatch.
+      # An Actions lookup in a fixed time window reconciles an ambiguous dispatch.
       # No retry is allowed on an unavailable or truncated lookup.
       seen =
         if requested && System.get_env("BORS_STAGE_DISPATCH_PROJECT") == batch.project.name do
@@ -3455,7 +3455,7 @@ defmodule BorsNG.Worker.Batcher do
           CandidateJournal.status(batch, identifier, state, "github.status_poll")
         end)
 
-        maybe_complete_batch(batch)
+        maybe_complete_batch(batch, true)
 
       error when is_tuple(error) and tuple_size(error) >= 2 and elem(error, 0) == :error ->
         Logger.warning(
@@ -3469,34 +3469,34 @@ defmodule BorsNG.Worker.Batcher do
         |> Repo.update!()
 
         if expired_staging?(batch) and not green_staged?(batch) do
-          maybe_complete_batch_due(batch, true)
+          maybe_complete_batch_due(batch, true, true)
         else
           if from_recheck, do: schedule_recheck(batch, now + 60)
         end
     end
   end
 
-  defp maybe_complete_batch(batch) do
+  defp maybe_complete_batch(batch, check_interruption \\ false) do
     if Process.get(:orchestration_executor, false) and
          Outbox.pending?(batch.project_id, "dispatch:#{batch.id}") do
       :ok
     else
-      maybe_complete_dispatched_batch(batch)
+      maybe_complete_dispatched_batch(batch, check_interruption)
     end
   end
 
-  defp maybe_complete_dispatched_batch(batch) do
+  defp maybe_complete_dispatched_batch(batch, check_interruption) do
     now = DateTime.to_unix(DateTime.utc_now())
 
     if (batch.promotion_retry_at || 0) <= now and (batch.recovery_after || 0) <= now do
-      maybe_complete_batch_due(batch)
+      maybe_complete_batch_due(batch, false, check_interruption)
     end
   end
 
-  defp maybe_complete_batch_due(batch, status_read_failed \\ false) do
+  defp maybe_complete_batch_due(batch, status_read_failed, check_interruption) do
     case Train.guard(batch, get_repo_conn(batch.project)) do
       :ok ->
-        maybe_complete_valid_batch(batch, status_read_failed)
+        maybe_complete_valid_batch(batch, status_read_failed, check_interruption)
 
       {:hold, _} ->
         batch
@@ -3508,7 +3508,7 @@ defmodule BorsNG.Worker.Batcher do
     end
   end
 
-  defp maybe_complete_valid_batch(batch, status_read_failed) do
+  defp maybe_complete_valid_batch(batch, status_read_failed, check_interruption) do
     statuses = Repo.all(Status.all_for_batch(batch.id))
     initial_status = Batcher.State.summary_database_statuses(statuses)
 
@@ -3520,17 +3520,22 @@ defmodule BorsNG.Worker.Batcher do
     now = DateTime.to_unix(DateTime.utc_now(), :second)
     repo_conn = get_repo_conn(batch.project)
 
+    interruption =
+      if check_interruption, do: interrupted_staging(batch, repo_conn, initial_status)
+
     {next_status, report_terminal} =
-      if initial_status != :running or inconclusive_deadline do
+      if interruption || inconclusive_deadline || initial_status != :running do
         # some repositories require an OK status to push
-        if initial_status == :ok and not inconclusive_deadline,
+        if initial_status == :ok and not inconclusive_deadline and is_nil(interruption),
           do: send_status(repo_conn, batch, :ok)
 
         # need to change status (could go from :ok to :error if non-ff push)
         outcome =
-          if inconclusive_deadline,
-            do: defer_inconclusive_build(batch, :deadline),
-            else: complete_batch(initial_status, batch, statuses)
+          cond do
+            interruption -> defer_inconclusive_build(batch, interruption)
+            inconclusive_deadline -> defer_inconclusive_build(batch, :deadline)
+            true -> complete_batch(initial_status, batch, statuses)
+          end
 
         result =
           if outcome == :ci_retry do
@@ -3587,6 +3592,39 @@ defmodule BorsNG.Worker.Batcher do
             "complete:#{batch.id}"
           ),
         else: poll_(batch.project_id)
+    end
+  end
+
+  defp interrupted_staging(batch, conn, status) do
+    candidate = CandidateJournal.current(batch)
+
+    if status in [:running, :waiting] and staging_dispatch?(batch) and candidate do
+      dispatch_at =
+        Repo.one(
+          from(e in BorsNG.Database.CandidateEvent,
+            where: e.candidate_id == ^candidate.id and e.kind == "dispatch_requested",
+            order_by: e.observed_at,
+            limit: 1,
+            select: e.observed_at
+          )
+        ) || candidate.observed_at
+
+      case GitHub.staging_failure(
+             conn,
+             batch.commit,
+             batch.project.name,
+             batch.id,
+             batch.into_branch,
+             batch.base_sha,
+             dispatch_at
+           ) do
+        {:ok, {:infrastructure, evidence}} ->
+          BorsNG.Worker.FailureIsolation.classified(batch, "infrastructure", evidence)
+          :infrastructure
+
+        _ ->
+          nil
+      end
     end
   end
 
@@ -3985,7 +4023,14 @@ defmodule BorsNG.Worker.Batcher do
 
             if is_nil(child), do: Repo.rollback(:retry_membership_unavailable)
 
-            if child.state == :waiting do
+            retry_members = MapSet.new(links, &{&1.patch_id, &1.head_sha})
+
+            only_retry_members =
+              Enum.all?(Repo.all(LinkPatchBatch.from_batch(child.id)), fn link ->
+                MapSet.member?(retry_members, {link.patch_id, link.head_sha})
+              end)
+
+            if child.state == :waiting and only_retry_members do
               child
               |> Batch.changeset(%{
                 recovery_failures: max(child.recovery_failures || 0, count),

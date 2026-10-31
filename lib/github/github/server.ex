@@ -474,39 +474,20 @@ defmodule BorsNG.GitHub.Server do
       |> DateTime.truncate(:second)
       |> DateTime.to_iso8601()
 
+    # Freeze this read's upper bound so new dispatches cannot keep extending
+    # pagination. Allow the same clock skew as the lower bound so a newly
+    # accepted dispatch is not mistaken for absence. This is not a CI deadline.
+    until =
+      DateTime.utc_now()
+      |> DateTime.add(60, :second)
+      |> DateTime.truncate(:second)
+      |> DateTime.to_iso8601()
+
     path =
       "actions/workflows/pr-build.yml/runs?event=repository_dispatch&per_page=100&created=" <>
-        ">=" <> created
+        created <> ".." <> until
 
-    case get!(conn, path) do
-      %{status: 200, body: raw} ->
-        body = Jason.decode!(raw)
-        runs = body["workflow_runs"]
-
-        cond do
-          not is_list(runs) or not is_integer(body["total_count"]) or body["total_count"] < 0 ->
-            {:error, :dispatch_lookup_invalid}
-
-          length(runs) < 100 and body["total_count"] == length(runs) ->
-            matches =
-              Enum.filter(
-                runs,
-                &(&1["display_title"] == expected and &1["event"] == "repository_dispatch")
-              )
-
-            case matches do
-              [] -> {:ok, nil}
-              [run] -> {:ok, run}
-              _ -> {:error, :duplicate_staging_runs}
-            end
-
-          true ->
-            {:error, :dispatch_lookup_truncated}
-        end
-
-      %{status: status} ->
-        {:error, :dispatch_lookup, status}
-    end
+    staging_run_page(conn, path, expected, 1, {0, nil, MapSet.new()}, [])
   end
 
   def do_handle_call(:merge_backend_snapshot, {{:raw, token}, _} = conn, {}) do
@@ -908,6 +889,24 @@ defmodule BorsNG.GitHub.Server do
       end
     else
       _ -> {:ok, :unavailable}
+    end
+  rescue
+    _ -> {:ok, :unavailable}
+  end
+
+  # Only cancellation proves that a status-less attempt must be retried.
+  # A failed workflow may still have a saved green verdict being republished.
+  def do_handle_call(:staging_failure, conn, {head, _repo, batch, branch, base, since}) do
+    alias BorsNG.Worker.StagingFailure
+
+    with {:ok, %{"status" => "completed", "conclusion" => "cancelled"} = run} <-
+           do_handle_call(:staging_run, conn, {head, base, batch, branch, since}),
+         :cancelled <- StagingFailure.classify_run(run, batch, head, branch, base) do
+      {:ok, {:infrastructure, StagingFailure.run_evidence(run)}}
+    else
+      {:error, _} -> {:ok, :unavailable}
+      {:error, _, _} -> {:ok, :unavailable}
+      _ -> {:ok, :pending}
     end
   rescue
     _ -> {:ok, :unavailable}
@@ -1875,6 +1874,60 @@ defmodule BorsNG.GitHub.Server do
 
   def raw_token!({:raw, _} = raw, state) do
     {raw, state}
+  end
+
+  defp staging_run_page(conn, path, expected, page, {seen, expected_total, seen_ids}, matches) do
+    case get!(conn, path <> "&page=#{page}") do
+      %{status: 200, body: raw} ->
+        body = Jason.decode!(raw)
+        runs = body["workflow_runs"]
+        total = body["total_count"]
+
+        if is_list(runs) and is_integer(total) and total >= seen + length(runs) and
+             (is_nil(expected_total) or total == expected_total) do
+          ids = Enum.map(runs, fn run -> if is_map(run), do: run["id"] end)
+          paginated = page > 1 or total > length(runs)
+
+          invalid_page =
+            paginated and
+              (Enum.any?(ids, &(not is_integer(&1) or &1 <= 0)) or
+                 length(Enum.uniq(ids)) != length(ids) or
+                 Enum.any?(ids, &MapSet.member?(seen_ids, &1)))
+
+          seen_ids = Enum.reduce(ids, seen_ids, &MapSet.put(&2, &1))
+
+          matches =
+            matches ++
+              Enum.filter(runs, fn run ->
+                is_map(run) and run["display_title"] == expected and
+                  run["event"] == "repository_dispatch"
+              end)
+
+          seen = seen + length(runs)
+
+          cond do
+            invalid_page ->
+              {:error, :dispatch_lookup_invalid}
+
+            length(matches) > 1 ->
+              {:error, :duplicate_staging_runs}
+
+            seen == total ->
+              {:ok, List.first(matches)}
+
+            length(runs) == 100 ->
+              staging_run_page(conn, path, expected, page + 1, {seen, total, seen_ids}, matches)
+
+            true ->
+              {:error, :dispatch_lookup_truncated}
+          end
+        else
+          {:error, :dispatch_lookup_invalid}
+        end
+
+      %{status: status} ->
+        {:error, :dispatch_lookup, status}
+    end
   end
 
   defp tesla_client(authorization, content_type \\ @content_type) do

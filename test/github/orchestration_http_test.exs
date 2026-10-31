@@ -3,7 +3,9 @@ defmodule BorsNG.OrchestrationHttpTest do
   alias BorsNG.GitHub.Server
   @since 1_760_000_000_000_000
 
-  defp response(status, data, fun) do
+  defp response(status, data, fun), do: responses([{status, data}], fun)
+
+  defp responses(pages, fun) do
     {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true])
     {:ok, {_, port}} = :inet.sockname(listener)
     old = Application.get_env(:bors, :api_github_root)
@@ -17,17 +19,19 @@ defmodule BorsNG.OrchestrationHttpTest do
     parent = self()
 
     spawn_link(fn ->
-      {:ok, socket} = :gen_tcp.accept(listener, 5000)
-      {:ok, request} = :gen_tcp.recv(socket, 0, 5000)
-      send(parent, {:request, request})
-      body = Jason.encode!(data)
+      for {status, data} <- pages do
+        {:ok, socket} = :gen_tcp.accept(listener, 5000)
+        {:ok, request} = :gen_tcp.recv(socket, 0, 5000)
+        send(parent, {:request, request})
+        body = Jason.encode!(data)
 
-      :gen_tcp.send(
-        socket,
-        "HTTP/1.1 #{status} Result\r\nContent-Type: application/json\r\nContent-Length: #{byte_size(body)}\r\nConnection: close\r\n\r\n#{body}"
-      )
+        :gen_tcp.send(
+          socket,
+          "HTTP/1.1 #{status} Result\r\nContent-Type: application/json\r\nContent-Length: #{byte_size(body)}\r\nConnection: close\r\n\r\n#{body}"
+        )
 
-      :gen_tcp.close(socket)
+        :gen_tcp.close(socket)
+      end
     end)
 
     fun.()
@@ -42,6 +46,8 @@ defmodule BorsNG.OrchestrationHttpTest do
   end
 
   test "dispatch reconciliation uses one request-scoped page and exact identity" do
+    before = DateTime.utc_now()
+
     run = %{
       "event" => "repository_dispatch",
       "display_title" => "bors branch=main batch=7 head=head base=base"
@@ -53,12 +59,17 @@ defmodule BorsNG.OrchestrationHttpTest do
     query = target |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
     assert query["per_page"] == "100"
 
-    assert query["created"] ==
-             ">=" <>
-               (DateTime.from_unix!(@since, :microsecond)
-                |> DateTime.add(-60, :second)
-                |> DateTime.truncate(:second)
-                |> DateTime.to_iso8601())
+    [from, until] = String.split(query["created"], "..")
+
+    assert from ==
+             DateTime.from_unix!(@since, :microsecond)
+             |> DateTime.add(-60, :second)
+             |> DateTime.truncate(:second)
+             |> DateTime.to_iso8601()
+
+    assert {:ok, upper, 0} = DateTime.from_iso8601(until)
+    assert DateTime.diff(upper, before, :second) >= 59
+    assert DateTime.diff(upper, DateTime.utc_now(), :second) <= 60
 
     refute_receive {:request, _}, 10
   end
@@ -68,13 +79,27 @@ defmodule BorsNG.OrchestrationHttpTest do
     assert_receive {:request, _}
   end
 
+  test "status-less recovery preserves HTTP lookup errors as unavailable" do
+    assert {:ok, :unavailable} ==
+             response(503, %{"message" => "temporarily unavailable"}, fn ->
+               Server.do_handle_call(
+                 :staging_failure,
+                 {{:raw, "test-token"}, 14},
+                 {"head", "repo", 7, "main", "base", @since}
+               )
+             end)
+
+    assert_receive {:request, _}
+    refute_receive {:request, _}, 10
+  end
+
   test "truncated or malformed successful responses never establish absence" do
     assert {:error, :dispatch_lookup_truncated} ==
              response(
                200,
                %{
                  "total_count" => 101,
-                 "workflow_runs" => List.duplicate(%{"display_title" => "other"}, 100)
+                 "workflow_runs" => [%{"id" => 1, "display_title" => "other"}]
                },
                &seen/0
              )
@@ -127,6 +152,77 @@ defmodule BorsNG.OrchestrationHttpTest do
       end)
 
     assert result == {:ok, run}
+  end
+
+  test "busy dispatch discovery reads subsequent pages with a fixed creation window" do
+    other = %{"display_title" => "pr-build pr=1 head=other", "event" => "repository_dispatch"}
+
+    run = %{
+      "id" => 101,
+      "display_title" => "bors branch=main batch=7 head=head base=base",
+      "event" => "repository_dispatch"
+    }
+
+    pages = [
+      {200,
+       %{"total_count" => 101, "workflow_runs" => Enum.map(1..100, &Map.put(other, "id", &1))}},
+      {200, %{"total_count" => 101, "workflow_runs" => [run]}}
+    ]
+
+    assert {:ok, true} == responses(pages, &seen/0)
+    assert_receive {:request, first}
+    assert_receive {:request, second}
+    [_, first_url | _] = String.split(first, " ")
+    [_, second_url | _] = String.split(second, " ")
+    first_query = URI.decode_query(URI.parse(first_url).query)
+    second_query = URI.decode_query(URI.parse(second_url).query)
+    assert first_query["created"] == second_query["created"]
+    assert first_query["page"] == "1" and second_query["page"] == "2"
+
+    # An overlapping page is incomplete evidence, never proof that a run is absent.
+    [first | _] = pages
+    repeated = {200, %{"total_count" => 101, "workflow_runs" => [Map.put(other, "id", 1)]}}
+    assert {:error, :dispatch_lookup_invalid} == responses([first, repeated], &seen/0)
+    assert_receive {:request, _}
+    assert_receive {:request, _}
+
+    # Deletion between pages must not turn a skipped run into confirmed absence.
+    deleted = {200, %{"total_count" => 100, "workflow_runs" => []}}
+    assert {:error, :dispatch_lookup_invalid} == responses([first, deleted], &seen/0)
+    assert_receive {:request, _}
+    assert_receive {:request, _}
+  end
+
+  test "status-less recovery recognizes cancellation but preserves delayed verdict publication" do
+    for conclusion <- ["cancelled", "failure", "success"] do
+      run = %{
+        "id" => 10,
+        "run_attempt" => 1,
+        "event" => "repository_dispatch",
+        "path" => ".github/workflows/pr-build.yml",
+        "display_title" => "bors branch=main batch=7 head=head base=base",
+        "status" => "completed",
+        "conclusion" => conclusion
+      }
+
+      result =
+        response(200, %{"total_count" => 1, "workflow_runs" => [run]}, fn ->
+          Server.do_handle_call(
+            :staging_failure,
+            {{:raw, "test-token"}, 14},
+            {"head", "repo", 7, "main", "base", @since}
+          )
+        end)
+
+      if conclusion == "cancelled" do
+        assert {:ok, {:infrastructure, %{run_id: 10, conclusion: "cancelled"}}} = result
+      else
+        assert result == {:ok, :pending}
+      end
+
+      assert_receive {:request, _}
+      refute_receive {:request, _}, 10
+    end
   end
 
   test "active staging lookup fails closed on incomplete capacity evidence" do
