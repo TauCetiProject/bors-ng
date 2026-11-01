@@ -17,6 +17,8 @@ defmodule BorsNG.ApiController do
         send_resp(conn, 404, "")
 
       project ->
+        promoted = params["promoted"] == "true"
+
         batch_id =
           case Integer.parse(params["batch_id"] || "") do
             {n, ""} when n > 0 -> n
@@ -41,8 +43,17 @@ defmodule BorsNG.ApiController do
             else: admissions_query
 
         admissions =
-          Repo.all(admissions_query)
-          |> Enum.map(&Map.take(&1, [:id, :batch_id, :link_id, :observed_at, :snapshot]))
+          if promoted,
+            do: [],
+            else:
+              admissions_query
+              |> Repo.all()
+              |> Enum.map(&Map.take(&1, [:id, :batch_id, :link_id, :observed_at, :snapshot]))
+
+        candidates =
+          if promoted,
+            do: BorsNG.Worker.CandidateJournal.promotions(project.id, params["base"], batch_id),
+            else: BorsNG.Worker.CandidateJournal.diagnostics(project.id, params["base"], batch_id)
 
         conn
         |> put_resp_header("cache-control", "no-store")
@@ -51,8 +62,7 @@ defmodule BorsNG.ApiController do
           repo: project.name,
           base: params["base"],
           batch_id: batch_id,
-          candidates:
-            BorsNG.Worker.CandidateJournal.diagnostics(project.id, params["base"], batch_id),
+          candidates: candidates,
           admissions: admissions,
           historical_unknown_reason: "no journal backfill; absent facts are unknown",
           timestamp_unit: "unix_microseconds",
