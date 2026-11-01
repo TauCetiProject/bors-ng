@@ -127,6 +127,111 @@ defmodule BorsNG.ApiControllerTest do
     assert pilot["candidates"] == []
   end
 
+  test "promotion filter returns compact complete journal history without diagnostic window loss",
+       %{
+         conn: conn,
+         project1: project,
+         project2: other
+       } do
+    alias BorsNG.Database.{Candidate, CandidateEvent}
+    alias BorsNG.Worker.CandidateJournal, as: Journal
+
+    base = String.duplicate("a", 40)
+    head = String.duplicate("b", 40)
+    commit = String.duplicate("c", 40)
+    batch = Repo.insert!(%Batch{project_id: project.id, into_branch: "main", state: :ok})
+
+    snapshot = %{
+      "contract" => "tauceti-bors.candidate/v1",
+      "base" => "main",
+      "base_sha" => base,
+      "members" => [
+        %{"pr" => 42, "head_sha" => head, "scheduling" => %{"diagnostic" => "unused"}}
+      ]
+    }
+
+    old =
+      Repo.insert!(%Candidate{
+        project_id: project.id,
+        batch_id: batch.id,
+        into_branch: "main",
+        generation: 1,
+        observed_at: 1,
+        snapshot: snapshot
+      })
+
+    Journal.event(old, "constructed", "bors.assembly", %{
+      base_sha: base,
+      commit: commit,
+      unused: "diagnostic"
+    })
+
+    Journal.event(old, "promoted", "github.base_push_response", %{
+      base: "main",
+      base_sha: base,
+      commit: commit,
+      unused: "diagnostic"
+    })
+
+    Journal.event(old, "status_observed", "github.status", %{context: "build"})
+
+    for generation <- 2..102 do
+      Repo.insert!(%Candidate{
+        project_id: project.id,
+        batch_id: batch.id,
+        into_branch: "main",
+        generation: generation,
+        observed_at: generation,
+        snapshot: snapshot
+      })
+    end
+
+    path = "/repositories/#{project.id}/candidates?base=main"
+    diagnostic = conn |> get(path) |> json_response(200)
+    assert length(diagnostic["candidates"]) == 100
+    refute Enum.any?(diagnostic["candidates"], &(&1["id"] == old.id))
+    before_events = Repo.aggregate(CandidateEvent, :count, :id)
+    result = conn |> recycle() |> get(path <> "&promoted=true") |> json_response(200)
+    assert result["admissions"] == []
+    assert result["timestamp_unit"] == "unix_microseconds"
+    assert result["historical_unknown_reason"] != nil
+    assert result["queue_authority"] == false
+    assert [candidate] = result["candidates"]
+    assert candidate["id"] == old.id
+
+    assert candidate["snapshot"] ==
+             Map.put(Map.take(snapshot, ["contract", "base", "base_sha"]), "members", [
+               %{"pr" => 42, "head_sha" => head}
+             ])
+
+    assert Enum.map(candidate["events"], & &1["kind"]) == ["constructed", "promoted"]
+    assert Enum.all?(candidate["events"], &(not Map.has_key?(&1["details"], "unused")))
+    assert Enum.all?(candidate["events"], &is_integer(&1["observed_at"]))
+    assert before_events == Repo.aggregate(CandidateEvent, :count, :id)
+    assert result == conn |> recycle() |> get(path <> "&promoted=true") |> json_response(200)
+
+    assert [] ==
+             conn
+             |> recycle()
+             |> get("/repositories/#{other.id}/candidates?base=main&promoted=true")
+             |> json_response(200)
+             |> Map.fetch!("candidates")
+
+    assert [] ==
+             conn
+             |> recycle()
+             |> get("/repositories/#{project.id}/candidates?base=pilot&promoted=true")
+             |> json_response(200)
+             |> Map.fetch!("candidates")
+
+    assert [] ==
+             conn
+             |> recycle()
+             |> get(path <> "&promoted=true&batch_id=#{batch.id + 1}")
+             |> json_response(200)
+             |> Map.fetch!("candidates")
+  end
+
   test "main observation excludes pilots and preserves an approved head after a push", %{
     conn: conn,
     project1: project

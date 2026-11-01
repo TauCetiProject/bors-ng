@@ -308,6 +308,50 @@ defmodule BorsNG.Worker.CandidateJournal do
 
   def observe_check(_, _), do: :ok
 
+  # Reporting needs complete promotion history, not the rolling diagnostic
+  # window or the much larger assembly/admission provenance stored beside it.
+  def promotions(project_id, base, batch_id \\ nil) do
+    promoted = from(e in CandidateEvent, where: e.kind == "promoted", select: e.candidate_id)
+
+    query =
+      from(c in Candidate,
+        where: c.project_id == ^project_id and c.id in subquery(promoted),
+        order_by: c.id
+      )
+
+    query = if base, do: from(c in query, where: c.into_branch == ^base), else: query
+    query = if batch_id, do: from(c in query, where: c.batch_id == ^batch_id), else: query
+
+    events =
+      Repo.all(
+        from(e in CandidateEvent,
+          where:
+            e.candidate_id in subquery(from(c in query, select: c.id)) and
+              e.kind in ["constructed", "promoted"],
+          order_by: e.id
+        )
+      )
+      |> Enum.group_by(& &1.candidate_id)
+
+    Repo.all(query)
+    |> Enum.map(fn c ->
+      snapshot = Map.take(c.snapshot, ["contract", "base", "base_sha"])
+      members = Enum.map(c.snapshot["members"] || [], &Map.take(&1, ["pr", "head_sha"]))
+
+      %{
+        id: c.id,
+        batch_id: c.batch_id,
+        snapshot: Map.put(snapshot, "members", members),
+        events:
+          Enum.map(events[c.id] || [], fn event ->
+            event
+            |> Map.take([:kind, :source, :observed_at])
+            |> Map.put(:details, Map.take(event.details || %{}, ["base", "base_sha", "commit"]))
+          end)
+      }
+    end)
+  end
+
   def diagnostics(project_id, base, batch_id \\ nil) do
     query = from(c in Candidate, where: c.project_id == ^project_id, order_by: [desc: c.id])
     query = if base, do: from(c in query, where: c.into_branch == ^base), else: query
