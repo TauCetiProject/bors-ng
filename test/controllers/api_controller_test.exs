@@ -75,6 +75,27 @@ defmodule BorsNG.ApiControllerTest do
     assert conn.status == 404
   end
 
+  test "statistics are project/base scoped and use promotion proof without queue writes", %{conn: conn, project1: project, project2: other} do
+    alias BorsNG.Database.{Candidate, CandidateEvent}
+    batch = Repo.insert!(%Batch{project_id: project.id, into_branch: "main", state: :ok})
+    Repo.insert!(%Batch{project_id: other.id, into_branch: "main", state: :error})
+    Repo.insert!(%Batch{project_id: project.id, into_branch: "other", state: :error})
+    candidate = Repo.insert!(%Candidate{project_id: project.id, into_branch: "main", batch_id: batch.id,
+      generation: 1, observed_at: System.system_time(:microsecond),
+      snapshot: %{"base_sha" => "base", "members" => [%{"pr" => 42}]}})
+    for kind <- ["constructed", "dispatched", "promoted"] do
+      Repo.insert!(%CandidateEvent{candidate_id: candidate.id, kind: kind,
+        source: "github.base_push_response", observed_at: System.system_time(:microsecond),
+        details: %{"commit" => "head", "base_sha" => "base", "base" => "main"}})
+    end
+    result = get(conn, "/repositories/#{project.id}/statistics?base=main")
+    body = json_response(result, 200)
+    assert body["queue_authority"] == false
+    assert get_resp_header(result, "cache-control") == ["public, max-age=300"]
+    assert Enum.all?(body["windows"], &(&1["completed_batches"] == 1 and &1["successful_batches"] == 1 and &1["failed_batches"] == 0 and &1["landed_prs"] == 1))
+    assert Repo.get!(Batch, batch.id).state == :ok
+  end
+
   test "candidate API keeps legacy observation unchanged and unknown history explicit", %{
     conn: conn,
     project1: project,
