@@ -11,6 +11,18 @@ defmodule BorsNG.ApiController do
   alias BorsNG.Database.Batch
   alias BorsNG.Database.Project
 
+  def project_statistics(conn, %{"id" => id} = params) do
+    case Repo.get(Project, id) do
+      nil ->
+        send_resp(conn, 404, "")
+
+      project ->
+        conn
+        |> put_resp_header("cache-control", "public, max-age=300")
+        |> json(BorsNG.Worker.Statistics.observation(project, params["base"]))
+    end
+  end
+
   def project_candidates(conn, %{"id" => id} = params) do
     case Repo.get(Project, id) do
       nil ->
