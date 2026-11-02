@@ -88,9 +88,14 @@ defmodule BorsNG.ApiControllerTest do
         source: "github.base_push_response", observed_at: System.system_time(:microsecond),
         details: %{"commit" => "head", "base_sha" => "base", "base" => "main"}})
     end
+
+    Repo.insert!(%CandidateEvent{candidate_id: candidate.id, kind: "status_observed",
+      source: "github.status_webhook", observed_at: System.system_time(:microsecond),
+      details: %{"identifier" => "build", "url" => "https://github.com/#{project.name}/actions/runs/100"}})
     result = get(conn, "/repositories/#{project.id}/statistics?base=main")
     body = json_response(result, 200)
     assert body["queue_authority"] == false
+    assert body["staging_run_ids"] == [100]
     assert get_resp_header(result, "cache-control") == ["public, max-age=300"]
     assert Enum.all?(body["windows"], &(&1["completed_batches"] == 1 and &1["successful_batches"] == 1 and &1["failed_batches"] == 0 and &1["landed_prs"] == 1))
     assert Repo.get!(Batch, batch.id).state == :ok

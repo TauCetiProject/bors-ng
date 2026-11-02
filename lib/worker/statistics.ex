@@ -25,7 +25,7 @@ defmodule BorsNG.Worker.Statistics do
         from(e in CandidateEvent,
           where:
             e.candidate_id in ^candidate_ids and
-              e.kind in ["constructed", "dispatched", "promoted"],
+              e.kind in ["constructed", "dispatched", "promoted", "status_observed"],
           order_by: e.id
         ),
         timeout: 5000
@@ -37,6 +37,7 @@ defmodule BorsNG.Worker.Statistics do
       base: base,
       observed_at: now,
       queue_authority: false,
+      staging_run_ids: staging_run_ids(events, project.name),
       definitions: %{
         completed:
           "terminal batches by their final database update; canceled batches are separate",
@@ -47,6 +48,24 @@ defmodule BorsNG.Worker.Statistics do
       },
       windows: summarize(batches, candidates, events, now)
     }
+  end
+
+  def staging_run_ids(events, repository) do
+    url = ~r/^https:\/\/github\.com\/#{Regex.escape(repository)}\/actions\/runs\/([1-9][0-9]*)$/
+
+    events
+    |> Enum.flat_map(fn event ->
+      if event.kind == "status_observed" and event.details["identifier"] == "build" do
+        case Regex.run(url, event.details["url"] || "") do
+          [_, id] -> [String.to_integer(id)]
+          _ -> []
+        end
+      else
+        []
+      end
+    end)
+    |> Enum.uniq()
+    |> Enum.sort(:desc)
   end
 
   def summarize(batches, candidates, events, now) do
