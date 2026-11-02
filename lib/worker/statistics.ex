@@ -92,7 +92,9 @@ defmodule BorsNG.Worker.Statistics do
               constructed.details["base_sha"] == e.details["base_sha"]
           end),
           member <- members(c),
-          do: {div(e.observed_at, 1_000_000), member["pr"]}
+          do: {div(e.observed_at, 1_000_000), member["pr"], c.batch_id}
+
+    promoted_batches = MapSet.new(landings, fn {_, _, batch_id} -> batch_id end)
 
     Enum.map(@windows, fn {label, seconds} ->
       selected =
@@ -107,8 +109,8 @@ defmodule BorsNG.Worker.Statistics do
 
       landed =
         landings
-        |> Enum.filter(fn {at, _} -> at > now - seconds and at <= now end)
-        |> MapSet.new(fn {_, pr} -> pr end)
+        |> Enum.filter(fn {at, _, _} -> at > now - seconds and at <= now end)
+        |> MapSet.new(fn {_, pr, _} -> pr end)
 
       states = Enum.frequencies_by(selected, & &1.state)
 
@@ -120,6 +122,8 @@ defmodule BorsNG.Worker.Statistics do
         failed_batches: Map.get(states, :error, 0),
         canceled_batches: Map.get(states, :canceled, 0),
         landed_prs: MapSet.size(landed),
+        landed_batches_without_receipts:
+          Enum.count(selected, &(&1.state == :ok and not MapSet.member?(promoted_batches, &1.id))),
         staging_pr_runs: MapSet.size(pairs),
         staging_unique_prs: MapSet.size(prs),
         mean_staging_runs_per_pr:
