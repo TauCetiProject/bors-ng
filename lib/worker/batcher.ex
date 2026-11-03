@@ -752,6 +752,11 @@ defmodule BorsNG.Worker.Batcher do
   def handle_info({:completion_poll, _batch_id}, project_id),
     do: handle_info({:poll, :once}, project_id)
 
+  def handle_info({:triage_deferred_conflicts, batch_id, members}, project_id) do
+    Batcher.DeferredConflicts.classify(project_id, batch_id, members)
+    {:noreply, project_id}
+  end
+
   def handle_info({:reconcile_construction, candidate_id, members}, project_id) do
     candidate = Repo.get(BorsNG.Database.Candidate, candidate_id)
 
@@ -1103,6 +1108,7 @@ defmodule BorsNG.Worker.Batcher do
 
     release_unstarted_batches(project)
     BorsNG.Worker.BumpRecovery.prioritize_waiting(project)
+    Batcher.DeferredConflicts.wake(project)
 
     incomplete =
       project_id
