@@ -20,8 +20,11 @@ members, preserving bundle atomicity; its base includes A. There are at most two
 current train candidates. No branching or depth-three in-flight train is allowed.
 One dispatched successor per parent generation bounds wasted work. A stopped
 local merge-conflict construction with no constructed result, published ref or
-dispatch intent may try another waiting group. Every attempt still consumes the
-lifetime canary budget. Exact PR/head pairs that already conflicted with this
+dispatch intent may try another waiting group. Proved terminal member/head-bound
+local conflicts with no constructed result, batch commit, publication or dispatch
+intent are excluded from the lifetime CI budget. Unknown and ambiguous attempts
+still consume it. There are at most sixteen construction attempts per parent.
+Exact PR/head pairs that already conflicted with this
 parent are skipped for speculation, without changing their approvals, bundles
 or normal serial scheduling. Ambiguous dispatches and running or completed CI
 children never authorize a replacement successor. Existing
@@ -92,8 +95,9 @@ The code defaults to **one successor reservation**; the reviewed catch-up
 Worker deployment configures **ten lifetime reservations**, including the
 original October reservation. Operators may
 set `BORS_SPECULATION_CANARY_SUCCESSORS` to 1–10; the hard maximum is ten for this
-implementation, counted durably across restarts. Failed construction consumes a
-reservation too. Exhausting this budget returns scheduling to serial operation,
+implementation, counted durably across restarts. Only the strictly proved local
+conflicts described above reclaim their charge; publication/dispatch intent and
+unknown evidence remain charged. Exhausting this budget returns scheduling to serial operation,
 while all exact generation/promotion and capacity guards keep draining. Existing
 workflow CI deadlines and infrastructure retry backoff remain in force. The
 three-workflow bound is a staging cap, not a cap on unrelated PR workflows or a
@@ -102,6 +106,17 @@ cost decision. External administrator-triggered reruns consume capacity and must
 not be used to bypass the scheduler.
 
 ## Activation and verification
+
+Before candidate membership is frozen, a trusted local selection pass attempts
+every atomic unit against the exact base plus already accepted units. A conflicting
+unit is rolled back in full, deferred, and selection continues. All skipped units
+stay together in one waiting group, retaining exact heads, reviewer/manual approvals,
+bundle identities and admission ages. Healthy members remain in their original
+batch and are assembled normally under an immutable candidate identity. Planning
+trees grant no publication authority. Empty selections retain existing conservative
+singleton/bundle handling. Incomplete planning evidence cannot alter membership.
+Locked current-membership checks reject races before moving links. Ordinary
+assembly, missing-import preflight, live identity checks and all CI gates remain.
 
 Keep new admission disabled until all gates above pass; the catch-up deployment
 retains the previously verified gate URLs and existing true feature flag.

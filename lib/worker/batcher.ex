@@ -1866,6 +1866,11 @@ defmodule BorsNG.Worker.Batcher do
             base.commit
           )
 
+    mode = BorsNG.Worker.LocalGit.mode(project, batch.into_branch, repo_conn)
+
+    {patch_links, selection} =
+      select_compatible_members(batch, patch_links, base, repo_conn, mode)
+
     # If all patches were closed and removed, cancel the batch early
     if Enum.empty?(patch_links) do
       now = DateTime.to_unix(DateTime.utc_now(), :second)
@@ -1888,9 +1893,11 @@ defmodule BorsNG.Worker.Batcher do
         )
 
       BorsNG.Worker.SourceCompatibility.journal(candidate, patch_links)
-      batch = %{batch | candidate_id: candidate.id}
 
-      mode = BorsNG.Worker.LocalGit.mode(project, batch.into_branch, repo_conn)
+      if selection,
+        do: CandidateJournal.event(candidate, "merge_selection", "bors.local_git", selection)
+
+      batch = %{batch | candidate_id: candidate.id}
 
       # Async local assembly cannot publish a remote ref before durable binding.
       # Native publication-before-binding retains conservative status routing.
@@ -1964,6 +1971,27 @@ defmodule BorsNG.Worker.Batcher do
   rescue
     error in BorsNG.Worker.CandidateAssembler.Rejected ->
       reject_construction(error.candidate, error.reason)
+  end
+
+  defp select_compatible_members(batch, links, base, conn, mode) do
+    if mode == "local" and Process.get(:orchestration_executor, false) and
+         length(Divider.group_units(links)) > 1 and
+         BorsNG.Worker.LocalGit.capacity(links) == :ok do
+      with {:ok, %{use_squash_merge: true}} <-
+             Batcher.GetBorsToml.get_required(conn, base.commit),
+           {:ok, selected, evidence} <-
+             phase(batch, :merge_selection, fn ->
+               Batcher.ConflictSelection.select(batch, links, base.commit, conn)
+             end) do
+        {selected, evidence}
+      else
+        # Unavailable/invalid planning evidence cannot alter membership. The
+        # existing exact assembler and its conservative conflict path remain.
+        _ -> {links, nil}
+      end
+    else
+      {links, nil}
+    end
   end
 
   # An approval/membership race is an expected rejection, not a registry

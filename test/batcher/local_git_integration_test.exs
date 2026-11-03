@@ -104,6 +104,16 @@ defmodule BorsNG.Worker.LocalGitIntegrationTest do
         print(json.dumps(dict(status='error',details=dict(kind='network_unavailable'))))
     elif request['operation'] in ['import_providers', 'bounded_import_providers']:
         print(json.dumps(dict(operation=request['operation'], token=os.environ.get('BORS_GIT_TOKEN'), changed_paths=request.get('changed_paths'))))
+    elif request['operation']=='select':
+        bad={int(p) for p in os.environ.get('BORS_TEST_CONFLICT_PRS','').split(',') if p}
+        accepted,skipped=[],[]
+        for unit in request['units']:
+            conflict=next((m for m in unit if m['pr'] in bad),None)
+            if conflict:
+                skipped.append(dict(members=unit,conflict=conflict | dict(kind='merge_conflict',paths=['TauCeti/Conflict.lean'])))
+            else:
+                accepted.extend(unit)
+        print(json.dumps(dict(status='ok',complete=True,identity=request['identity'],accepted=accepted,skipped=skipped)))
     elif request['operation']=='assemble':
         hints={}
         if os.environ.get('BORS_TEST_MISSING_IMPORT'):
@@ -133,6 +143,7 @@ defmodule BorsNG.Worker.LocalGitIntegrationTest do
       System.delete_env("BORS_TEST_HELPER_FAILURE")
       System.delete_env("BORS_TEST_MISSING_IMPORT")
       System.delete_env("BORS_TEST_MISSING_IMPORT_PR")
+      System.delete_env("BORS_TEST_CONFLICT_PRS")
       File.rm_rf!(dir)
     end)
 
@@ -1255,6 +1266,99 @@ defmodule BorsNG.Worker.LocalGitIntegrationTest do
 
     SpeculativeTrain.reconcile(ctx.project.id, @conn)
     assert SpeculativeTrain.reservations(ctx.project.id) == []
+  end
+
+  test "assembly skips multiple conflicts and whole bundles, dispatching the healthy remainder once",
+       ctx do
+    alias BorsNG.Worker.Orchestration.{Outbox, Worker}
+    alias BorsNG.Database.{OrchestrationJob, PatchBundle}
+    :sys.suspend(BorsNG.Worker.Orchestration.Dispatcher)
+    System.put_env("BORS_ASYNC_ORCHESTRATION", "true")
+    System.put_env("BORS_STAGE_DISPATCH_PROJECT", ctx.project.name)
+    System.put_env("BORS_TEST_CONFLICT_PRS", "2,5")
+
+    on_exit(fn ->
+      System.delete_env("BORS_ASYNC_ORCHESTRATION")
+      System.delete_env("BORS_STAGE_DISPATCH_PROJECT")
+      :sys.resume(BorsNG.Worker.Orchestration.Dispatcher)
+    end)
+
+    bundle = Repo.insert!(%PatchBundle{project_id: ctx.project.id})
+
+    for n <- 2..6 do
+      patch =
+        Repo.insert!(%Patch{
+          project_id: ctx.project.id,
+          pr_xref: n,
+          commit: @head,
+          into_branch: "main",
+          manual_approval: ctx.patch.manual_approval,
+          bundle_id: if(n in [4, 5], do: bundle.id)
+        })
+
+      CandidateJournal.insert_member(
+        LinkPatchBatch.changeset(%LinkPatchBatch{}, %{
+          patch_id: patch.id,
+          batch_id: ctx.batch.id,
+          head_sha: @head,
+          reviewer: "human",
+          manual_approval: patch.manual_approval
+        })
+      )
+
+      state = GitHub.ServerMock.get_state()
+
+      GitHub.ServerMock.put_state(
+        state
+        |> put_in([@conn, :pulls, n], %{state[@conn].pulls[1] | number: n})
+        |> put_in([@conn, :pr_commits, n], state[@conn].pr_commits[1])
+        |> put_in([@conn, :labels, n], [])
+        |> put_in([@conn, :comments, n], [])
+      )
+    end
+
+    before = Repo.all(LinkPatchBatch.from_batch(ctx.batch.id))
+    worker = start_supervised!({Worker, ctx.project.id})
+    job = Outbox.enqueue(ctx.project.id, "info", {:poll, :once})
+    {:ok, claimed} = Outbox.claim(job.id)
+    send(worker, {:execute, self(), claimed})
+    assert_receive {:finished, ^worker, ^claimed, :ok}, 5000
+    Outbox.finish(claimed)
+
+    current = Repo.get!(Batch, ctx.batch.id)
+    assert current.state == :running
+    candidate = CandidateJournal.latest(current.id)
+    assert Enum.map(candidate.snapshot["members"], & &1["pr"]) == [1, 3, 6]
+    [selection] = Enum.filter(events(current), &(&1.kind == "merge_selection"))
+    retry = Repo.get!(Batch, selection.details["deferred_batch_id"])
+    assert retry.state == :waiting
+
+    assert Enum.sort(Enum.map(Repo.all(LinkPatchBatch.from_batch(retry.id)), & &1.patch.pr_xref)) ==
+             [2, 4, 5]
+
+    for source <- before do
+      [after_link] =
+        Repo.all(
+          from(l in LinkPatchBatch,
+            where: l.patch_id == ^source.patch_id and l.batch_id in ^[current.id, retry.id]
+          )
+        )
+
+      assert Map.take(after_link, [:head_sha, :reviewer, :manual_approval]) ==
+               Map.take(source, [:head_sha, :reviewer, :manual_approval])
+
+      assert Repo.get!(Patch, source.patch_id).manual_approval == source.manual_approval
+
+      assert CandidateJournal.admission(after_link.id).snapshot["original_admitted_at"] ==
+               CandidateJournal.admission(source.id).snapshot["original_admitted_at"]
+    end
+
+    assert Repo.aggregate(from(j in OrchestrationJob, where: j.kind == "dispatch"), :count) == 1
+
+    refute Enum.any?(
+             events(current),
+             &(&1.kind in ["local_conflict", "failure_partition", "failure_classified"])
+           )
   end
 
   test "async local publication retains its immutable recipe across executor restart", ctx do
