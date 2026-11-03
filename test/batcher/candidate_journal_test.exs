@@ -140,7 +140,7 @@ defmodule BorsNG.Worker.CandidateJournalTest do
 
   test "scheduler metadata is one bulk read and deferred while serial running", ctx do
     member(ctx.batch, ctx.patch)
-    repo = :persistent_term.get(:db_repo)
+    repo = BorsNG.Database.Repo
     event = repo.config()[:telemetry_prefix] ++ [:query]
     ref = make_ref()
 

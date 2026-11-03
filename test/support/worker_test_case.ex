@@ -46,7 +46,7 @@ defmodule BorsNG.Worker.TestCase do
   end
 
   setup tags do
-    repo = :persistent_term.get(:db_repo)
+    repo = BorsNG.Database.Repo
     owner = Ecto.Adapters.SQL.Sandbox.start_owner!(repo, shared: not tags[:async])
 
     on_exit(fn ->

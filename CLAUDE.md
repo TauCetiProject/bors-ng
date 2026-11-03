@@ -11,7 +11,7 @@ queuing, batching, and automatic merging via the GitHub API.
 |-----------|-----------------|
 | Elixir    | 1.17.3 |
 | OTP       | 27.x |
-| PostgreSQL | 13+ (primary DB; MySQL is also supported via BORS_DATABASE=mysql) |
+| PostgreSQL | 13+ (required database) |
 
 **OTP 26 and older are NOT supported**: cowboy 2.19+ and ranch 2.3 call
 `proc_lib:set_label/1`, which arrived in OTP 27, so on OTP 26 no HTTP listener
@@ -168,7 +168,7 @@ postgresql://postgres:Postgres1234@localhost/bors_test
 ```
 
 ```bash
-BORS_DATABASE=postgresql ELIXIR_ERL_OPTIONS="+fnu" mix test
+ELIXIR_ERL_OPTIONS="+fnu" mix test
 ```
 
 The `test` alias in `mix.exs` auto-runs `ecto.create` and `ecto.migrate`.
@@ -211,13 +211,10 @@ lib/
     branch_deleter.ex     Cleanup worker
   web/                    Phoenix web layer (controllers, views, templates)
   database/               Ecto schemas and repos
-    repo.ex               Dynamic repo wrapper (switches pg/mysql at runtime)
-    repo_postgres.ex
-    repo_mysql.ex
+    repo.ex               PostgreSQL Ecto repository
 ```
 
-The database backend is selected at runtime via `BORS_DATABASE` env var
-(default: `postgresql`). `:persistent_term` holds the chosen repo module.
+The application uses `BorsNG.Database.Repo` directly with the PostgreSQL adapter.
 
 ## Command parsing
 

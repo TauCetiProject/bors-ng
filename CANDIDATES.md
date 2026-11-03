@@ -98,7 +98,7 @@ projection are unchanged, including its active member arrays.
 
 The migration creates three tables and indexes without updating existing
 batches, links, approvals or timestamps. Table/index creation tolerates replay
-following interrupted MySQL DDL. It deliberately does not backfill historical
+after an interrupted migration. It deliberately does not backfill historical
 facts. Journal rows have no cascading foreign keys and survive queue deletion.
 Rolling back removes the journal; rolling forward cannot reconstruct lost facts.
 

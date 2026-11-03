@@ -70,7 +70,7 @@ Reproduce offline with a disposable bare repository holding the exact objects:
 
 ```sh
 python3 scripts/replay_import_provider_lookup.py candidate225.json replay.git batch834-failed.log replay225.json
-MIX_ENV=test BORS_DATABASE=postgresql mix run --no-start scripts/replay_diagnostic_partition.exs replay225.json partition225.json
+MIX_ENV=test mix run --no-start scripts/replay_diagnostic_partition.exs replay225.json partition225.json
 ```
 
 Required CI/review and the normal root-coordinated deployment remain mandatory.

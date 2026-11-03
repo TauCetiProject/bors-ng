@@ -143,8 +143,8 @@ production service measurements. An eight-header cap would remain UNKNOWN.
 Replay the pure production planner without starting the application:
 
 ```sh
-MIX_ENV=test BORS_DATABASE=postgresql mix run --no-start scripts/replay_diagnostic_partition.exs test/fixtures/bounded-providers-candidate230.json partition230.json
-MIX_ENV=test BORS_DATABASE=postgresql mix run --no-start scripts/replay_diagnostic_partition.exs test/fixtures/bounded-providers-candidate232.json partition232.json
+MIX_ENV=test mix run --no-start scripts/replay_diagnostic_partition.exs test/fixtures/bounded-providers-candidate230.json partition230.json
+MIX_ENV=test mix run --no-start scripts/replay_diagnostic_partition.exs test/fixtures/bounded-providers-candidate232.json partition232.json
 ```
 
 ## Natural candidate254 cap regression

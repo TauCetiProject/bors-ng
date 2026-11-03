@@ -1,4 +1,4 @@
-# MIX_ENV=test BORS_DATABASE=postgresql mix run --no-start scripts/replay_diagnostic_partition.exs INPUT OUTPUT
+# MIX_ENV=test mix run --no-start scripts/replay_diagnostic_partition.exs INPUT OUTPUT
 # Uses the production pure planner; never starts the application or writes queue state.
 alias BorsNG.Database.{LinkPatchBatch, Patch}
 alias BorsNG.Worker.{FailureDiagnostics, FailureIsolation}

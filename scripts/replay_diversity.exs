@@ -1,4 +1,4 @@
-# MIX_ENV=test BORS_DATABASE=postgresql mix run --no-start scripts/replay_diversity.exs INPUT OUTPUT
+# MIX_ENV=test mix run --no-start scripts/replay_diversity.exs INPUT OUTPUT
 [input, output] = System.argv()
 data = input |> File.read!() |> Jason.decode!()
 result = BorsNG.Worker.Batcher.DiversityReplay.run(data)
