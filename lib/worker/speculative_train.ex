@@ -152,6 +152,7 @@ defmodule BorsNG.Worker.SpeculativeTrain do
          true <- budget_available?(project.id),
          candidate when not is_nil(candidate) <- CandidateJournal.current(parent),
          true <- tracked?(candidate),
+         false <- event?(candidate, "train_released"),
          true <- valid?(candidate),
          true <- successor_available?(candidate),
          false <- Outbox.pending?(project.id, "dispatch:#{parent.id}"),
@@ -159,6 +160,7 @@ defmodule BorsNG.Worker.SpeculativeTrain do
          true <- main == parent.base_sha,
          true <- barrier_free?(candidate, conn),
          {:ok, :ok} <- reserve(candidate, conn),
+         false <- event?(candidate, "train_released"),
          true <- length(reservations(project.id)) < 3 do
       candidate
     else
