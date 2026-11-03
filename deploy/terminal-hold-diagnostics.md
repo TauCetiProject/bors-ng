@@ -33,6 +33,17 @@ first failures recorded at 17:43:35.739 and 17:45:22.594. Their timings exclude
 them as causes of the original 17:13–17:43 delay; they may affect subsequent
 queue progress. Their old records retain the class but no stack location.
 
+The exception is independently reproducible in `Zulip.send_message/1` line 15:
+production does not set `:is_test`, so `Application.get_env(:bors, :is_test)`
+returns nil. Its use as the left operand of strict `or` raises `BadBooleanError`
+before notification delivery. Tests set `:is_test=true`, masking the condition.
+This runs immediately after `terminal_observed` and before queue-label cleanup
+and the next completion poll are enqueued. That matches the first historical
+exception timestamp. The patch supplies a false default and tests production's
+missing flag with disabled/incomplete notification configuration, without network
+delivery. The original historical stack was not retained, but this exact failure
+is now reproduced and fixed.
+
 ## Added diagnostics
 
 - Candidate events `completion_deferred` record terminal status summary, hold
@@ -60,4 +71,5 @@ The smallest direct repair is a durable short recheck whenever train guarding
 holds a completed result, respecting real recovery deadlines. A separate decision
 is whether ordinary eligibility refreshes should count as withdrawal barriers;
 do not weaken that predicate merely to avoid its missing-wakeup consequence.
-The boolean exceptions need the new persisted stack location before attribution.
+The reproduced notification boolean bug is fixed here; persisted exception
+locations will distinguish any additional boolean failures after rollout.
