@@ -185,6 +185,70 @@ class DiagnosticsTest(unittest.TestCase):
         self.assertEqual(diagnostics.parse(text), [dict(kind='duplicate_declaration', paths=[
             'TauCeti/Laurent/Collisions.lean', 'TauCeti/Nonmonic/Multiplicity.lean'])])
 
+    def test_axioms_duplicate_declarations_line_names_both_modules(self):
+        # Actual audit output from candidate 1930 (batch 2623, run 41720048125).
+        text = ('2026-11-03T21:46:00.5380860Z duplicate-declarations: '
+                'SimpleGraph.Walk.IsPath.start_notMem_tail_support is declared in both '
+                'TauCeti.Combinatorics.SimpleGraph.Connectivity.Menger and TauCeti.Combinatorics.SimpleGraph.Paths\n'
+                '2026-11-03T21:46:00.5423722Z Keep one canonical declaration and import its module from the other files.\n'
+                '2026-11-03T21:46:02.4637030Z ##[error]Process completed with exit code 1.\n')
+        self.assertEqual(diagnostics.parse(text), [dict(kind='duplicate_declaration', paths=[
+            'TauCeti/Combinatorics/SimpleGraph/Connectivity/Menger.lean',
+            'TauCeti/Combinatorics/SimpleGraph/Paths.lean'])])
+        # A dependency module keeps its non-project path; the mapper leaves it unowned.
+        text = "duplicate-declarations: Foo.bar' is declared in both Mathlib.Order.Basic and TauCeti.Order.Basic"
+        self.assertEqual(diagnostics.parse(text), [dict(kind='duplicate_declaration', paths=[
+            'Mathlib/Order/Basic.lean', 'TauCeti/Order/Basic.lean'])])
+        for text in ['duplicate-declarations: Foo.bar is declared in both Mathlib.A and Mathlib.B',
+                     'duplicate-declarations: checked 23614 TauCeti modules and 9083 dependency modules; '
+                     'no duplicate declarations.',
+                     'duplicate-declarations: Foo.bar is declared in both TauCeti.A and TauCeti.B extra',
+                     'duplicate-declarations: Foo.bar is declared in both TauCeti.A and ../TauCeti.B',
+                     'duplicate-declarations: Foo.bar is declared in both TauCeti.' + 'A' * 600 + ' and TauCeti.B']:
+            self.assertEqual(diagnostics.parse(text), [], text[:80])
+
+    def test_unmatched_failure_lines_are_sampled_only_when_nothing_is_attributed(self):
+        lines = ['2026-11-03T21:46:00.1Z error: something the parser does not know\n',
+                 '2026-11-03T21:46:00.2Z error: build failed\n',
+                 "error: TauCeti/A.lean: bad import 'TauCeti.B'\n",
+                 '\u2716 [1/2] Building TauCeti.B (cancelled)\n',
+                 '\u2716 [2/2] Running TauCeti.C\n',
+                 'lint-env: 1 (linter, declaration) violation(s).\n', 'ordinary output\n']
+        sample = []
+        self.assertEqual(diagnostics.parse_lines(iter(lines), sample), [])
+        self.assertEqual(sample, ['error: something the parser does not know',
+                                  '\u2716 [2/2] Running TauCeti.C',
+                                  'lint-env: 1 (linter, declaration) violation(s).'])
+        sample = []
+        many = ['error: unknown %d %s\n' % (i, 'x' * 600) for i in range(20)]
+        diagnostics.parse_lines(iter(many), sample)
+        self.assertEqual(len(sample), diagnostics.UNMATCHED_SAMPLE)
+        self.assertTrue(all(len(line) == diagnostics.UNMATCHED_BYTES for line in sample))
+        self.assertEqual(diagnostics.parse_lines(iter(lines)), [])
+
+        def read(repo, job, token, deadline, sample):
+            text = self.PRIMARY if job == 1 else 'error: unknown failure\n'
+            return diagnostics.parse_lines(iter(text.splitlines(True)), sample), len(text)
+
+        with patch.object(diagnostics, 'read_log', side_effect=read), \
+                patch.dict('os.environ', {'BORS_DIAGNOSTICS_TOKEN': 'secret'}):
+            result = diagnostics.collect(dict(repository_id=1, job_ids=[1, 2]))
+        self.assertNotIn('unmatched_sample', result['jobs'][0])
+        self.assertEqual(result['jobs'][1]['unmatched_sample'], ['error: unknown failure'])
+        self.assertEqual(result['jobs'][1]['observations'], [])
+
+    def test_module_only_environment_locations_keep_the_path_without_a_range(self):
+        finding = dict(linter='unusedArguments',
+                       declaration='_private.TauCeti.LowDimTopology.DehnSurgery.Slope.0.TauCeti.slopeSetoid',
+                       path='TauCeti/LowDimTopology/DehnSurgery/Slope.lean')
+        self.assertEqual(diagnostics.parse(self.envelope([finding])), [dict(
+            kind='environment_linter', linter='unusedArguments', declaration=finding['declaration'],
+            paths=[finding['path']])])
+        for change in [dict(line=3), dict(column=3), dict(path='Mathlib/Other.lean'),
+                       dict(path='TauCeti/../Other.lean'), dict(unknown='missing_range')]:
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                diagnostics.parse(self.envelope([{**finding, **change}]))
+
     def test_primary_located_error_survives_downstream_import_and_cancellation_noise(self):
         text = ('2026-10-15T23:48:42.9385318Z error: TauCeti/Geometry/RealAlgebraic/CAD/McCallum.lean:192:43: '
                 '`MvPolynomial.X_prime` has been deprecated: Use `MvPolynomial.prime_X` instead\n'

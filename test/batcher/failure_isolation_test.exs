@@ -1087,6 +1087,39 @@ defmodule BorsNG.Worker.FailureIsolationTest do
     assert {:ok, [1]} = FailureDiagnostics.map_paths(hints, environment_result([unchanged]))
   end
 
+  test "audit duplicate lines and module-only lint locations map to their changed owners", c do
+    alias BorsNG.Worker.FailureDiagnostics
+
+    result =
+      parsed_log_result("""
+      2026-11-03T21:46:00.5380860Z duplicate-declarations: Probe.lemma is declared in both TauCeti.File2 and TauCeti.Provider
+      2026-11-03T21:46:00.5423722Z Keep one canonical declaration and import its module from the other files.
+      """)
+
+    assert [%{"kind" => "duplicate_declaration"}] = hd(result["jobs"])["observations"]
+    assert {:ok, [2]} = FailureDiagnostics.map_paths(c.hints, result)
+
+    dependency =
+      parsed_log_result(
+        "duplicate-declarations: Probe.lemma is declared in both Mathlib.Order.Basic and TauCeti.File3"
+      )
+
+    assert {:ok, [3]} = FailureDiagnostics.map_paths(c.hints, dependency)
+    assert :unavailable = FailureDiagnostics.provider_paths(c.hints, dependency)
+    assert :unavailable = FailureDiagnostics.collision_paths(c.hints, dependency)
+
+    finding = %{
+      linter: "unusedArguments",
+      declaration: "_private.TauCeti.File2.0.TauCeti.slopeSetoid",
+      path: "TauCeti/File2.lean"
+    }
+
+    assert {:ok, [2]} = FailureDiagnostics.map_paths(c.hints, environment_result([finding]))
+
+    assert :unavailable =
+             BorsNG.Worker.PrivateOrigins.paths(c.hints, environment_result([finding]))
+  end
+
   defp ownership_hints(c) do
     provenance =
       BorsNG.Worker.CandidateAssembler.identity(c.candidate)
