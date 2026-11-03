@@ -5,6 +5,17 @@ defmodule BorsNG.Worker.Batcher.QueueAge do
   """
 
   @inherited_retries 3
+  @remainder_reasons ~w(provisional_remainder diagnostic_remainder)
+
+  # A head gets at most three preferred remainder attempts. Repeated failures
+  # cannot renew this scheduling preference through neutral clone operations.
+  def next_remainder(snapshot, reason) do
+    count = if is_map(snapshot), do: Map.get(snapshot, "remainder_retries", 0), else: 4
+
+    if is_integer(count) and count >= 0,
+      do: min(count + if(reason in @remainder_reasons, do: 1, else: 0), 4),
+      else: 4
+  end
 
   # Neutral topology/membership changes cannot spend the unchanged survivors'
   # failure allowance. Unknown reasons conservatively consume it.
@@ -40,6 +51,14 @@ defmodule BorsNG.Worker.Batcher.QueueAge do
     cond do
       rows == [] or length(Enum.uniq(ids)) != length(ids) or :unknown in ages ->
         {fallback(batch, now), :poll_fallback}
+
+      preferred_remainder?(batch, rows) ->
+        # A newly located removal earns its own bounded allowance even when
+        # earlier conflicts/bisections exhausted generic age inheritance.
+        age =
+          rows |> Enum.map(fn {_, _, a} -> a.snapshot["original_admitted_at"] end) |> Enum.min()
+
+        {age, {:diagnostic_remainder, length(rows)}}
 
       :exhausted in ages ->
         {fallback(batch, now), :retry_fairness}
@@ -77,6 +96,19 @@ defmodule BorsNG.Worker.Batcher.QueueAge do
 
   defp member_age(_, _, _), do: :unknown
 
+  defp preferred_remainder?(batch, rows) do
+    batch.sealed == true and length(rows) > 1 and
+      Enum.all?(rows, fn {_, _, admission} ->
+        s = admission.snapshot
+        count = Map.get(s, "remainder_retries", 0)
+
+        s["source"] == "bors.retry" and
+          (s["retry_reason"] in @remainder_reasons or s["verified_remainder"] == true) and
+          is_integer(s["parent_candidate_id"]) and s["parent_candidate_id"] > 0 and
+          is_integer(count) and count in 0..3
+      end)
+  end
+
   defp fallback(batch, now) do
     case batch.last_polled do
       seconds when is_integer(seconds) and seconds >= 0 -> seconds * 1_000_000
@@ -85,9 +117,16 @@ defmodule BorsNG.Worker.Batcher.QueueAge do
   end
 
   def order_key(batch, ages) do
-    {age, _source} = Map.fetch!(ages, batch.id)
+    {age, source} = Map.fetch!(ages, batch.id)
+
+    rank =
+      case source do
+        {:diagnostic_remainder, size} -> {0, -size}
+        _ -> {1, 0}
+      end
+
     # Running batches precede waiting even with an explicit priority >100.
-    {if(batch.state == :running, do: 0, else: 1), -batch.priority, age, batch.last_polled,
+    {if(batch.state == :running, do: 0, else: 1), -batch.priority, rank, age, batch.last_polled,
      batch.id}
   end
 

@@ -25,7 +25,7 @@ ASSEMBLY_MEMBER_LIMIT = 128
 BARRIER_PATH_LIMIT = 4096
 COMPATIBILITY_MEMBER_LIMIT = 32
 PROVIDER_OPERATIONS = ('import_providers', 'bounded_import_providers')
-OFFLINE_OPERATIONS = (*PROVIDER_OPERATIONS, 'collision_sources')
+OFFLINE_OPERATIONS = (*PROVIDER_OPERATIONS, 'collision_sources', 'private_origin_sources')
 PROVIDER_PATH = re.compile(r"TauCeti(?:/[A-Za-z_][A-Za-z0-9_'\-]*)+\.lean\Z")
 BOUNDED_PROVIDER_POLICY = 'bounded_depth_v2'
 PROVIDER_LIMITS = dict(max_depth=5, max_headers=64, max_file_bytes=256 * 1024,
@@ -524,6 +524,13 @@ class Mirror:
             raise Failure('source_output_limit')
         if time.monotonic() >= self.deadline:
             raise Failure('timeout')
+        return result
+
+    def private_origin_sources(self):
+        # Reuse the exact-tree/blob reader and its five-second/512KiB budget.
+        # Existence at an immutable module path is scheduling evidence only.
+        result = self.collision_sources()
+        result['policy'] = 'private-origin-source-v1'
         return result
 
     def import_providers(self):

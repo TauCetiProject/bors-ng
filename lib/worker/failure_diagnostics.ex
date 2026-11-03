@@ -4,6 +4,7 @@ defmodule BorsNG.Worker.FailureDiagnostics do
   alias BorsNG.Database.{CandidateEvent, Repo}
   alias BorsNG.Worker.{CandidateAssembler, CandidateJournal, FailureIsolation, LocalGit}
   alias BorsNG.Worker.DiagnosticReporting
+  alias BorsNG.Worker.PrivateOrigins
   alias BorsNG.Worker.Orchestration.Outbox
   @parser_version "streaming-v2"
 
@@ -21,7 +22,8 @@ defmodule BorsNG.Worker.FailureDiagnostics do
         conn,
         collector \\ nil,
         providers \\ nil,
-        sources \\ &LocalGit.collision_sources/4
+        sources \\ &LocalGit.collision_sources/4,
+        origins \\ &LocalGit.private_origin_sources/4
       ) do
     candidate = CandidateJournal.current(batch)
     hints = FailureIsolation.hints(candidate)
@@ -37,7 +39,8 @@ defmodule BorsNG.Worker.FailureDiagnostics do
       if is_nil(previous) or
            (Process.get(:diagnostic_recovery, false) and
               (previous.details["result"]["complete"] != true or
-                 previous.details["result"]["parser_version"] != @parser_version)) do
+                 previous.details["result"]["parser_version"] != @parser_version or
+                 origin_recovery?(previous.details, hints))) do
         jobs = job_ids(evidence)
         collector = collector || fn conn, jobs -> collect(conn, jobs, evidence) end
 
@@ -45,6 +48,10 @@ defmodule BorsNG.Worker.FailureDiagnostics do
           if length(jobs) in 1..2,
             do: collector.(conn, jobs),
             else: %{"complete" => false, "reason" => "ambiguous_failed_jobs"}
+
+        private_sources = private_lookup(candidate, batch, evidence, hints, result, conn, origins)
+        raw_result = result
+        result = PrivateOrigins.resolve(hints, result, binding, private_sources)
 
         collision_sources =
           collision_lookup(candidate, batch, evidence, hints, result, conn, sources)
@@ -55,6 +62,9 @@ defmodule BorsNG.Worker.FailureDiagnostics do
         CandidateJournal.event(candidate, "failure_diagnostics", "bors.terminal_logs", %{
           binding: binding,
           result: result,
+          raw_result: if(result != raw_result, do: raw_result),
+          private_origin_policy: PrivateOrigins.policy(),
+          private_origin_sources: private_sources,
           collision_sources: collision_sources,
           provider_lookup: provider_sources,
           authority: "retry_only",
@@ -84,7 +94,13 @@ defmodule BorsNG.Worker.FailureDiagnostics do
     :ok
   end
 
-  def recover(candidate_id, batch_id, evidence, collector \\ nil) do
+  def recover(
+        candidate_id,
+        batch_id,
+        evidence,
+        collector \\ nil,
+        origins \\ &LocalGit.private_origin_sources/4
+      ) do
     batch = Repo.get(BorsNG.Database.Batch, batch_id)
 
     if batch do
@@ -101,7 +117,11 @@ defmodule BorsNG.Worker.FailureDiagnostics do
         result = if previous, do: previous.details["result"], else: %{}
         expired = candidate.observed_at < (Outbox.now() - 604_800) * 1_000_000
 
-        if expired or (result["parser_version"] == @parser_version and not retryable?(result)) do
+        hints = FailureIsolation.hints(candidate)
+
+        if expired or
+             (result["parser_version"] == @parser_version and not retryable?(result) and
+                not origin_recovery?(if(previous, do: previous.details, else: %{}), hints)) do
           :ok
         else
           Process.put(:diagnostic_recovery, true)
@@ -111,7 +131,10 @@ defmodule BorsNG.Worker.FailureDiagnostics do
               batch,
               evidence,
               BorsNG.Database.Project.installation_connection(batch.project.repo_xref, Repo),
-              collector
+              collector,
+              nil,
+              &LocalGit.collision_sources/4,
+              origins
             )
 
             current = observation(candidate, binding(candidate, batch.commit, evidence))
@@ -163,8 +186,9 @@ defmodule BorsNG.Worker.FailureDiagnostics do
       )
       |> Enum.uniq_by(fn {_, c} -> c.id end)
       |> Enum.each(fn {event, candidate} ->
-        if event.details["result"]["complete"] != true and
-             event.details["result"]["parser_version"] != @parser_version do
+        if (event.details["result"]["complete"] != true and
+              event.details["result"]["parser_version"] != @parser_version) or
+             origin_recovery?(event.details, fn -> FailureIsolation.hints(candidate) end) do
           failure =
             Repo.one(
               from(e in CandidateEvent,
@@ -198,7 +222,7 @@ defmodule BorsNG.Worker.FailureDiagnostics do
               candidate.project_id,
               "diagnostics",
               {candidate.id, candidate.batch_id, evidence},
-              "diagnostic-parser:#{candidate.id}:#{@parser_version}"
+              "diagnostic-parser:#{candidate.id}:#{@parser_version}:#{PrivateOrigins.policy()}"
             )
           end
         end
@@ -445,6 +469,35 @@ defmodule BorsNG.Worker.FailureDiagnostics do
         else: %{"complete" => false, "reason" => "source_output_limit"}
     else
       _ -> %{"complete" => false, "reason" => "ineligible_collision"}
+    end
+  rescue
+    _ -> %{"complete" => false, "reason" => "source_unavailable"}
+  end
+
+  # Do not add a per-candidate database walk for every historical observation
+  # on startup; only the few legacy private findings need current source hints.
+  defp origin_recovery?(details, hints) when is_function(hints, 0) do
+    details["private_origin_policy"] != PrivateOrigins.policy() and
+      PrivateOrigins.unlocated?(details["result"]) and origin_recovery?(details, hints.())
+  end
+
+  defp origin_recovery?(details, hints) do
+    details["private_origin_policy"] != PrivateOrigins.policy() and
+      match?({:ok, _}, PrivateOrigins.paths(hints, details["result"]))
+  end
+
+  defp private_lookup(candidate, batch, evidence, hints, result, conn, sources) do
+    with {:ok, paths} <- PrivateOrigins.paths(hints, result),
+         true <- current_collision_context?(candidate, hints),
+         true <- batch.base_sha == candidate.snapshot["base_sha"],
+         true <- Enum.map(result["jobs"], & &1["job_id"]) == job_ids(evidence) do
+      lookup = sources.(batch.project, conn, binding(candidate, batch.commit, evidence), paths)
+
+      if is_map(lookup) and byte_size(Jason.encode!(lookup)) <= 64 * 1024,
+        do: lookup,
+        else: %{"complete" => false, "reason" => "source_output_limit"}
+    else
+      _ -> %{"complete" => false, "reason" => "ineligible_private_origin"}
     end
   rescue
     _ -> %{"complete" => false, "reason" => "source_unavailable"}

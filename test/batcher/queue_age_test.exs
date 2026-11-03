@@ -60,6 +60,81 @@ defmodule BorsNG.Worker.QueueAgeTest do
   defp us(timestamp),
     do: timestamp |> DateTime.from_iso8601() |> elem(1) |> DateTime.to_unix(:microsecond)
 
+  defp remainder(b, n, age, count \\ 1) do
+    for i <- 1..n do
+      {l, head, a} = member(b, b.id * 1000 + i, age + i)
+
+      {l, head,
+       %{
+         a
+         | snapshot:
+             Map.merge(a.snapshot, %{
+               "source" => "bors.retry",
+               "retry_reason" => "provisional_remainder",
+               "parent_candidate_id" => 99,
+               "remainder_retries" => count
+             })
+       }}
+    end
+  end
+
+  test "larger exact diagnostic remainders precede ordinary work, after explicit priority and running" do
+    running = batch(1, 10, %{state: :running, priority: 100})
+    installer = batch(2, 20, %{priority: 101})
+    ordinary = batch(3, 10)
+    small = batch(4, 30)
+    large = batch(5, 40)
+
+    rows =
+      [member(ordinary, 3, 1), member(installer, 2, 2)] ++
+        remainder(small, 2, 10) ++ remainder(large, 3, 20)
+
+    assert ordered([small, large, ordinary, installer, running], rows) ==
+             [running, installer, large, small, ordinary]
+
+    # A changed head or missing admission removes preference for the whole group.
+    [{link, _, admission} | rest] = remainder(large, 3, 20)
+
+    assert ordered([large, ordinary], [member(ordinary, 3, 1), {link, "moved", admission} | rest]) ==
+             [ordinary, large]
+
+    assert ordered([large, ordinary], [member(ordinary, 3, 1) | remainder(large, 3, 20, 4)]) ==
+             [ordinary, large]
+
+    refute QueueAge.eligible?(%{large | recovery_after: 101}, 100, true)
+  end
+
+  test "neutral cloning cannot renew a remainder preference after three removals" do
+    count =
+      Enum.reduce(1..10, 0, fn _, count ->
+        count = QueueAge.next_remainder(%{"remainder_retries" => count}, "diagnostic_remainder")
+        QueueAge.next_remainder(%{"remainder_retries" => count}, "train_invalidated")
+      end)
+
+    assert count == 4
+    assert QueueAge.next_remainder(nil, "diagnostic_remainder") == 4
+  end
+
+  test "located removal earns bounded preference after old conflicts exhausted generic retry age" do
+    ordinary = batch(1, 10)
+    retained = batch(2, 20)
+
+    for count <- 0..4 do
+      rows =
+        remainder(retained, 3, 20, count)
+        |> Enum.map(fn {l, h, a} ->
+          {l, h, %{a | snapshot: Map.put(a.snapshot, "queue_age_retries", 3)}}
+        end)
+
+      keys = QueueAge.keys([ordinary, retained], [member(ordinary, 1, 1) | rows], 100)
+
+      assert Enum.sort_by([ordinary, retained], &QueueAge.order_key(&1, keys)) ==
+               if(count <= 3, do: [retained, ordinary], else: [ordinary, retained])
+
+      assert elem(Map.fetch!(keys, retained.id), 0) |> is_integer()
+    end
+  end
+
   test "frozen Oct16 queue replays exactly, retaining running sentinel and all member data" do
     frozen = [
       {854, "2026-10-16T04:26:53Z", "2026-10-14T20:28:37.304621Z", 1},
