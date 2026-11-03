@@ -2038,7 +2038,9 @@ defmodule BorsNG.Worker.Batcher do
   end
 
   defp local_import_preflight(batch, links, candidate, result) do
-    if Train.tracked?(candidate) do
+    # A reservation also tracks ordinary roots. Only descendants depend on an
+    # unpromoted predecessor and need the conservative train fallback here.
+    if candidate.snapshot["speculative_predecessor_id"] do
       :dispatch
     else
       if Process.get(:orchestration_executor, false),

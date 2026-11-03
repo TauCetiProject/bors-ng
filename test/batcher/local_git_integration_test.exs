@@ -107,9 +107,18 @@ defmodule BorsNG.Worker.LocalGitIntegrationTest do
     elif request['operation']=='assemble':
         hints={}
         if os.environ.get('BORS_TEST_MISSING_IMPORT'):
-            hints=dict(complete=True,changed_files=[dict(pr=m['pr'],head_sha=m['head_sha'],paths=['TauCeti/File'+str(m['pr'])+'.lean']) for m in request['members']],import_edges=[],missing_imports=[dict(pr=1,path='TauCeti/File1.lean',provider_path='TauCeti/Absent.lean')])
+            missing_pr=int(os.environ.get('BORS_TEST_MISSING_IMPORT_PR','1'))
+            missing=[dict(pr=missing_pr,path='TauCeti/File'+str(missing_pr)+'.lean',module='TauCeti.Absent',provider_path='TauCeti/Absent.lean')] if any(m['pr']==missing_pr for m in request['members']) else []
+            hints=dict(complete=True,changed_files=[dict(pr=m['pr'],head_sha=m['head_sha'],paths=['TauCeti/File'+str(m['pr'])+'.lean']) for m in request['members']],import_edges=[],missing_imports=missing)
             hints.update(ownership_complete=True,dependencies_complete=True,provenance=request['identity'] | dict(commit='#{@commit}',tree='#{@tree}',members=[dict(pr=m['pr'],head_sha=m['head_sha']) for m in request['members']]))
         print(json.dumps(dict(status='ok',result=request['identity'] | dict(commit='#{@commit}',tree='#{@tree}'),diagnostic_hints=hints,commits=request['members'],git_version='test',mirror_bytes=1)))
+    elif request['operation']=='compatibility' and os.environ.get('BORS_TEST_MISSING_IMPORT_PR'):
+        missing_pr=int(os.environ['BORS_TEST_MISSING_IMPORT_PR'])
+        results=[]
+        for member in request['members']:
+            missing=[dict(path='TauCeti/File'+str(missing_pr)+'.lean',module='TauCeti.Absent',provider_path='TauCeti/Absent.lean')] if member['pr']==missing_pr else []
+            results.append(dict(pr=member['pr'],head_sha=member['head_sha'],base_sha=request['base_sha'],policy='local-source-v3',status='missing_source' if missing else 'pass',coverage='all_project_local_headers',missing_imports=missing))
+        print(json.dumps(dict(status='ok',results=results)))
     else:
         print(json.dumps(dict(status='ok')))
     """
@@ -123,6 +132,7 @@ defmodule BorsNG.Worker.LocalGitIntegrationTest do
       System.put_env("PATH", old_path)
       System.delete_env("BORS_TEST_HELPER_FAILURE")
       System.delete_env("BORS_TEST_MISSING_IMPORT")
+      System.delete_env("BORS_TEST_MISSING_IMPORT_PR")
       File.rm_rf!(dir)
     end)
 
@@ -1124,6 +1134,127 @@ defmodule BorsNG.Worker.LocalGitIntegrationTest do
     end
 
     assert Repo.get!(Patch, ctx.patch.id).manual_approval == ctx.patch.manual_approval
+  end
+
+  test "reserved root isolates a missing import beyond admission coverage and hands it to repair",
+       ctx do
+    alias BorsNG.Worker.{SourceCompatibility, SpeculativeTrain}
+    alias BorsNG.Worker.Orchestration.{Outbox, Worker}
+    alias BorsNG.Database.OrchestrationJob
+
+    :sys.suspend(BorsNG.Worker.Orchestration.Dispatcher)
+
+    env =
+      %{
+        "BORS_ASYNC_ORCHESTRATION" => "true",
+        "BORS_STAGE_DISPATCH_PROJECT" => ctx.project.name,
+        "BORS_SPECULATIVE_TRAINS" => "true",
+        "BORS_TEST_MISSING_IMPORT" => "true",
+        "BORS_TEST_MISSING_IMPORT_PR" => "33"
+      }
+      |> Map.merge(
+        Map.new([16231, 16232, 16234], fn issue ->
+          {"BORS_SPECULATION_GATE_#{issue}",
+           "https://github.com/TauCetiProject/TauCeti/issues/#{issue}#issuecomment-123"}
+        end)
+      )
+
+    previous = Map.new(env, fn {key, _} -> {key, System.get_env(key)} end)
+    Enum.each(env, fn {key, value} -> System.put_env(key, value) end)
+
+    on_exit(fn ->
+      Enum.each(previous, fn
+        {key, nil} -> System.delete_env(key)
+        {key, value} -> System.put_env(key, value)
+      end)
+
+      :sys.resume(BorsNG.Worker.Orchestration.Dispatcher)
+    end)
+
+    for n <- 2..33 do
+      patch =
+        Repo.insert!(%Patch{
+          project_id: ctx.project.id,
+          pr_xref: n,
+          commit: @head,
+          into_branch: "main",
+          manual_approval: ctx.patch.manual_approval
+        })
+
+      CandidateJournal.insert_member(
+        LinkPatchBatch.changeset(%LinkPatchBatch{}, %{
+          patch_id: patch.id,
+          batch_id: ctx.batch.id,
+          head_sha: @head,
+          reviewer: "human",
+          manual_approval: patch.manual_approval
+        })
+      )
+
+      state = GitHub.ServerMock.get_state()
+
+      GitHub.ServerMock.put_state(
+        state
+        |> put_in([@conn, :pulls, n], %{state[@conn].pulls[1] | number: n})
+        |> put_in([@conn, :pr_commits, n], state[@conn].pr_commits[1])
+        |> put_in([@conn, :labels, n], [])
+        |> put_in([@conn, :comments, n], [])
+      )
+    end
+
+    worker = start_supervised!({Worker, ctx.project.id})
+    job = Outbox.enqueue(ctx.project.id, "info", {:poll, :once})
+    {:ok, claimed} = Outbox.claim(job.id)
+    send(worker, {:execute, self(), claimed})
+    assert_receive {:finished, ^worker, ^claimed, :ok}, 5000
+    Outbox.finish(claimed)
+    parent = Repo.get!(Batch, ctx.batch.id)
+    candidate = CandidateJournal.latest(parent.id)
+    assert SpeculativeTrain.tracked?(candidate)
+    assert is_nil(candidate.snapshot["speculative_predecessor_id"])
+    assert parent.state == :error
+    assert Enum.any?(events(parent), &(&1.kind == "local_import_failure"))
+    refute Enum.any?(events(parent), &(&1.kind == "dispatch_requested"))
+    refute Repo.exists?(from(j in OrchestrationJob, where: j.kind == "dispatch"))
+
+    children = Repo.all(from(b in Batch, where: b.id != ^parent.id))
+
+    assert Enum.sort(Enum.map(children, &length(Repo.all(LinkPatchBatch.from_batch(&1.id))))) ==
+             [1, 32]
+
+    suspect_batch =
+      Enum.find(children, &(length(Repo.all(LinkPatchBatch.from_batch(&1.id))) == 1))
+
+    [suspect] = Repo.all(LinkPatchBatch.from_batch(suspect_batch.id)) |> Repo.preload(:patch)
+    assert suspect.patch.pr_xref == 33
+    assert is_nil(suspect.patch.source_compatibility)
+
+    # Normal singleton admission confirms the source failure and uses the
+    # existing repair request, with no authoritative CI run for the bad head.
+    assert [] ==
+             SourceCompatibility.admit(ctx.project, @conn, suspect_batch, [suspect], @base)
+
+    repaired = Repo.get!(Patch, suspect.patch_id)
+    assert SourceCompatibility.requested?(repaired, @head)
+    assert repaired.source_compatibility["status"] == "missing_source"
+    assert is_nil(repaired.manual_approval)
+    assert "needs-rebase" in GitHub.ServerMock.get_state()[@conn].labels[33]
+
+    assert Outbox.pending?(
+             ctx.project.id,
+             "source-repair:#{ctx.project.id}:33:#{@head}:#{@base}"
+           )
+
+    healthy_batch = Enum.find(children, &(&1.id != suspect_batch.id))
+
+    for link <- Repo.all(LinkPatchBatch.from_batch(healthy_batch.id)) do
+      assert link.manual_approval == ctx.link.manual_approval
+      assert link.head_sha == @head
+      assert link.reviewer == "human"
+    end
+
+    SpeculativeTrain.reconcile(ctx.project.id, @conn)
+    assert SpeculativeTrain.reservations(ctx.project.id) == []
   end
 
   test "async local publication retains its immutable recipe across executor restart", ctx do
