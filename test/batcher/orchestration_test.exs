@@ -474,8 +474,7 @@ defmodule BorsNG.Worker.OrchestrationTest do
     ref = Process.monitor(ctx.worker)
     send(ctx.worker, {:execute, self(), claimed})
     # Kill only once the executor has returned its sandbox connection and is
-    # blocked at the first external read. Killing mid-query destroys MySQL
-    # Sandbox ownership, which is a test-fixture failure rather than recovery.
+    # blocked at the first external read before testing recovery.
     await_github_call(ctx.worker)
     Process.exit(ctx.worker, :kill)
     assert_receive {:DOWN, ^ref, :process, _, :killed}, 1000
@@ -1825,12 +1824,6 @@ defmodule BorsNG.Worker.OrchestrationTest do
     assert Repo.get!(OrchestrationJob, job.id).state == "done"
     assert Repo.get!(OrchestrationJob, job.id).last_error == "project_deleted"
     assert Repo.get!(Project, ctx.project.id)
-  end
-
-  test "durable batch recipes survive the MySQL 64 KiB binary boundary", ctx do
-    recipe = %{members: [String.duplicate("immutable attribution ", 5000)]}
-    job = Outbox.enqueue(ctx.project.id, "info", recipe)
-    assert Outbox.payload(Repo.get!(OrchestrationJob, job.id)) == recipe
   end
 
   test "restart recovery fences old completion and does not reclaim a live lease", ctx do

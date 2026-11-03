@@ -1,13 +1,5 @@
 import Config
 
-config :bors, BorsNG.Database.RepoMysql,
-  username: "root",
-  password: "",
-  database: "bors_test",
-  hostname: {:system, "MYSQL_HOST", "localhost"},
-  pool: Ecto.Adapters.SQL.Sandbox,
-  priv: "priv/repo"
-
 config :bors, BorsNG.Database.RepoPostgres,
   url: {:system, "DATABASE_URL_TEST", "postgresql://postgres:Postgres1234@localhost/bors_test"},
   pool: Ecto.Adapters.SQL.Sandbox,

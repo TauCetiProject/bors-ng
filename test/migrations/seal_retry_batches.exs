@@ -1,13 +1,11 @@
 # Run against a NEW disposable database (never production):
 # MIX_ENV=test DATABASE_URL_TEST=postgresql://.../empty_db mix run --no-start test/migrations/seal_retry_batches.exs
-# For MySQL, set BORS_DATABASE=mysql and override RepoMysql's test database first.
 import ExUnit.Assertions
 alias BorsNG.Database.{Batch, Installation, Patch, Project, Repo}
 
 assert Mix.env() == :test
 Application.ensure_all_started(:ecto_sql)
 Application.ensure_all_started(:postgrex)
-Application.ensure_all_started(:myxql)
 BorsNG.Application.set_repo()
 repo = BorsNG.Application.fetch_repo()
 config = Confex.Resolver.resolve!(repo.config())
