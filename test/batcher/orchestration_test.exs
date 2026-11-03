@@ -1907,7 +1907,7 @@ defmodule BorsNG.Worker.OrchestrationTest do
     GitHub.ServerMock.put_state(
       GitHub.ServerMock.get_state()
       |> put_in([ctx.conn, :statuses, batch.commit], %{"ci" => :ok, "cd" => :ok})
-      |> Map.put(:get_pr_error, 2)
+      |> Map.put(:get_pr_error, 1)
     )
 
     job = Outbox.enqueue(ctx.project.id, "cast", {:status, {batch.commit, "ci", :ok, "url"}})
@@ -1925,6 +1925,191 @@ defmodule BorsNG.Worker.OrchestrationTest do
     assert :ok == execute(ctx.worker, job)
     assert Repo.get!(Batch, batch.id).state == :ok
     assert get_in(GitHub.ServerMock.get_state(), [ctx.conn, :branches, "master"]) == batch.commit
+  end
+
+  defp enable_identity_batching(ctx) do
+    old = System.get_env("BORS_PROJECT")
+    System.put_env("BORS_PROJECT", "owner/repo")
+    ctx.project |> Project.changeset(%{name: "owner/repo"}) |> Repo.update!()
+
+    on_exit(fn ->
+      if old, do: System.put_env("BORS_PROJECT", old), else: System.delete_env("BORS_PROJECT")
+    end)
+  end
+
+  defp green_promotion(ctx) do
+    dispatch = construct(ctx)
+    assert :ok == execute(ctx.worker, dispatch)
+    batch = Repo.get!(Batch, ctx.batch.id)
+    enable_identity_batching(ctx)
+
+    GitHub.ServerMock.put_state(
+      GitHub.ServerMock.get_state()
+      |> put_in([ctx.conn, :statuses, batch.commit], %{"ci" => :ok, "cd" => :ok})
+      |> Map.put(:batch_read_calls, [])
+    )
+
+    job = Outbox.enqueue(ctx.project.id, "cast", {:status, {batch.commit, "ci", :ok, "url"}})
+    {batch, job}
+  end
+
+  defp add_promotion_members(ctx, numbers) do
+    for number <- numbers do
+      head = "N#{number}"
+
+      pr = %{
+        get_in(GitHub.ServerMock.get_state(), [ctx.conn, :pulls, 1])
+        | number: number,
+          head_sha: head
+      }
+
+      GitHub.ServerMock.put_state(
+        GitHub.ServerMock.get_state()
+        |> put_in([ctx.conn, :pulls, number], pr)
+        |> put_in([ctx.conn, :pr_commits, number], [%GitHub.Commit{sha: head}])
+        |> put_in([ctx.conn, :comments, number], [])
+      )
+
+      patch =
+        Repo.insert!(%Patch{
+          project_id: ctx.project.id,
+          pr_xref: number,
+          commit: head,
+          into_branch: "master"
+        })
+
+      Batcher.handle_cast({:reviewed, patch.id, "reviewer"}, ctx.project.id)
+      Repo.get!(Patch, patch.id)
+    end
+  end
+
+  test "forty-one-member promotion uses three identity batches and no individual draft reads",
+       ctx do
+    add_promotion_members(ctx, 2..41)
+    # The mock normally concatenates symbolic heads; use a bounded assembled
+    # identity so a large cohort still fits the database's SHA column.
+    GitHub.ServerMock.put_state(
+      Map.put(GitHub.ServerMock.get_state(), :merge_tree, "integration")
+    )
+
+    {batch, job} = green_promotion(ctx)
+    github = Process.whereis(GitHub)
+    :erlang.trace(github, true, [:receive])
+
+    try do
+      assert :ok == execute(ctx.worker, job)
+      assert Repo.get!(Batch, batch.id).state == :ok
+      calls = GitHub.ServerMock.get_state().batch_read_calls
+      assert Enum.all?(calls, fn {mode, _} -> mode == :identity end)
+      assert Enum.sort(Enum.map(calls, fn {_, prs} -> length(prs) end)) == [1, 20, 20]
+      assert Enum.sort(Enum.flat_map(calls, fn {_, prs} -> prs end)) == Enum.to_list(1..41)
+
+      delivered = :erlang.trace_delivered(github)
+      assert_receive {:trace_delivered, ^github, ^delivered}
+      assert_received {:trace, ^github, :receive, {:"$gen_call", _, {:batch_read, _, _}}}
+      refute_received {:trace, ^github, :receive, {:"$gen_call", _, {:get_pr, _, _}}}
+    after
+      :erlang.trace(github, false, [:receive])
+    end
+  end
+
+  test "a draft in the identity batch drops its bundle and preserves healthy peers", ctx do
+    [sibling, healthy] = add_promotion_members(ctx, 2..3)
+    bundle = Repo.insert!(BorsNG.Database.PatchBundle.new(ctx.project.id))
+
+    for patch <- [Repo.get!(Patch, ctx.patch.id), sibling] do
+      patch
+      |> Patch.changeset(%{bundle_id: bundle.id, bundle_reviewer: "reviewer"})
+      |> Repo.update!()
+    end
+
+    {batch, job} = green_promotion(ctx)
+
+    GitHub.ServerMock.put_state(
+      put_in(GitHub.ServerMock.get_state(), [ctx.conn, :pulls, 1, Access.key(:draft)], true)
+    )
+
+    assert :ok == execute(ctx.worker, job)
+    assert Repo.get!(Batch, batch.id).state == :canceled
+    assert get_in(GitHub.ServerMock.get_state(), [ctx.conn, :branches, "master"]) == "ini"
+
+    retry =
+      Repo.one!(from(b in Batch, where: b.project_id == ^ctx.project.id and b.state == :waiting))
+
+    assert [kept] = Repo.all(BorsNG.Database.LinkPatchBatch.from_batch(retry.id))
+
+    assert {kept.patch_id, kept.head_sha, kept.reviewer} ==
+             {healthy.id, healthy.commit, "reviewer"}
+
+    for patch <- [ctx.patch, sibling] do
+      refute Repo.get!(Patch, patch.id).queue_pending
+      assert Repo.get!(Patch, patch.id).bundle_reviewer == nil
+    end
+  end
+
+  test "a draft found in the promotion identity batch is returned without merging", ctx do
+    {batch, job} = green_promotion(ctx)
+
+    GitHub.ServerMock.put_state(
+      put_in(GitHub.ServerMock.get_state(), [ctx.conn, :pulls, 1, Access.key(:draft)], true)
+    )
+
+    assert :ok == execute(ctx.worker, job)
+    assert Repo.get!(Batch, batch.id).state == :canceled
+    refute Repo.get!(Patch, ctx.patch.id).queue_pending
+    assert get_in(GitHub.ServerMock.get_state(), [ctx.conn, :branches, "master"]) == "ini"
+    assert GitHub.ServerMock.get_state().batch_read_calls == [{:identity, [1]}]
+  end
+
+  for {field, value} <- [head_sha: "new-live-head", state: :closed, base_ref: "other"] do
+    test "promotion identity batch rejects a changed #{field} without a webhook", ctx do
+      {batch, job} = green_promotion(ctx)
+
+      GitHub.ServerMock.put_state(
+        put_in(
+          GitHub.ServerMock.get_state(),
+          [ctx.conn, :pulls, 1, Access.key(unquote(field))],
+          unquote(value)
+        )
+      )
+
+      assert {:error, {:throw, :stale_candidate_member}} == execute(ctx.worker, job)
+      assert Repo.get!(Batch, batch.id).state == :canceled
+      assert get_in(GitHub.ServerMock.get_state(), [ctx.conn, :branches, "master"]) == "ini"
+    end
+  end
+
+  test "an unavailable identity batch and fallback hold promotion and retain approvals", ctx do
+    {batch, job} = green_promotion(ctx)
+    approval = Repo.get!(Patch, ctx.patch.id)
+
+    GitHub.ServerMock.put_state(
+      GitHub.ServerMock.get_state()
+      |> Map.put(:batch_read_error, {:identity, {:error, :batch_read, 502}})
+      |> Map.put(:identity_read_error, {:error, :get_pr, 502, 1})
+    )
+
+    assert :ok == execute(ctx.worker, job)
+    assert Repo.get!(Batch, batch.id).state == :running
+    assert Repo.get!(Batch, batch.id).promotion_failures == 1
+    assert Enum.all?(Repo.all(Status.all_for_batch(batch.id)), &(&1.state == :ok))
+    assert Repo.get!(Patch, ctx.patch.id).queue_pending == approval.queue_pending
+    assert Repo.get!(Patch, ctx.patch.id).manual_approval == approval.manual_approval
+    assert get_in(GitHub.ServerMock.get_state(), [ctx.conn, :branches, "master"]) == "ini"
+
+    # A retry reads live identities again; the earlier green verdict cannot
+    # authorize a PR that went draft while identity reads were unavailable.
+    GitHub.ServerMock.put_state(
+      GitHub.ServerMock.get_state()
+      |> Map.delete(:batch_read_error)
+      |> Map.delete(:identity_read_error)
+      |> put_in([ctx.conn, :pulls, 1, Access.key(:draft)], true)
+    )
+
+    Repo.get!(Batch, batch.id) |> Batch.changeset(%{promotion_retry_at: 0}) |> Repo.update!()
+    assert :ok == execute(ctx.worker, job)
+    assert Repo.get!(Batch, batch.id).state == :canceled
+    assert get_in(GitHub.ServerMock.get_state(), [ctx.conn, :branches, "master"]) == "ini"
   end
 
   test "promotion accepted before crash is recovered without reviving the batch", ctx do

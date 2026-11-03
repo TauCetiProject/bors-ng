@@ -3975,11 +3975,24 @@ defmodule BorsNG.Worker.Batcher do
         :canceled
 
       :ok ->
-        case draft_patches(batch) do
-          [] -> push_completed_batch(batch, statuses)
-          drafts -> abort_draft_merge(batch, drafts)
+        {drafts, live} = promotion_members(batch, conn, links)
+
+        case drafts do
+          [] -> push_completed_batch(batch, statuses, live)
+          _ -> abort_draft_merge(batch, drafts)
         end
     end
+  catch
+    :throw, {:live_members_unavailable, reason} ->
+      CandidateJournal.event(
+        CandidateJournal.current(batch),
+        "promotion_read_deferred",
+        "bors.live_read",
+        %{error: reason}
+      )
+
+      defer_promotion(batch, {:live_members_unavailable, reason})
+      :running
   end
 
   defp defer_pending_result(batch) do
@@ -4122,7 +4135,27 @@ defmodule BorsNG.Worker.Batcher do
     :error
   end
 
-  # The last gate before the push. A draft is not supposed to reach a batch —
+  defp promotion_members(batch, conn, links) do
+    if Process.get(:orchestration_executor, false) do
+      # One fresh identity read supplies both the draft gate and the final
+      # head/open/base checks. It is local to this promotion attempt, never a
+      # cross-attempt cache. Missing identities defer promotion, not approvals.
+      live =
+        phase(batch, :promotion_live_members, fn -> read_live_members!(batch, conn, links) end)
+
+      drafts =
+        links
+        |> Enum.map(& &1.patch)
+        |> Enum.sort_by(& &1.pr_xref)
+        |> Enum.filter(&Map.fetch!(live, &1.pr_xref).draft)
+
+      {drafts, live}
+    else
+      {draft_patches(batch), nil}
+    end
+  end
+
+  # Legacy synchronous path. A draft is not supposed to reach a batch —
   # `Command.run/1` refuses `r+` on one, and converting to draft cancels the
   # batch — but both hang on a webhook, and nothing between here and the merge
   # re-checks. `Divider`'s mergeability check is only reached once a batch has
@@ -4226,13 +4259,17 @@ defmodule BorsNG.Worker.Batcher do
 
   defp ensure_live_members!(batch, conn) do
     links = Repo.all(LinkPatchBatch.from_batch(batch.id))
+    ensure_live_members!(batch, links, read_live_members!(batch, conn, links))
+  end
 
-    live =
-      case live_member_reads(conn, batch.project, links) do
-        {:ok, live} -> live
-        {:error, reason} -> throw({:live_members_unavailable, reason})
-      end
+  defp read_live_members!(batch, conn, links) do
+    case live_member_reads(conn, batch.project, links) do
+      {:ok, live} -> live
+      {:error, reason} -> throw({:live_members_unavailable, reason})
+    end
+  end
 
+  defp ensure_live_members!(batch, links, live) do
     Enum.each(links, fn link ->
       # Fail closed on an unavailable live read. Cached webhook heads cannot
       # authorize a prioritized dispatch while a push/close is still in transit.
@@ -4252,7 +4289,7 @@ defmodule BorsNG.Worker.Batcher do
     if Outbox.withdrawal_pending?(batch.project_id, ids), do: throw(:withdrawal_pending)
   end
 
-  defp push_completed_batch(batch, statuses) do
+  defp push_completed_batch(batch, statuses, live) do
     project = batch.project
     repo_conn = get_repo_conn(project)
 
@@ -4292,7 +4329,7 @@ defmodule BorsNG.Worker.Batcher do
       links = Repo.all(LinkPatchBatch.from_batch(batch.id))
       ensure_no_withdrawal!(batch, Enum.map(links, & &1.patch_id))
 
-      ensure_live_members!(batch, repo_conn)
+      ensure_live_members!(batch, links, live)
     end
 
     if Process.get(:orchestration_executor, false) and not promotion_requested?(batch) do
@@ -4441,17 +4478,6 @@ defmodule BorsNG.Worker.Batcher do
 
         :running
     end
-  catch
-    :throw, {:live_members_unavailable, reason} ->
-      CandidateJournal.event(
-        CandidateJournal.current(batch),
-        "promotion_read_deferred",
-        "bors.live_read",
-        %{error: reason}
-      )
-
-      defer_promotion(batch, {:live_members_unavailable, reason})
-      :running
   end
 
   defp defer_promotion(batch, reason) do
