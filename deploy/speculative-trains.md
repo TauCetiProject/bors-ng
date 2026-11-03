@@ -110,7 +110,7 @@ Activation is a separate reviewed deployment configuring:
 
 The initial canary advances the Durable Object's one-shot startup epoch from
 `outbox-v1` to `outbox-v2-train-canary-1`. The November catch-up epoch is
-`outbox-v2-train-canary-10-large-batches-1`, refreshing warm process settings once. A warm container receives a bounded
+`outbox-v2-train-canary-10-large-batches-2`, refreshing warm process settings once. A warm container receives a bounded
 graceful stop before the new epoch is acknowledged; a failed stop retries without
 clearing durable work or reservations. Later requests at the same epoch do not
 restart the container. Confirm `/health/` returns `x-bors-speculative-trains: true`:
@@ -135,3 +135,13 @@ work runs serially within the remaining capacity. Do not clear reservations to
 accelerate rollback. Publication secrets remain isolated, trusted scripts stay
 workflow-pinned, and ordinary PR-produced compiled files never enter shared
 staging caches.
+
+## Separate startup refresh after the image rollout
+
+On November 3, the new image reported the old one-successor environment despite
+the deployed Worker containing ten. Refresh the activation epoch in a separate
+Worker deployment after the image is available, using `wrangler deploy
+--containers-rollout=none`. Verify the backend header reports ten before treating
+the canary as active. A successful image build alone does not establish that
+startup settings reached the running process. Preserve the in-flight candidate
+and let native lease recovery resume any interrupted controller operation.
