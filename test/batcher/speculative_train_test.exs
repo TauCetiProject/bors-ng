@@ -194,6 +194,75 @@ defmodule BorsNG.Worker.SpeculativeTrainTest do
     GitHub.ServerMock.put_state(Map.put(state, @conn, repo))
   end
 
+  defp failed_construction(project, parent) do
+    {batch, child, [link]} =
+      candidate(project, 4, CandidateJournal.commit_binding(parent)["commit"], parent)
+
+    Repo.delete_all(
+      from(e in CandidateEvent, where: e.candidate_id == ^child.id and e.kind == "constructed")
+    )
+
+    batch |> Batch.changeset(%{state: :error, commit: nil}) |> Repo.update!()
+
+    CandidateJournal.event(child, "local_conflict", "bors.local_git", %{
+      kind: "merge_conflict",
+      pr: 4,
+      head_sha: link.head_sha
+    })
+
+    CandidateJournal.event(child, "construction_stopped", "bors.assembly", %{state: "conflict"})
+    CandidateJournal.event(parent, "successor_reserved", "bors.train", %{candidate_id: child.id})
+    {child, Repo.preload(link, :patch)}
+  end
+
+  test "a local conflict can retry a compatible group before the parent lands", %{
+    project: project
+  } do
+    enable()
+    System.put_env("BORS_SPECULATION_CANARY_SUCCESSORS", "10")
+    {a, ca, _} = candidate(project, 1)
+    Train.reserve(ca, @conn)
+    {child, link} = failed_construction(project, ca)
+    Train.reserve(child, @conn)
+    assert Train.predecessor(project, [a], @conn).id == ca.id
+    assert Train.event?(child, "train_released")
+
+    blocked = Train.blocked_successor_heads(ca)
+    refute Train.compatible_successor?(blocked, [link])
+    changed = %{link | head_sha: String.duplicate("f", 40)}
+    assert Train.compatible_successor?(blocked, [changed])
+    {_, _, healthy} = candidate(project, 2)
+    assert Train.compatible_successor?(blocked, Repo.preload(healthy, :patch))
+    assert Train.budget_available?(project.id)
+  end
+
+  for kind <- ["constructed", "staging_pushed", "dispatch_requested", "dispatched"] do
+    test "a stopped child with #{kind} cannot admit a replacement", %{project: project} do
+      enable()
+      System.put_env("BORS_SPECULATION_CANARY_SUCCESSORS", "10")
+      {a, ca, _} = candidate(project, 1)
+      Train.reserve(ca, @conn)
+      {child, _} = failed_construction(project, ca)
+      CandidateJournal.event(child, unquote(kind), "test")
+      assert is_nil(Train.predecessor(project, [a], @conn))
+    end
+  end
+
+  test "an unbound conflict identity cannot authorize another successor", %{project: project} do
+    enable()
+    System.put_env("BORS_SPECULATION_CANARY_SUCCESSORS", "10")
+    {a, ca, _} = candidate(project, 1)
+    Train.reserve(ca, @conn)
+    {child, _} = failed_construction(project, ca)
+
+    Repo.update_all(
+      from(e in CandidateEvent, where: e.candidate_id == ^child.id and e.kind == "local_conflict"),
+      set: [details: %{kind: "merge_conflict", pr: 999, head_sha: String.duplicate("f", 40)}]
+    )
+
+    assert is_nil(Train.predecessor(project, [a], @conn))
+  end
+
   test "disabled by default, scoped and gated by all B/E/F evidence", %{project: project} do
     refute Train.enabled?(project, "main")
     enable()
@@ -371,8 +440,15 @@ defmodule BorsNG.Worker.SpeculativeTrainTest do
 
   test "scheduler constructs and dispatches only B on the immutable A base", %{project: project} do
     enable()
+    System.put_env("BORS_SPECULATION_CANARY_SUCCESSORS", "10")
     {a, ca, _} = candidate(project, 1)
     Train.reserve(ca, @conn)
+    {_failed, blocked} = failed_construction(project, ca)
+
+    blocked_batch =
+      BorsNG.Worker.Batcher.Divider.clone_batch([blocked], project.id, "main", "member_removed")
+
+    blocked_batch |> Batch.changeset(%{priority: 10, last_polled: 0}) |> Repo.update!()
     {b, _, _} = candidate(project, 2)
 
     b
@@ -424,6 +500,7 @@ defmodule BorsNG.Worker.SpeculativeTrainTest do
     b = Repo.get!(Batch, b.id)
     cb = CandidateJournal.current(b)
     assert b.state == :running
+    assert Repo.get!(Batch, blocked_batch.id).state == :waiting
     assert b.base_sha == a.commit
     assert cb.snapshot["speculative_predecessor_id"] == ca.id
     assert Enum.map(cb.snapshot["members"], & &1["pr"]) == [2]

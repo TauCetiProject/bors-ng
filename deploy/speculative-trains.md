@@ -18,7 +18,13 @@ The durable repository executor remains the sole scheduler. It may test A on
 main and B on the exact bound A commit. B's batch contains B's own immutable
 members, preserving bundle atomicity; its base includes A. There are at most two
 current train candidates. No branching or depth-three in-flight train is allowed.
-One successor reservation per parent generation bounds wasted work. Existing
+One dispatched successor per parent generation bounds wasted work. A stopped
+local merge-conflict construction with no constructed result, published ref or
+dispatch intent may try another waiting group. Every attempt still consumes the
+lifetime canary budget. Exact PR/head pairs that already conflicted with this
+parent are skipped for speculation, without changing their approvals, bundles
+or normal serial scheduling. Ambiguous dispatches and running or completed CI
+children never authorize a replacement successor. Existing
 legacy candidates drain serially before a fresh root can speculate.
 
 Assembly requires local squash construction, known exact toolchain bytes, and
