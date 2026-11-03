@@ -30,7 +30,9 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
 
     attributes = schedule_attributes(project_id, kind, payload)
     # A read before a future timer's deadline cannot satisfy that timer.
-    wake_key = if available_at <= now(), do: wake_key(project_id, kind, payload)
+    wake_key =
+      if kind == "diagnostic_alert" or available_at <= now(),
+        do: wake_key(project_id, kind, payload)
 
     key =
       if is_nil(key) and kind == "cast" and match?({:status, _}, payload),
@@ -66,6 +68,9 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
   defp wake_key(project, "info", operation)
        when operation in [:recover_queue, :wake_backend_holds],
        do: "wake:#{project}:#{operation}"
+
+  defp wake_key(project, "diagnostic_alert", incident),
+    do: "diagnostic-alert:#{project}:#{incident}"
 
   defp wake_key(_, _, _), do: nil
 

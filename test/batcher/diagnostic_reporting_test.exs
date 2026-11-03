@@ -154,6 +154,20 @@ defmodule BorsNG.Worker.DiagnosticReportingTest do
     assert notice_id == notice.id
   end
 
+  test "recovery arriving during delivery survives the running job receipt", c do
+    DiagnosticReporting.record(
+      c.candidate,
+      %{"complete" => false, "reason" => "transport_timeout"},
+      false
+    )
+
+    [job] = Repo.all(from(j in OrchestrationJob, where: j.kind == "diagnostic_alert"))
+    assert {:ok, claimed} = Outbox.claim(job.id)
+    DiagnosticReporting.record(c.candidate, %{"complete" => true}, true)
+    Outbox.finish(claimed)
+    assert [%{kind: "diagnostic_alert"}] = Outbox.due(32, :notification)
+  end
+
   test "missing Zulip config cannot count as delivery or block a normal notice", c do
     DiagnosticReporting.record(
       c.candidate,

@@ -372,7 +372,7 @@ def collect(request):
 def main():
     started = time.monotonic()
     cpu_started = time.process_time()
-    signal.signal(signal.SIGALRM, lambda *_: (_ for _ in ()).throw(TimeoutError()))
+    signal.signal(signal.SIGALRM, lambda *_: (_ for _ in ()).throw(CollectionError("collection_timeout")))
     try:
         request = json.loads(Path(sys.argv[1]).read_text())
         budget = request.get('time_budget', 60)

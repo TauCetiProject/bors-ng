@@ -258,6 +258,18 @@ defmodule BorsNG.Worker.DiagnosticReporting do
       |> Enum.filter(&(&1.kind != "failure_partition"))
       |> Enum.reduce(%{}, &Map.put(&2, &1.details["incident"], &1))
 
+    recovery_ids =
+      events
+      |> Enum.filter(&(&1.kind == "diagnostic_recovered"))
+      |> Enum.reduce(%{}, &Map.put(&2, &1.details["incident"], &1.id))
+
+    unresolved =
+      events
+      |> Enum.filter(fn e ->
+        e.kind == "diagnostic_degraded" and
+          e.id > Map.get(recovery_ids, e.details["incident"], 0)
+      end)
+
     candidate_ids = Enum.map(events, & &1.candidate_id) |> Enum.uniq()
 
     batches =
@@ -275,12 +287,7 @@ defmodule BorsNG.Worker.DiagnosticReporting do
           |> Enum.uniq_by(& &1.candidate_id)
         ),
       unresolved_incidents: Enum.count(states, fn {_, e} -> e.kind == "diagnostic_degraded" end),
-      unresolved_candidates:
-        states
-        |> Map.values()
-        |> Enum.filter(&(&1.kind == "diagnostic_degraded"))
-        |> Enum.uniq_by(& &1.candidate_id)
-        |> length(),
+      unresolved_candidates: unresolved |> Enum.uniq_by(& &1.candidate_id) |> length(),
       affected_batches:
         events
         |> Enum.filter(&(&1.kind == "diagnostic_degraded"))
