@@ -1864,7 +1864,7 @@ defmodule BorsNG.Worker.FailureIsolationTest do
       assert suspect.source_compatibility["provisional"]["binding"]["run_attempt"] == 1
       assert [%{payload: payload}] = Repo.all(BorsNG.Database.OrchestrationJob)
       {_, 3, body, marker} = :erlang.binary_to_term(payload, [:safe])
-      assert body =~ "PROVISIONAL SUSPECT, not a proven individual failure"
+      assert body =~ "we haven't confirmed whether it caused the failure"
       assert body =~ "candidate #{c.candidate.id}"
       assert body =~ "run attempt 1"
       assert marker == "<!--tauceti-rebase:v1 head3-->"
@@ -1908,7 +1908,7 @@ defmodule BorsNG.Worker.FailureIsolationTest do
       refute event.details["singleton_confirmation_dispatched"]
       [job] = Repo.all(BorsNG.Database.OrchestrationJob)
       {_, 3, body, _} = :erlang.binary_to_term(job.payload, [:safe])
-      assert body =~ "PROVISIONAL SUSPECT, not a proven individual failure"
+      assert body =~ "we haven't confirmed whether it caused the failure"
       assert :retrying = FailureIsolation.split(c.links, batch, nil, conn)
       assert Repo.aggregate(Batch, :count, :id) == 2
       assert Repo.aggregate(BorsNG.Database.OrchestrationJob, :count, :id) == 1

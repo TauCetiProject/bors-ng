@@ -8,7 +8,12 @@ defmodule BorsNG.SourceRequestHttpTest do
       id: 23,
       user: %{login: author},
       body:
-        "Merge-queue recovery for head `aaaaaaa`: source failure.\nChecker policy: `#{policy}`.\n<!--tauceti-rebase:v1 #{@head}-->"
+        BorsNG.Worker.SourceCompatibility.request(@head, %{
+          "status" => "conflict",
+          "base_sha" => @base,
+          "policy" => policy,
+          "paths" => ["TauCeti/Consumer.lean"]
+        })
     }
   end
 
