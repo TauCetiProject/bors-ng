@@ -9,9 +9,6 @@ defmodule BorsNG.Worker.SourceCompatibility do
   @provisional_policy "provisional-diagnostic-v1"
   @keep ~w(keep hold wip human do-not-close)
   @background_heads 4
-  # Existing worker rounds default to 90 minutes. One ordinary reconciliation
-  # grace avoids leaving an unconfirmed/no-op suspect permanently stranded.
-  @provisional_grace 95 * 60
 
   def enabled?, do: System.get_env("BORS_SOURCE_COMPATIBILITY", "on") != "off"
 
@@ -90,11 +87,6 @@ defmodule BorsNG.Worker.SourceCompatibility do
               )
             )
 
-        # At most one metadata-only recovery per fair page. This is not another
-        # source check, worker task, or a barrier ahead of ordinary dispatch.
-        if patch = Enum.find(page, &fallback_due?/1),
-          do: provisional_fallback(project, conn, Repo.get!(Patch, patch.id), base)
-
         epoch = latest_warm_epoch(project_id)
         pending = page |> Enum.filter(&stale?(&1, base, epoch)) |> Enum.take(@background_heads)
         selected = Enum.map(pending, &Repo.get!(Patch, &1.id))
@@ -108,7 +100,7 @@ defmodule BorsNG.Worker.SourceCompatibility do
         Enum.each(selected, fn patch ->
           current = Repo.get!(Patch, patch.id)
 
-          if blocked?(current, patch.commit) and not fallback_active?(current),
+          if blocked?(current, patch.commit),
             do: Batcher.do_handle_cast({:cancel, patch.id, :source_compatibility}, project.id)
         end)
 
@@ -143,7 +135,7 @@ defmodule BorsNG.Worker.SourceCompatibility do
         Enum.reject(links, fn link ->
           current = Repo.get!(Patch, link.patch_id)
 
-          if blocked?(current, link.head_sha) and not fallback_member?(current, batch, links) do
+          if blocked?(current, link.head_sha) do
             Repo.delete!(link)
             BorsNG.Worker.ManualApproval.revoke(current.id)
             BorsNG.Worker.QueueApproval.stop([current], :source_compatibility)
@@ -219,109 +211,6 @@ defmodule BorsNG.Worker.SourceCompatibility do
   defp blocked?(patch, head),
     do:
       requested?(patch, head) or get_in(patch.source_compatibility || %{}, ["hold_head"]) == head
-
-  defp fallback_due?(patch) do
-    r = patch.source_compatibility || %{}
-    p = r["provisional"] || %{}
-
-    r["repair_head"] == patch.commit and r["repair_policy"] == @provisional_policy and
-      is_integer(p["requested_at"]) and Outbox.now() - p["requested_at"] >= @provisional_grace and
-      is_nil(p["fallback_batch_id"])
-  end
-
-  defp fallback_member?(patch, batch, links) do
-    r = patch.source_compatibility || %{}
-    p = r["provisional"] || %{}
-
-    requested?(patch, patch.commit) and r["repair_policy"] == @provisional_policy and
-      p["fallback_batch_id"] == batch.id and length(links) == 1 and
-      hd(links).head_sha == patch.commit and r["status"] not in ["conflict", "missing_source"]
-  end
-
-  defp fallback_active?(patch) do
-    r = patch.source_compatibility || %{}
-    id = get_in(r, ["provisional", "fallback_batch_id"])
-
-    r["repair_policy"] == @provisional_policy and
-      r["status"] not in ["conflict", "missing_source"] and not is_nil(id) and
-      Repo.exists?(from(b in Batch, where: b.id == ^id and b.state in [:waiting, :running]))
-  end
-
-  # A timeout/no-op is NOT a validation receipt. Keep the request active for an
-  # in-flight worker/CAS push, but permit one sealed authoritative singleton.
-  # Its original admission carries approval/age/lineage; no replayed command or
-  # new human approval is invented. Normal dispatch rechecks authorization.
-  @doc false
-  def provisional_fallback(project, conn, patch, base) do
-    with true <- fallback_due?(patch),
-         %{"state" => "withdrawn", "reason" => "source_compatibility", "head_sha" => head} <-
-           patch.queue_approval,
-         true <- head == patch.commit,
-         nil <- patch.bundle_id,
-         nil <- patch.manual_approval,
-         false <- Outbox.withdrawal_pending?(project.id, [patch.id]),
-         {:ok, %{commit: ^base}} <- GitHub.get_branch(conn, BorsNG.ProjectConfig.branch()),
-         {:ok, pr} <- GitHub.get_pr(conn, patch.pr_xref),
-         true <- pr.state == :open and not pr.draft and pr.head_sha == head,
-         {:ok, labels} <- GitHub.get_labels(conn, patch.pr_xref),
-         true <- MapSet.disjoint?(MapSet.new(labels, &String.downcase/1), MapSet.new(@keep)) do
-      Repo.transaction(fn ->
-        # Match handoff/Divider's parent-before-patch lock order.
-        parent_id = patch.source_compatibility["provisional"]["batch_id"]
-        Repo.one!(from(b in Batch, where: b.id == ^parent_id, lock: "FOR UPDATE"))
-        current = Repo.one!(from(p in Patch, where: p.id == ^patch.id, lock: "FOR UPDATE"))
-
-        unless current.commit == head and current.queue_approval == patch.queue_approval and
-                 fallback_due?(current),
-               do: Repo.rollback(:stale_provisional_fallback)
-
-        p = current.source_compatibility["provisional"]
-        source = Repo.get!(LinkPatchBatch, p["source_link_id"]) |> Repo.preload(:patch)
-
-        unless source.patch_id == current.id and source.head_sha == head and
-                 is_nil(source.manual_approval),
-               do: Repo.rollback(:invalid_provisional_admission)
-
-        child =
-          BorsNG.Worker.Batcher.Divider.clone_batch(
-            [source],
-            project.id,
-            BorsNG.ProjectConfig.branch(),
-            "provisional_unconfirmed"
-          )
-
-        if is_nil(child), do: Repo.rollback(:retry_membership_unavailable)
-
-        unless Repo.aggregate(
-                 from(l in LinkPatchBatch, where: l.batch_id == ^child.id),
-                 :count,
-                 :id
-               ) == 1,
-               do: Repo.rollback(:non_singleton_provisional_fallback)
-
-        # Divider seals retries: this head cannot rejoin the failed combination.
-        r = put_in(current.source_compatibility, ["provisional", "fallback_batch_id"], child.id)
-        current |> Ecto.Changeset.change(source_compatibility: r) |> Repo.update!()
-
-        BorsNG.Worker.CandidateJournal.event(
-          Repo.get!(Candidate, p["candidate_id"]),
-          "provisional_unconfirmed",
-          "bors.source",
-          %{
-            head_sha: head,
-            evidence_base: p["base_sha"],
-            fallback_base: base,
-            fallback_batch_id: child.id,
-            proof_authority: false,
-            reason:
-              "no changed-head repair observed within existing round plus grace; one isolated authoritative fallback"
-          }
-        )
-      end)
-    else
-      _ -> :unavailable
-    end
-  end
 
   def check(project, conn, base, patches, checker \\ &LocalGit.compatibility/4)
   def check(_, _, _, [], _), do: :ok
@@ -606,94 +495,107 @@ defmodule BorsNG.Worker.SourceCompatibility do
       else: %{}
   end
 
-  # A diagnostic owner is a scheduling suspect, not an individual build verdict.
-  # Only the failed-CI split callsite can offer this; generic singleton bisection
-  # and local import hints continue through their existing conservative path.
-  def provisional_failure(batch, links, suspect, remainder, hints, conn) do
+  # Diagnostic owners are scheduling suspects, not individual build verdicts.
+  # Only the failed-CI and construction-conflict split callsites can offer
+  # this; generic bisection and local import hints continue through their
+  # existing conservative path. Every suspect is withdrawn, the remainder is
+  # admitted once and the parent is retired in one transaction, so a replay
+  # cannot hand off twice or leave a suspect beside committed children.
+  def provisional_failure(batch, links, suspects, remainder, hints, conn, conflict \\ nil) do
     project = Repo.get!(Project, batch.project_id)
-    candidate = BorsNG.Worker.CandidateJournal.current(batch)
-    patch = Repo.get!(Patch, suspect.patch_id)
+    candidate = handoff_candidate(batch, conflict)
+    patches = Enum.map(suspects, &Repo.get!(Patch, &1.patch_id))
+    prs = Enum.sort(Enum.map(patches, & &1.pr_xref))
 
     with true <- enabled?(),
          true <- Outbox.enabled?(),
+         true <- suspects != [],
          true <- project.name == BorsNG.ProjectConfig.repo(),
          true <- batch.into_branch == BorsNG.ProjectConfig.branch(),
-         true <- hints["ownership_complete"] == true,
+         true <- BorsNG.Worker.FailureIsolation.ownership_complete?(hints),
          true <- not is_nil(candidate),
          true <- independent_provisional_base?(candidate, batch),
-         nil <- patch.bundle_id,
-         nil <- patch.manual_approval,
-         nil <- suspect.manual_approval,
-         false <- BorsNG.Worker.BumpRecovery.automatic?(patch),
-         false <- requested?(patch, suspect.head_sha),
+         true <- Enum.all?(patches, &(is_nil(&1.bundle_id) and is_nil(&1.manual_approval))),
+         true <- Enum.all?(suspects, &is_nil(&1.manual_approval)),
+         false <- Enum.any?(patches, &BorsNG.Worker.BumpRecovery.automatic?/1),
+         true <-
+           Enum.zip(patches, suspects)
+           |> Enum.all?(fn {patch, link} ->
+             patch.commit == link.head_sha and not requested?(patch, link.head_sha)
+           end),
          false <- Outbox.withdrawal_pending?(project.id, Enum.map(links, & &1.patch_id)),
-         true <- patch.commit == suspect.head_sha,
          true <-
            Enum.sort(Enum.map(links, &{&1.patch_id, &1.head_sha})) ==
              Enum.sort(Enum.map(candidate.snapshot["members"], &{&1["patch_id"], &1["head_sha"]})),
-         {:ok, [pr_number], diagnosis} <-
-           BorsNG.Worker.FailureDiagnostics.diagnosis(candidate, hints),
-         true <- pr_number == patch.pr_xref,
+         {:ok, base, evidence} <- suspect_evidence(batch, candidate, hints, prs, conflict),
+         {:ok, %{commit: ^base}} <- GitHub.get_branch(conn, BorsNG.ProjectConfig.branch()),
          true <-
-           diagnosis["binding"]["commit"] == batch.commit and
-             candidate.snapshot["base_sha"] == batch.base_sha,
-         {:ok, %{commit: base}} <- GitHub.get_branch(conn, BorsNG.ProjectConfig.branch()),
-         true <- base == batch.base_sha,
-         {:ok, pr} <- GitHub.get_pr(conn, patch.pr_xref),
-         true <- pr.head_sha == suspect.head_sha and pr.state == :open and not pr.draft,
-         {:ok, labels} <- GitHub.get_labels(conn, patch.pr_xref),
-         true <- MapSet.disjoint?(MapSet.new(labels, &String.downcase/1), MapSet.new(@keep)) do
-      result = %{
-        "pr" => patch.pr_xref,
-        "head_sha" => suspect.head_sha,
-        "base_sha" => batch.base_sha,
-        "policy" => @provisional_policy,
-        "status" => "suspected_failure",
-        "run_url" =>
-          "https://github.com/#{BorsNG.ProjectConfig.repo()}/actions/runs/#{diagnosis["binding"]["run_id"]}",
-        "provisional" =>
-          Map.merge(diagnosis, %{
-            "candidate_id" => candidate.id,
-            "batch_id" => batch.id,
-            "source_link_id" => suspect.id,
-            "members" => candidate.snapshot["members"],
-            "head_sha" => suspect.head_sha,
-            "base_sha" => batch.base_sha,
-            "requested_at" => Outbox.now(),
-            "proof_authority" => false
-          })
-      }
+           Enum.all?(Enum.zip(patches, suspects), fn {patch, link} ->
+             match?(
+               {:ok, %{head_sha: head, state: :open, draft: false}} when head == link.head_sha,
+               GitHub.get_pr(conn, patch.pr_xref)
+             )
+           end),
+         true <-
+           Enum.all?(patches, fn patch ->
+             case GitHub.get_labels(conn, patch.pr_xref) do
+               {:ok, labels} ->
+                 MapSet.disjoint?(MapSet.new(labels, &String.downcase/1), MapSet.new(@keep))
+
+               _ ->
+                 false
+             end
+           end) do
+      results =
+        Map.new(Enum.zip(patches, suspects), fn {patch, link} ->
+          {patch.id, suspect_result(patch, link, batch, candidate, base, evidence, conflict)}
+        end)
+
+      expected_state = if conflict, do: [:waiting, :running], else: [:running]
 
       case Repo.transaction(fn ->
              parent = Repo.one!(from(b in Batch, where: b.id == ^batch.id, lock: "FOR UPDATE"))
-             current = Repo.one!(from(p in Patch, where: p.id == ^patch.id, lock: "FOR UPDATE"))
 
-             if current.commit != suspect.head_sha or requested?(current, suspect.head_sha) or
-                  not is_nil(current.manual_approval) or not is_nil(current.bundle_id) or
-                  parent.state != :running or
+             current =
+               Enum.map(suspects, fn link ->
+                 Repo.one!(from(p in Patch, where: p.id == ^link.patch_id, lock: "FOR UPDATE"))
+               end)
+
+             stale_suspect? =
+               Enum.zip(current, suspects)
+               |> Enum.any?(fn {patch, link} ->
+                 patch.commit != link.head_sha or requested?(patch, link.head_sha) or
+                   not is_nil(patch.manual_approval) or not is_nil(patch.bundle_id)
+               end)
+
+             if stale_suspect? or parent.state not in expected_state or
                   parent.commit != batch.commit or parent.base_sha != batch.base_sha or
                   not independent_provisional_base?(candidate, parent) or
-                  BorsNG.Worker.CandidateJournal.current(parent) != candidate,
+                  handoff_candidate(parent, conflict) != candidate,
                 do: Repo.rollback(:stale_provisional_binding)
 
              # Retire parent together with every remainder admission. A crash
-             # cannot resurrect its suspect alongside already-committed children.
+             # cannot resurrect a suspect alongside already-committed children.
              Enum.each(remainder, fn group ->
-               if is_nil(
-                    BorsNG.Worker.Batcher.Divider.clone_batch(
-                      group,
-                      project.id,
-                      BorsNG.ProjectConfig.branch(),
-                      "provisional_remainder"
-                    )
-                  ),
+               if group != [] and
+                    is_nil(
+                      BorsNG.Worker.Batcher.Divider.clone_batch(
+                        group,
+                        project.id,
+                        BorsNG.ProjectConfig.branch(),
+                        "provisional_remainder"
+                      )
+                    ),
                   do: Repo.rollback(:retry_membership_unavailable)
              end)
 
-             persist_request(project, conn, current, result)
-             current = Repo.get!(Patch, current.id)
-             unless requested?(current, suspect.head_sha), do: Repo.rollback(:repair_unavailable)
-             BorsNG.Worker.QueueApproval.stop([current], :source_compatibility)
+             Enum.each(Enum.zip(current, suspects), fn {patch, link} ->
+               persist_request(project, conn, patch, results[patch.id])
+               patch = Repo.get!(Patch, patch.id)
+               unless requested?(patch, link.head_sha), do: Repo.rollback(:repair_unavailable)
+               BorsNG.Worker.QueueApproval.stop([patch], :source_compatibility)
+             end)
+
              parent |> Batch.changeset(%{state: :error}) |> Repo.update!()
 
              BorsNG.Worker.CandidateJournal.event(
@@ -701,10 +603,13 @@ defmodule BorsNG.Worker.SourceCompatibility do
                "provisional_repair",
                "bors.failure_isolation",
                %{
-                 pr: patch.pr_xref,
-                 head_sha: suspect.head_sha,
-                 base_sha: batch.base_sha,
-                 binding: diagnosis["binding"],
+                 pr: hd(prs),
+                 prs: prs,
+                 suspects: Enum.map(suspects, &%{pr: &1.patch.pr_xref, head_sha: &1.head_sha}),
+                 head_sha: hd(suspects).head_sha,
+                 base_sha: base,
+                 binding: evidence["binding"],
+                 conflict: if(conflict, do: Map.take(conflict, ~w(paths merge_head))),
                  remainder: Enum.map(remainder, &Enum.map(&1, fn l -> l.patch.pr_xref end)),
                  authority: "provisional_suspect",
                  proof_authority: false,
@@ -713,7 +618,7 @@ defmodule BorsNG.Worker.SourceCompatibility do
              )
            end) do
         {:ok, _} ->
-          project_request(conn, Repo.get!(Patch, patch.id))
+          Enum.each(patches, &project_request(conn, Repo.get!(Patch, &1.id)))
           :handed_off
 
         _ ->
@@ -722,6 +627,87 @@ defmodule BorsNG.Worker.SourceCompatibility do
     else
       _ -> :unavailable
     end
+  end
+
+  # A failed CI candidate is bound to the batch commit. A construction conflict
+  # never bound one, so the latest generation of the same batch is the record.
+  defp handoff_candidate(batch, nil), do: BorsNG.Worker.CandidateJournal.current(batch)
+  defp handoff_candidate(batch, _conflict), do: BorsNG.Worker.CandidateJournal.latest(batch.id)
+
+  # A failed candidate's bound diagnostics must name exactly these suspects.
+  # A construction conflict has no CI binding; its local conflict event names
+  # the single conflicting head and the exact base it was merged onto.
+  defp suspect_evidence(batch, candidate, hints, prs, nil) do
+    with {:ok, owners, diagnosis} <- BorsNG.Worker.FailureDiagnostics.diagnosis(candidate, hints),
+         true <- Enum.sort(owners) == prs,
+         true <-
+           diagnosis["binding"]["commit"] == batch.commit and
+             candidate.snapshot["base_sha"] == batch.base_sha,
+         base when is_binary(base) <- batch.base_sha do
+      {:ok, base, diagnosis}
+    else
+      _ -> :unavailable
+    end
+  end
+
+  defp suspect_evidence(_batch, _candidate, _hints, prs, conflict) do
+    with "merge_conflict" <- conflict["kind"],
+         [pr] <- prs,
+         true <- conflict["pr"] == pr,
+         base when is_binary(base) <- conflict["base_sha"],
+         paths when is_list(paths) and paths != [] <- conflict["paths"],
+         true <- Enum.all?(paths, &is_binary/1) do
+      {:ok, base, %{"binding" => nil, "paths" => paths, "merge_head" => conflict["merge_head"]}}
+    else
+      _ -> :unavailable
+    end
+  end
+
+  defp suspect_result(patch, link, batch, candidate, base, evidence, nil) do
+    %{
+      "pr" => patch.pr_xref,
+      "head_sha" => link.head_sha,
+      "base_sha" => base,
+      "policy" => @provisional_policy,
+      "status" => "suspected_failure",
+      "run_url" =>
+        "https://github.com/#{BorsNG.ProjectConfig.repo()}/actions/runs/#{evidence["binding"]["run_id"]}",
+      "provisional" =>
+        Map.merge(evidence, %{
+          "candidate_id" => candidate.id,
+          "batch_id" => batch.id,
+          "source_link_id" => link.id,
+          "members" => candidate.snapshot["members"],
+          "head_sha" => link.head_sha,
+          "base_sha" => base,
+          "requested_at" => Outbox.now(),
+          "proof_authority" => false
+        })
+    }
+  end
+
+  # A batch-mate conflict uses the ordinary source policy: once main moves,
+  # the existing sweep rechecks this head, and a clean merge resolves the
+  # request without author work. A conflict with landed main stays requested.
+  defp suspect_result(patch, link, batch, candidate, base, evidence, _conflict) do
+    %{
+      "pr" => patch.pr_xref,
+      "head_sha" => link.head_sha,
+      "base_sha" => base,
+      "policy" => @policy,
+      "status" => "conflict",
+      "paths" => Enum.take(evidence["paths"], 64),
+      "merge_head" => evidence["merge_head"],
+      "provisional" => %{
+        "candidate_id" => candidate.id,
+        "batch_id" => batch.id,
+        "source_link_id" => link.id,
+        "head_sha" => link.head_sha,
+        "base_sha" => base,
+        "requested_at" => Outbox.now(),
+        "proof_authority" => false
+      }
+    }
   end
 
   # A child becomes independent only after its exact predecessor actually lands
@@ -871,8 +857,7 @@ defmodule BorsNG.Worker.SourceCompatibility do
           {"checking a possible build failure.",
            "Check this PR on its own against the tested main below. If it passes, report that the cause " <>
              "is still unconfirmed. If it fails, update the branch from `main`, fix the errors, and run " <>
-             "the build and axiom checks before pushing.\n\n" <>
-             "If there is no update within 95 minutes, bors may test the unchanged PR on its own."}
+             "the build and axiom checks before pushing."}
 
         "conflict" ->
           {"this branch conflicts with `main`.",
@@ -896,7 +881,14 @@ defmodule BorsNG.Worker.SourceCompatibility do
 
         "conflict" ->
           "Conflicting files:\n\n" <>
-            Enum.map_join(Enum.take(result["paths"], 8), "\n", &"- `#{&1}`")
+            Enum.map_join(Enum.take(result["paths"], 8), "\n", &"- `#{&1}`") <>
+            if(result["provisional"],
+              do:
+                "\n\nThe conflict appeared while combining this PR with other queued PRs. " <>
+                  "Bors rechecks this head against `main` whenever `main` moves and lifts the request " <>
+                  "on its own if the branch then merges cleanly.",
+              else: ""
+            )
 
         "integrated_failure" ->
           "Bors tested this PR on its own against `main`. [Build log](#{result["run_url"]})."

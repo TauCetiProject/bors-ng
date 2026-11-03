@@ -125,6 +125,9 @@ Trusted run/attempt classifications, conservative retry partitions and terminal
 exact-head quarantine append to the existing event journal. See
 [Failure isolation and quarantine](deploy/failure-isolation.md) for trust,
 resource bounds, deterministic fallback, reconsideration and rollback.
+Every directly attributed suspect, and a head that conflicts during construction,
+leaves for repair in one transaction and never receives a solo staging run; see
+[suspect handoff](deploy/suspect-handoff.md).
 
 ## Depth-two scheduling
 

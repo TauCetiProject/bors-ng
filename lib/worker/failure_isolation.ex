@@ -159,27 +159,34 @@ defmodule BorsNG.Worker.FailureIsolation do
           verified_base_collision: hints["verified_base_collision"]
         })
 
+        # Directly attributed owners leave for repair together; the component
+        # expansion above only groups the retry when no handoff is possible.
         groups =
-          if reason == "compiler_diagnostics" and not is_nil(conn) do
-            case groups do
-              [[suspect] | remainder] ->
-                case BorsNG.Worker.SourceCompatibility.provisional_failure(
-                       batch,
-                       links,
-                       suspect,
-                       remainder,
-                       hints,
-                       conn
-                     ) do
-                  :handed_off -> []
-                  _ -> groups
-                end
+          case handoff_suspects(links, hints, reason, conflict) do
+            [] ->
+              groups
 
-              _ ->
+            direct when not is_nil(conn) ->
+              remainder =
                 groups
-            end
-          else
-            groups
+                |> Enum.map(fn group -> Enum.reject(group, &(&1 in direct)) end)
+                |> Enum.reject(&(&1 == []))
+
+              case BorsNG.Worker.SourceCompatibility.provisional_failure(
+                     batch,
+                     links,
+                     direct,
+                     remainder,
+                     hints,
+                     conn,
+                     if(reason == "structured_conflict", do: conflict)
+                   ) do
+                :handed_off -> []
+                _ -> groups
+              end
+
+            _ ->
+              groups
           end
 
         Enum.each(groups, fn group ->
@@ -200,23 +207,75 @@ defmodule BorsNG.Worker.FailureIsolation do
 
         :retrying
 
-      :fallback ->
-        CandidateJournal.event(candidate, "failure_partition", "bors.failure_isolation", %{
-          strategy: "deterministic_bisection",
-          reason: "unknown, ambiguous or non-narrowing diagnostics",
-          groups:
-            Enum.map(Divider.split_groups(links), fn group ->
-              Enum.map(group, & &1.patch.pr_xref)
-            end)
-        })
+      :fallback when conn != nil ->
+        # Every unit is a directly attributed owner: there is no strict
+        # partition, but nothing to retry either. Hand the whole batch off;
+        # otherwise take the ordinary deterministic path below.
+        if fully_attributed?(links, hints) and
+             BorsNG.Worker.SourceCompatibility.provisional_failure(
+               batch,
+               links,
+               links,
+               [],
+               hints,
+               conn
+             ) == :handed_off do
+          CandidateJournal.event(candidate, "failure_partition", "bors.failure_isolation", %{
+            strategy: "compiler_diagnostics",
+            groups: [Enum.map(links, & &1.patch.pr_xref)],
+            ownership_complete: ownership_complete?(hints),
+            dependencies_complete: Map.get(hints, "dependencies_complete", hints["complete"]),
+            authority: "retry_only",
+            verified_base_collision: hints["verified_base_collision"]
+          })
 
-        if conflict &&
-             (not enabled?() or conflict["kind"] != "merge_conflict" or
-                length(Divider.group_units(links)) == 1),
-           do: Divider.split_batch_with_conflicts(links, batch),
-           else: Divider.split_batch(links, batch)
+          :retrying
+        else
+          do_fallback(links, batch, candidate, conflict)
+        end
+
+      :fallback ->
+        do_fallback(links, batch, candidate, conflict)
     end
   end
+
+  defp do_fallback(links, batch, candidate, conflict) do
+    CandidateJournal.event(candidate, "failure_partition", "bors.failure_isolation", %{
+      strategy: "deterministic_bisection",
+      reason: "unknown, ambiguous or non-narrowing diagnostics",
+      groups:
+        Enum.map(Divider.split_groups(links), fn group ->
+          Enum.map(group, & &1.patch.pr_xref)
+        end)
+    })
+
+    if conflict &&
+         (not enabled?() or conflict["kind"] != "merge_conflict" or
+            length(Divider.group_units(links)) == 1),
+       do: Divider.split_batch_with_conflicts(links, batch),
+       else: Divider.split_batch(links, batch)
+  end
+
+  # Only owners named by the bound diagnostics or the construction conflict
+  # are handed off. Shared-path and import-edge neighbours stay retry hints.
+  defp handoff_suspects(links, hints, "compiler_diagnostics", _conflict) do
+    owners = hints["compiler_suspects"] || []
+    Enum.filter(links, &(&1.patch.pr_xref in owners))
+  end
+
+  defp handoff_suspects(links, _hints, "structured_conflict", %{"kind" => "merge_conflict"} = c) do
+    Enum.filter(links, &(&1.patch.pr_xref == c["pr"]))
+  end
+
+  defp handoff_suspects(_links, _hints, _reason, _conflict), do: []
+
+  defp fully_attributed?(links, %{"compiler_suspects" => owners} = hints)
+       when is_list(owners) and owners != [] do
+    ownership_complete?(hints) and links != [] and
+      Enum.all?(links, &(&1.patch.pr_xref in owners and &1.head_sha == &1.patch.commit))
+  end
+
+  defp fully_attributed?(_links, _hints), do: false
 
   # SQL row order is unspecified. Freeze split order to the actual recorded
   # assembly inputs; historical batches without a candidate use durable link IDs.
