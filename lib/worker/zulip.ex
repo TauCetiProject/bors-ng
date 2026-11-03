@@ -12,7 +12,7 @@ defmodule BorsNG.Worker.Zulip do
   require Logger
 
   def send_message(message) do
-    if Application.get_env(:bors, :is_test) or Confex.fetch_env!(:bors, :zulip_topic) == "" do
+    if Application.get_env(:bors, :is_test, false) or Confex.fetch_env!(:bors, :zulip_topic) == "" do
       :ok
     else
       case deliver(message) do

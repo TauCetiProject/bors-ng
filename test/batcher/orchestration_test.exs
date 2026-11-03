@@ -119,6 +119,37 @@ defmodule BorsNG.Worker.OrchestrationTest do
     Repo.get_by!(OrchestrationJob, kind: "dispatch", project_id: ctx.project.id)
   end
 
+  test "executor persists exception locations and preserves retry semantics without payload leakage",
+       ctx do
+    import ExUnit.CaptureLog
+    secret = "never-include-this-payload-or-argument"
+    job = Outbox.enqueue(ctx.project.id, "info", {:unknown_completion_message, secret})
+
+    log =
+      capture_log(fn ->
+        assert {:error, FunctionClauseError} = execute(ctx.worker, job)
+      end)
+
+    failed = Repo.get!(OrchestrationJob, job.id)
+    assert failed.state == "pending"
+    assert failed.last_error == "{:error, FunctionClauseError}"
+    diagnostic = failed.attempt_timing["last_exception"]
+    assert diagnostic["exception"] == "FunctionClauseError"
+    assert diagnostic["attempt"] == 1
+
+    assert Enum.any?(diagnostic["frames"], fn f ->
+             f["module"] == "BorsNG.Worker.Batcher" and f["function"] == "handle_info" and
+               f["arity"] == 2 and is_integer(f["line"])
+           end)
+
+    refute Jason.encode!(diagnostic) =~ secret
+    refute log =~ secret
+    assert log =~ "outbox_exception"
+    # A stale owner cannot overwrite a later attempt's diagnostic.
+    assert nil == Outbox.record_exception(%{failed | token: "stale"}, %{exception: "forged"})
+    assert Repo.get!(OrchestrationJob, job.id).attempt_timing == failed.attempt_timing
+  end
+
   defp dispatcher do
     {:ok, pid} = GenServer.start_link(Dispatcher, [])
     Process.unlink(pid)
