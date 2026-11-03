@@ -865,6 +865,21 @@ class LocalGitTest(unittest.TestCase):
         self.assertEqual(result['barriers'], dict(complete=True, paths=['scripts/new-audit.py']))
         self.assertFalse(result['diagnostic_hints']['complete'])
 
+    def test_large_barrier_diff_keeps_all_paths_or_reports_incomplete(self):
+        for count in [300, 4095, 4096]:
+            changes = {f'TauCeti/Large/File{n}.lean': f'def value{n} := {n}\n'
+                       for n in range(count - 1)}
+            changes['scripts/last-audit.py'] = 'trusted tooling'
+            head = self.commit(self.base, changes)
+            self.request.update(members=[self.member(1, head)], diagnostics=False, timeout=30)
+            result = self.run_mirror()
+            if count < local.BARRIER_PATH_LIMIT:
+                self.assertTrue(result['barriers']['complete'])
+                self.assertEqual(len(result['barriers']['paths']), count)
+                self.assertIn('scripts/last-audit.py', result['barriers']['paths'])
+            else:
+                self.assertEqual(result['barriers'], dict(complete=False, paths=[]))
+
     def test_interacting_independent_edits(self):
         one = self.commit(self.base, {'file': 'ONE\ntwo\nthree\n'})
         two = self.commit(self.base, {'file': 'one\ntwo\nTHREE\n'})

@@ -20,10 +20,10 @@ test('activation stops a running old environment once before acknowledging the m
   assert.deepEqual(calls, [15]);
 });
 
-test('diagnostic settings refresh the already activated warm container without clearing durable work', async () => {
+test('catch-up budget refreshes the already activated warm container without clearing durable work', async () => {
   const storage = state();
   const key = 'bors-async-orchestration-activation';
-  await storage.put(key, 'outbox-v2-train-canary-1');
+  await storage.put(key, 'outbox-v2-train-canary-1-diagnostics-env-1');
   await storage.put('pending-work', {reservation: 42, approval: 'retained'});
   let stopped;
   const signals = [];
@@ -33,11 +33,11 @@ test('diagnostic settings refresh the already activated warm container without c
   const activation = activateOrchestration(storage, container, () => new Promise(() => {}));
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(signals, [15]);
-  assert.equal(await storage.get(key), 'outbox-v2-train-canary-1');
+  assert.equal(await storage.get(key), 'outbox-v2-train-canary-1-diagnostics-env-1');
   container.running = false;
   stopped();
   await activation;
-  assert.equal(await storage.get(key), 'outbox-v2-train-canary-1-diagnostics-env-1');
+  assert.equal(await storage.get(key), 'outbox-v2-train-canary-10-large-batches-1');
   assert.deepEqual(await storage.get('pending-work'), {reservation: 42, approval: 'retained'});
   container.running = true;
   await activateOrchestration(storage, container);
@@ -54,7 +54,7 @@ test('failed warm canary refresh retains the old epoch until a successful retry'
   assert.equal(await storage.get(key), 'outbox-v1');
   container.destroy = async () => {container.running = false;};
   await activateOrchestration(storage, container, async () => {});
-  assert.equal(await storage.get(key), 'outbox-v2-train-canary-1-diagnostics-env-1');
+  assert.equal(await storage.get(key), 'outbox-v2-train-canary-10-large-batches-1');
 });
 
 test('a fresh stopped container needs no restart', async () => {

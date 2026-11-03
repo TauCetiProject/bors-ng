@@ -23,6 +23,8 @@ defmodule BorsNG.Worker.SpeculativeTrainTest do
   @toolchain "leanprover/lean4:v4.35.0\n"
 
   setup do
+    old_limit = System.get_env("BORS_SPECULATION_CANARY_SUCCESSORS")
+    System.delete_env("BORS_SPECULATION_CANARY_SUCCESSORS")
     :sys.suspend(BorsNG.Worker.Orchestration.Dispatcher)
     installation = Repo.insert!(%Installation{installation_xref: 91})
 
@@ -51,6 +53,10 @@ defmodule BorsNG.Worker.SpeculativeTrainTest do
     System.put_env("BORS_STAGE_DISPATCH_PROJECT", project.name)
 
     on_exit(fn ->
+      if old_limit,
+        do: System.put_env("BORS_SPECULATION_CANARY_SUCCESSORS", old_limit),
+        else: System.delete_env("BORS_SPECULATION_CANARY_SUCCESSORS")
+
       for name <-
             ["BORS_ASYNC_ORCHESTRATION", "BORS_STAGE_DISPATCH_PROJECT", "BORS_SPECULATIVE_TRAINS"] ++
               Enum.map([16231, 16232, 16234], &"BORS_SPECULATION_GATE_#{&1}"),
@@ -343,6 +349,7 @@ defmodule BorsNG.Worker.SpeculativeTrainTest do
           "lake-manifest.json",
           "lakefile.lean",
           "bors.toml",
+          "tauceti.toml",
           ".github/bors.toml",
           "scripts/check.sh"
         ] do
@@ -539,6 +546,91 @@ defmodule BorsNG.Worker.SpeculativeTrainTest do
     refute Train.budget_available?(project.id)
   end
 
+  test "catch-up budget counts the old reservation and stops at ten across parents", %{
+    project: project
+  } do
+    System.put_env("BORS_SPECULATION_CANARY_SUCCESSORS", "10")
+    {_, first, _} = candidate(project, 1)
+    CandidateJournal.event(first, "successor_reserved", "test.old_canary")
+    {_, second, _} = candidate(project, 2)
+
+    for _ <- 2..10 do
+      assert Train.budget_available?(project.id)
+      CandidateJournal.event(second, "successor_reserved", "test.catchup")
+    end
+
+    refute Train.budget_available?(project.id)
+    {_, _, _} = candidate(project, 3)
+    refute Train.budget_available?(project.id)
+  end
+
+  test "successor limit remains bounded and invalid settings fail closed" do
+    for {setting, expected} <- [{"100", 10}, {"0", 1}, {"-1", 1}, {"bad", 1}, {"10x", 1}] do
+      System.put_env("BORS_SPECULATION_CANARY_SUCCESSORS", setting)
+      assert Train.successor_limit() == expected
+    end
+  end
+
+  test "128-member eligibility batches identities and still rejects changed heads and barriers",
+       %{
+         project: project
+       } do
+    {a, ca, _} = candidate(project, 1, @base, nil, 128)
+    links = Repo.all(LinkPatchBatch.from_batch(a.id))
+    assert Train.barrier_free?(ca, @conn)
+
+    calls = GitHub.ServerMock.get_state().batch_read_calls
+
+    assert Enum.sort(Enum.map(calls, fn {:identity, prs} -> length(prs) end)) ==
+             [8, 20, 20, 20, 20, 20, 20]
+
+    state = GitHub.ServerMock.get_state()
+
+    GitHub.ServerMock.put_state(
+      put_in(state, [@conn, :pulls, 128, Access.key(:head_sha)], String.duplicate("f", 40))
+    )
+
+    refute Train.links_safe?(links, @conn)
+    GitHub.ServerMock.put_state(put_in(state, [@conn, :pr_files, 128], ["scripts/audit.sh"]))
+    refute Train.links_safe?(links, @conn)
+
+    GitHub.ServerMock.put_state(
+      state
+      |> Map.put(:batch_read_error, {:identity, {:error, :batch_read, 502}})
+      |> Map.put(:identity_read_error, {:error, :get_pr, 502, 1})
+    )
+
+    refute Train.links_safe?(links, @conn)
+  end
+
+  test "129 members remain ineligible", %{project: project} do
+    {_, _, links} = candidate(project, 1, @base, nil, 129)
+    refute Train.links_safe?(links, @conn)
+    refute Map.has_key?(GitHub.ServerMock.get_state(), :batch_read_calls)
+  end
+
+  test "complete large immutable diffs are eligible but any control path still blocks", %{
+    project: project
+  } do
+    {_, ca, _} = candidate(project, 1)
+    binding = CandidateJournal.commit_binding(ca)
+    paths = Enum.map(1..4095, &"TauCeti/File#{&1}.lean")
+
+    for {changed, allowed} <- [
+          {paths, true},
+          {[".github/workflows/check.yml" | tl(paths)], false}
+        ] do
+      CandidateJournal.event(ca, "train_barrier_checked", "bors.local_git", %{
+        commit: binding["commit"],
+        tree: binding["tree"],
+        base_sha: @base,
+        evidence: %{complete: true, paths: changed}
+      })
+
+      assert Train.barrier_free?(ca, @conn) == allowed
+    end
+  end
+
   test "same-head stale approval cannot resurrect a withdrawn generation", %{project: project} do
     {a, _, [link]} = candidate(project, 1)
     patch = Repo.get!(Patch, link.patch_id)
@@ -568,7 +660,7 @@ defmodule BorsNG.Worker.SpeculativeTrainTest do
     for evidence <- [
           %{complete: true, paths: ["scripts/new-audit.py"]},
           %{complete: false, paths: []},
-          %{complete: true, paths: List.duplicate("TauCeti/A.lean", 300)}
+          %{complete: true, paths: List.duplicate("TauCeti/A.lean", 4096)}
         ] do
       CandidateJournal.event(ca, "train_barrier_checked", "bors.local_git", %{
         commit: binding["commit"],

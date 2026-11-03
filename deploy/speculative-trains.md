@@ -1,9 +1,15 @@
-# Depth-two train canary
+# Depth-two train catch-up rollout
 
-N is deployed **disabled**. Do not enable until TauCeti issues #16231 (B),
-#16232 (E), and #16234 (F) are CLOSED with genuine `rollout-verified:` evidence,
-and the trusted TauCeti immutable-ref workflow change has landed and passed a
-NEW production dispatch. Required human infrastructure approval is mandatory.
+B/E/F and the trusted immutable-ref workflow were rollout-verified in October.
+The original one-successor canary exhausted its lifetime budget after a parent
+compiler failure; it verified safe invalidation, not successful pair promotion.
+
+On November 3 the operator authorized restarting speculative builds with the
+existing runner pool; dedicated fast staging slots will be arranged separately.
+The catch-up rollout sets a **ten-successor lifetime budget**, including that old
+reservation: at most **nine additional successors**. It does not add runner
+reservations, hedged duplicate runs, or a no-throughput-regression guarantee.
+Prerequisite B/E/F evidence and all trusted workflow approvals remain required.
 There is no 24-hour baseline prerequisite for this or unrelated releases.
 
 ## Scheduling and identity
@@ -17,11 +23,14 @@ legacy candidates drain serially before a fresh root can speculate.
 
 Assembly requires local squash construction, known exact toolchain bytes, and
 unchanged effective base policy. The helper records a complete exact base/head
-Git-tree diff independently of optional diagnostics. Incomplete or 300-path
+Git-tree diff independently of optional diagnostics. Incomplete or 4096-path
 immutable comparisons, mutable PR 3000-file ceilings, more than
-64 members, or a pin/policy/tooling path barrier stops speculative admission.
+128 members, or a pin/policy/tooling path barrier stops speculative admission.
 Barriers include both sides of renames of lean-toolchain, lake-manifest.json,
-lakefiles, bors.toml, scripts/, and .github/. Such roots still run serially.
+lakefiles, bors.toml, tauceti.toml, scripts/, and .github/. Such roots still run serially. Fresh eligibility identities use chunks of twenty;
+each member still has its file list checked, and complete immutable evidence is
+checked again before a successor dispatch. Previously captured incomplete
+evidence stays ineligible; increasing the bound does not bless missing paths.
 Speculative successors never fall back to the shared mutable staging branch.
 
 Every tracked generation publishes only `staging-candidate-ID-GENERATION` with
@@ -73,7 +82,9 @@ uses these same slots. Existing diagnostic isolation remains serial within its
 available slot. No speculative candidate, retry, or ordinary PR gains cache or
 publication privileges.
 
-The initial lifetime canary budget is **one successor reservation**. Operators may
+The code defaults to **one successor reservation**; the reviewed catch-up
+Worker deployment configures **ten lifetime reservations**, including the
+original October reservation. Operators may
 set `BORS_SPECULATION_CANARY_SUCCESSORS` to 1–10; the hard maximum is ten for this
 implementation, counted durably across restarts. Failed construction consumes a
 reservation too. Exhausting this budget returns scheduling to serial operation,
@@ -86,22 +97,26 @@ not be used to bypass the scheduler.
 
 ## Activation and verification
 
-Keep `src/index.js`'s `BORS_SPECULATIVE_TRAINS=false` until all gates above pass.
+Keep new admission disabled until all gates above pass; the catch-up deployment
+retains the previously verified gate URLs and existing true feature flag.
 Activation is a separate reviewed deployment configuring:
 
 - `BORS_SPECULATIVE_TRAINS=true`, async orchestration and local Git mode enabled.
 - `BORS_SPECULATION_GATE_16231`, `_16232`, `_16234`: exact GitHub issue-comment
   evidence URLs for each CLOSED, rollout-verified prerequisite. The URL shape is
   validated; the deployer must verify the evidence itself, not just supply a URL.
-- `BORS_SPECULATION_CANARY_SUCCESSORS=1` initially; never raise it to compensate
-  for an identity or approval failure.
+- `BORS_SPECULATION_CANARY_SUCCESSORS=10` for this catch-up rollout. Never raise
+  it to compensate for an identity or approval failure.
 
 The initial canary advances the Durable Object's one-shot startup epoch from
-`outbox-v1` to `outbox-v2-train-canary-1`. A warm container receives a bounded
+`outbox-v1` to `outbox-v2-train-canary-1`. The November catch-up epoch is
+`outbox-v2-train-canary-10-large-batches-1`, refreshing warm process settings once. A warm container receives a bounded
 graceful stop before the new epoch is acknowledged; a failed stop retries without
 clearing durable work or reservations. Later requests at the same epoch do not
 restart the container. Confirm `/health/` returns `x-bors-speculative-trains: true`:
 that header reads the backend process environment, not the Worker's configuration.
+Also confirm `x-bors-speculative-successors: 10`, which reports the effective
+clamped lifetime budget from the actual backend process.
 
 Capture before/after health, observation/v1 and candidate journal snapshots;
 verify TauCetiReview's current observation validator and account for every
