@@ -22,6 +22,7 @@ SHA = re.compile(r"[0-9a-f]{40}\Z")
 REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 OUTPUT_LIMIT = 1024 * 1024
 ASSEMBLY_MEMBER_LIMIT = 128
+BARRIER_PATH_LIMIT = 4096
 COMPATIBILITY_MEMBER_LIMIT = 32
 PROVIDER_OPERATIONS = ('import_providers', 'bounded_import_providers')
 OFFLINE_OPERATIONS = (*PROVIDER_OPERATIONS, 'collision_sources')
@@ -242,7 +243,8 @@ class Mirror:
         # optional failure hints and mutable PR file-list endpoints.
         paths = self.git('diff', '--name-only', '-z', '--no-renames', base, prev)[0].split('\0')
         paths = [p for p in paths if p]
-        barriers = dict(complete=len(paths) < 300, paths=paths if len(paths) < 300 else [])
+        barriers = dict(complete=len(paths) < BARRIER_PATH_LIMIT,
+                        paths=paths if len(paths) < BARRIER_PATH_LIMIT else [])
         tree = self.git('rev-parse', prev + '^{tree}')[0].strip()
         self.git('update-ref', 'refs/bors/result', prev)
         self.enforce_budget()

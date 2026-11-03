@@ -11,6 +11,10 @@ defmodule BorsNG.ServerController do
       "x-bors-speculative-trains",
       to_string(System.get_env("BORS_SPECULATIVE_TRAINS", "false") == "true")
     )
+    |> put_resp_header(
+      "x-bors-speculative-successors",
+      Integer.to_string(BorsNG.Worker.SpeculativeTrain.successor_limit())
+    )
     |> send_resp(200, "healthy")
   end
 

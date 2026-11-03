@@ -71,9 +71,10 @@ export class BorsContainer extends Container {
     BORS_REVIEW_LOGIN: workerEnv.BORS_REVIEW_LOGIN ?? (workerEnv.BORS_PROJECT && workerEnv.BORS_PROJECT !== "TauCetiProject/TauCeti" ? "" : "tauceti-review-bot[bot]"),
     BORS_ASYNC_ORCHESTRATION: "true",
     BORS_ASYNC_WORKERS: "1",
-    // B/E/F are rollout-verified. Bound this canary to one lifetime successor.
+    // B/E/F are rollout-verified. Catch-up rollout: ten lifetime successors,
+    // including the one already consumed by the October failure canary.
     BORS_SPECULATIVE_TRAINS: workerEnv.BORS_SPECULATIVE_TRAINS ?? (workerEnv.BORS_PROJECT && workerEnv.BORS_PROJECT !== "TauCetiProject/TauCeti" ? "false" : "true"),
-    BORS_SPECULATION_CANARY_SUCCESSORS: "1",
+    BORS_SPECULATION_CANARY_SUCCESSORS: "10",
     BORS_SPECULATION_GATE_16231: "https://github.com/TauCetiProject/TauCeti/issues/16231#issuecomment-6179935551",
     BORS_SPECULATION_GATE_16232: "https://github.com/TauCetiProject/TauCeti/issues/16232#issuecomment-6163837222",
     BORS_SPECULATION_GATE_16234: "https://github.com/TauCetiProject/TauCeti/issues/16234#issuecomment-6167663957",

@@ -44,13 +44,14 @@ defmodule BorsNG.Worker.SpeculativeTrain do
       not event?(candidate, "train_invalidated")
   end
 
-  def budget_available?(project_id) do
-    cap =
-      case Integer.parse(System.get_env("BORS_SPECULATION_CANARY_SUCCESSORS", "1")) do
-        {n, ""} -> min(max(n, 1), 10)
-        _ -> 1
-      end
+  def successor_limit do
+    case Integer.parse(System.get_env("BORS_SPECULATION_CANARY_SUCCESSORS", "1")) do
+      {n, ""} -> min(max(n, 1), 10)
+      _ -> 1
+    end
+  end
 
+  def budget_available?(project_id) do
     used =
       Repo.aggregate(
         from(e in CandidateEvent,
@@ -61,7 +62,7 @@ defmodule BorsNG.Worker.SpeculativeTrain do
         :count
       )
 
-    used < cap
+    used < successor_limit()
   end
 
   # Reservations include invalidated/withdrawn jobs until GitHub confirms that
@@ -200,7 +201,7 @@ defmodule BorsNG.Worker.SpeculativeTrain do
 
       details["commit"] == binding["commit"] and details["tree"] == binding["tree"] and
         details["base_sha"] == candidate.snapshot["base_sha"] and evidence["complete"] == true and
-        is_list(paths) and length(paths) < 300 and
+        is_list(paths) and length(paths) < 4096 and
         Enum.all?(paths, &(is_binary(&1) and not barrier_path?(&1)))
     else
       false
@@ -208,23 +209,37 @@ defmodule BorsNG.Worker.SpeculativeTrain do
   end
 
   def links_safe?(links, conn) do
-    links != [] and length(links) <= 64 and
-      Enum.all?(links, fn link ->
-        with {:ok, pr} <- GitHub.get_pr(conn, link.patch.pr_xref),
-             true <- pr.head_sha == link.head_sha and pr.state == :open and not pr.draft,
-             {:ok, files} <- GitHub.get_pr_files(conn, link.patch.pr_xref),
-             true <- is_list(files) and files != [] and length(files) < 3000 do
-          Enum.all?(files, fn file ->
-            paths =
-              [Map.get(file, :filename), Map.get(file, :previous_filename)]
-              |> Enum.reject(&is_nil/1)
+    if links != [] and length(links) <= 128 do
+      numbers = Enum.map(links, & &1.patch.pr_xref)
 
-            paths != [] and Enum.all?(paths, &(is_binary(&1) and not barrier_path?(&1)))
+      # Keep per-PR path barriers, but obtain their fresh identities in bounded
+      # batches instead of adding another serial REST read for every member.
+      case GitHub.BatchRead.fetch(conn, "TauCetiProject/TauCeti", numbers, :identity) do
+        {:ok, live} ->
+          Enum.all?(links, fn link ->
+            with %GitHub.Pr{} = pr <- Map.get(live, link.patch.pr_xref),
+                 true <- pr.head_sha == link.head_sha and pr.state == :open and not pr.draft,
+                 true <- pr.base_ref == link.patch.into_branch,
+                 {:ok, files} <- GitHub.get_pr_files(conn, link.patch.pr_xref),
+                 true <- is_list(files) and files != [] and length(files) < 3000 do
+              Enum.all?(files, fn file ->
+                paths =
+                  [Map.get(file, :filename), Map.get(file, :previous_filename)]
+                  |> Enum.reject(&is_nil/1)
+
+                paths != [] and Enum.all?(paths, &(is_binary(&1) and not barrier_path?(&1)))
+              end)
+            else
+              _ -> false
+            end
           end)
-        else
-          _ -> false
-        end
-      end)
+
+        _ ->
+          false
+      end
+    else
+      false
+    end
   end
 
   def barrier_path?(path) do
@@ -233,7 +248,8 @@ defmodule BorsNG.Worker.SpeculativeTrain do
       "lakefile.lean",
       "lakefile.toml",
       "lake-manifest.json",
-      "bors.toml"
+      "bors.toml",
+      "tauceti.toml"
     ] or
       String.starts_with?(path, ["scripts/", ".github/"])
   end
