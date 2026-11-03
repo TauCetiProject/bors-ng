@@ -263,6 +263,33 @@ defmodule BorsNG.Worker.SpeculativeTrainTest do
     assert is_nil(Train.predecessor(project, [a], @conn))
   end
 
+  test "only exact accepted membership and base can defer heads from successor selection", %{
+    project: project
+  } do
+    {_, parent, _} = candidate(project, 1)
+    selected = Enum.map(parent.snapshot["members"], &Map.take(&1, ["pr", "head_sha"]))
+
+    details = %{
+      complete: true,
+      accepted: selected,
+      skipped: [%{members: [%{pr: 2, head_sha: "head"}]}],
+      identity: %{batch_id: parent.batch_id, base_sha: @base}
+    }
+
+    CandidateJournal.event(
+      parent,
+      "merge_selection",
+      "test",
+      put_in(details, [:identity, :base_sha], "wrong")
+    )
+
+    assert Train.blocked_successor_heads(parent) == MapSet.new()
+    CandidateJournal.event(parent, "merge_selection", "test", %{details | accepted: []})
+    assert Train.blocked_successor_heads(parent) == MapSet.new()
+    CandidateJournal.event(parent, "merge_selection", "test", details)
+    assert Train.blocked_successor_heads(parent) == MapSet.new([{2, "head"}])
+  end
+
   test "disabled by default, scoped and gated by all B/E/F evidence", %{project: project} do
     refute Train.enabled?(project, "main")
     enable()

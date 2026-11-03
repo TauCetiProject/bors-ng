@@ -117,6 +117,8 @@ trees grant no publication authority. Empty selections retain existing conservat
 singleton/bundle handling. Incomplete planning evidence cannot alter membership.
 Locked current-membership checks reject races before moving links. Ordinary
 assembly, missing-import preflight, live identity checks and all CI gates remain.
+The parent's exact accepted-member/base-bound selection also excludes its
+deferred heads from immediate successor selection against that same parent.
 The planning pass has a sixty-second deadline. Local selection and assembly
 maintain Git's disposable split commit-graph index after pinning exact fetched
 inputs, avoiding repeated deep ancestry walks. Index metadata changes no merge

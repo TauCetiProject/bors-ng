@@ -228,10 +228,34 @@ defmodule BorsNG.Worker.SpeculativeTrain do
   end
 
   def blocked_successor_heads(parent) do
-    successor_attempts(parent)
-    |> Enum.map(&local_conflict_head(parent, &1))
-    |> Enum.reject(&is_nil/1)
-    |> MapSet.new()
+    attempts =
+      successor_attempts(parent)
+      |> Enum.map(&local_conflict_head(parent, &1))
+      |> Enum.reject(&is_nil/1)
+
+    selected = Enum.map(parent.snapshot["members"], &Map.take(&1, ["pr", "head_sha"]))
+
+    deferred =
+      Repo.all(
+        from(e in CandidateEvent,
+          where: e.candidate_id == ^parent.id and e.kind == "merge_selection"
+        )
+      )
+      |> Enum.flat_map(fn event ->
+        details = event.details
+
+        if details["complete"] == true and details["accepted"] == selected and
+             get_in(details, ["identity", "batch_id"]) == parent.batch_id and
+             get_in(details, ["identity", "base_sha"]) == parent.snapshot["base_sha"] do
+          for unit <- details["skipped"] || [],
+              member <- unit["members"] || [],
+              do: {member["pr"], member["head_sha"]}
+        else
+          []
+        end
+      end)
+
+    MapSet.new(attempts ++ deferred)
   end
 
   def compatible_successor?(blocked, links),

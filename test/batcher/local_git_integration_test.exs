@@ -1329,6 +1329,10 @@ defmodule BorsNG.Worker.LocalGitIntegrationTest do
     assert current.state == :running
     candidate = CandidateJournal.latest(current.id)
     assert Enum.map(candidate.snapshot["members"], & &1["pr"]) == [1, 3, 6]
+
+    assert BorsNG.Worker.SpeculativeTrain.blocked_successor_heads(candidate) ==
+             MapSet.new(for pr <- [2, 4, 5], do: {pr, @head})
+
     [selection] = Enum.filter(events(current), &(&1.kind == "merge_selection"))
     retry = Repo.get!(Batch, selection.details["deferred_batch_id"])
     assert retry.state == :waiting
