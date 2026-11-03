@@ -197,6 +197,11 @@ class Mirror:
         self.git('update-ref', '--stdin',
                  input=''.join('delete ' + ref + '\n' for ref in self.previous_refs if ref not in targets)
                        + ''.join('update ' + ref + ' ' + sha + '\n' for ref, sha in targets.items()))
+        # Hundreds of merge-base walks otherwise repeatedly scan the same
+        # deep repository history. The index is disposable and contains only
+        # trusted Git object metadata; it changes no tree or merge semantics.
+        if self.request['operation'] in ['select', 'assemble']:
+            self.git('commit-graph', 'write', '--reachable', '--split', check=False)
         self.enforce_budget()
 
     def select(self):

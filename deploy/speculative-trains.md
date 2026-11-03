@@ -117,6 +117,12 @@ trees grant no publication authority. Empty selections retain existing conservat
 singleton/bundle handling. Incomplete planning evidence cannot alter membership.
 Locked current-membership checks reject races before moving links. Ordinary
 assembly, missing-import preflight, live identity checks and all CI gates remain.
+The planning pass has a sixty-second deadline. Local selection and assembly
+maintain Git's disposable split commit-graph index after pinning exact fetched
+inputs, avoiding repeated deep ancestry walks. Index metadata changes no merge
+result. A replay of the historical 126-member child kept 123 and deferred three
+conflicts in 1.87 seconds with the index; without it the same warm replay exceeded
+sixty seconds. This is an assembly measurement, not a CI-throughput benchmark.
 
 Keep new admission disabled until all gates above pass; the catch-up deployment
 retains the previously verified gate URLs and existing true feature flag.
