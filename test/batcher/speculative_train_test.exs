@@ -194,9 +194,9 @@ defmodule BorsNG.Worker.SpeculativeTrainTest do
     GitHub.ServerMock.put_state(Map.put(state, @conn, repo))
   end
 
-  defp failed_construction(project, parent) do
+  defp failed_construction(project, parent, pr \\ 4) do
     {batch, child, [link]} =
-      candidate(project, 4, CandidateJournal.commit_binding(parent)["commit"], parent)
+      candidate(project, pr, CandidateJournal.commit_binding(parent)["commit"], parent)
 
     Repo.delete_all(
       from(e in CandidateEvent, where: e.candidate_id == ^child.id and e.kind == "constructed")
@@ -206,7 +206,7 @@ defmodule BorsNG.Worker.SpeculativeTrainTest do
 
     CandidateJournal.event(child, "local_conflict", "bors.local_git", %{
       kind: "merge_conflict",
-      pr: 4,
+      pr: pr,
       head_sha: link.head_sha
     })
 
@@ -261,6 +261,33 @@ defmodule BorsNG.Worker.SpeculativeTrainTest do
     )
 
     assert is_nil(Train.predecessor(project, [a], @conn))
+  end
+
+  test "only exact accepted membership and base can defer heads from successor selection", %{
+    project: project
+  } do
+    {_, parent, _} = candidate(project, 1)
+    selected = Enum.map(parent.snapshot["members"], &Map.take(&1, ["pr", "head_sha"]))
+
+    details = %{
+      complete: true,
+      accepted: selected,
+      skipped: [%{members: [%{pr: 2, head_sha: "head"}]}],
+      identity: %{batch_id: parent.batch_id, base_sha: @base}
+    }
+
+    CandidateJournal.event(
+      parent,
+      "merge_selection",
+      "test",
+      put_in(details, [:identity, :base_sha], "wrong")
+    )
+
+    assert Train.blocked_successor_heads(parent) == MapSet.new()
+    CandidateJournal.event(parent, "merge_selection", "test", %{details | accepted: []})
+    assert Train.blocked_successor_heads(parent) == MapSet.new()
+    CandidateJournal.event(parent, "merge_selection", "test", details)
+    assert Train.blocked_successor_heads(parent) == MapSet.new([{2, "head"}])
   end
 
   test "disabled by default, scoped and gated by all B/E/F evidence", %{project: project} do
@@ -642,6 +669,45 @@ defmodule BorsNG.Worker.SpeculativeTrainTest do
     assert Train.budget_available?(project.id)
     CandidateJournal.event(ca, "successor_reserved", "test")
     refute Train.budget_available?(project.id)
+  end
+
+  test "proved local conflicts preserve the CI trial budget but dispatch intent consumes it", %{
+    project: project
+  } do
+    {_, parent, _} = candidate(project, 1)
+    {child, _} = failed_construction(project, parent)
+    assert Train.budget_available?(project.id)
+    CandidateJournal.event(child, "dispatch_requested", "test")
+    refute Train.budget_available?(project.id)
+  end
+
+  test "an unbound local conflict cannot reclaim the experiment budget", %{project: project} do
+    {_, parent, _} = candidate(project, 1)
+    {child, _} = failed_construction(project, parent)
+
+    Repo.update_all(
+      from(e in CandidateEvent, where: e.candidate_id == ^child.id and e.kind == "local_conflict"),
+      set: [details: %{kind: "merge_conflict", pr: 999, head_sha: String.duplicate("f", 40)}]
+    )
+
+    refute Train.budget_available?(project.id)
+  end
+
+  test "reclaimed local attempts still stop after sixteen constructions on one parent", %{
+    project: project
+  } do
+    enable()
+    {batch, parent, _} = candidate(project, 1)
+    Train.reserve(parent, @conn)
+
+    for n <- 1..16 do
+      assert Train.budget_available?(project.id)
+      assert Train.predecessor(project, [batch], @conn).id == parent.id
+      failed_construction(project, parent, 100 + n)
+    end
+
+    assert Train.budget_available?(project.id)
+    assert is_nil(Train.predecessor(project, [batch], @conn))
   end
 
   test "catch-up budget counts the old reservation and stops at ten across parents", %{

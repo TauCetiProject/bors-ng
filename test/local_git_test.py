@@ -53,6 +53,51 @@ class LocalGitTest(unittest.TestCase):
                                           members_digest='immutable'),
                             date='2026-10-14T00:00:00Z', members=[])
 
+    def test_selection_skips_conflicts_continues_and_rolls_back_whole_bundles(self):
+        one = self.commit(self.base, {'file': 'first\ntwo\nthree\n'})
+        bad = self.commit(self.base, {'file': 'conflicting\ntwo\nthree\n'})
+        later = self.commit(self.base, {'later': 'retained'})
+        bundled = self.commit(self.base, {'bundle-only': 'must not leak'})
+        bad_bundle = self.commit(self.base, {'file': 'bundle conflict\ntwo\nthree\n'})
+        last = self.commit(self.base, {'last': 'also retained'})
+        heads = [one, bad, later, bundled, bad_bundle, last]
+        members = [dict(pr=n+1, head_sha=h) for n,h in enumerate(heads)]
+        request = self.request | dict(operation='select', base_sha=self.base,
+            units=[[members[0]], [members[1]], [members[2]], members[3:5], [members[5]]])
+        local.validate(request)
+        result = TestMirror(request, self.upstream).run()
+        mirror = TestMirror(request, self.upstream)
+        self.assertTrue((mirror.repo / 'objects/info/commit-graphs/commit-graph-chain').exists())
+        mirror.git('commit-graph', 'verify')
+        self.assertEqual(result['accepted'], [members[i] for i in [0,2,5]])
+        self.assertEqual([s['members'] for s in result['skipped']], [[members[1]], members[3:5]])
+        self.assertEqual([s['conflict']['pr'] for s in result['skipped']], [2,5])
+        self.assertEqual(result['identity'], request['identity'])
+        self.request['members'] = [self.member(i+1, heads[i]) for i in [0,2,5]]
+        assembled = self.run_mirror()
+        head = assembled['result']['commit']
+        mirror = TestMirror(self.request, self.upstream)
+        paths = mirror.git('ls-tree', '-r', '--name-only', head)[0].splitlines()
+        self.assertEqual(paths, ['file','last','later'])
+        self.assertEqual(mirror.git('show', head+':file')[0], 'first\ntwo\nthree\n')
+
+    def test_selection_rejects_bad_units_and_stops_on_git_errors(self):
+        from unittest.mock import patch
+        head = self.commit(self.base, {'a': 'a'})
+        m = dict(pr=1, head_sha=head)
+        request = self.request | dict(operation='select', base_sha=self.base, units=[[m]])
+        for units in [[], [[]], [[m],[m]], [[m | dict(head_sha='-bad')]]]:
+            with self.assertRaises(local.Failure):
+                local.validate(request | dict(units=units))
+        mirror = TestMirror(request, self.upstream)
+        original = mirror.git
+        def failing(*args, **kw):
+            return ('',128) if args[0]=='merge-tree' else original(*args,**kw)
+        with patch.object(mirror,'git',side_effect=failing):
+            with self.assertRaises(local.Failure) as failure:
+                mirror.run()
+        self.assertEqual(failure.exception.details['kind'],'git_failed')
+
     def compatibility(self, base, *heads):
         request = self.request | dict(operation='compatibility', base_sha=base,
             members=[dict(pr=n + 1, head_sha=head) for n, head in enumerate(heads)])

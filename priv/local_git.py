@@ -197,7 +197,57 @@ class Mirror:
         self.git('update-ref', '--stdin',
                  input=''.join('delete ' + ref + '\n' for ref in self.previous_refs if ref not in targets)
                        + ''.join('update ' + ref + ' ' + sha + '\n' for ref, sha in targets.items()))
+        # Hundreds of merge-base walks otherwise repeatedly scan the same
+        # deep repository history. The index is disposable and contains only
+        # trusted Git object metadata; it changes no tree or merge semantics.
+        if self.request['operation'] in ['select', 'assemble']:
+            self.git('commit-graph', 'write', '--reachable', '--split', check=False)
         self.enforce_budget()
+
+    def select(self):
+        """Plan compatible atomic units before freezing candidate membership.
+
+        Temporary ancestry is disposable. No selected tree can be published;
+        the caller must assemble the accepted exact heads under a new identity.
+        """
+        units = self.request['units']
+        base = self.request['base_sha']
+        self.initialize()
+        self.fetch([base] + [m['head_sha'] for unit in units for m in unit])
+        merge_head = base
+        accepted, skipped = [], []
+        env = dict(GIT_AUTHOR_NAME='bors', GIT_AUTHOR_EMAIL='bors@example.invalid',
+                   GIT_COMMITTER_NAME='bors', GIT_COMMITTER_EMAIL='bors@example.invalid',
+                   GIT_AUTHOR_DATE='2000-01-01T00:00:00Z',
+                   GIT_COMMITTER_DATE='2000-01-01T00:00:00Z')
+        for unit in units:
+            checkpoint = merge_head
+            conflict = None
+            for member in unit:
+                if self.git('merge-base', '--is-ancestor', member['head_sha'], merge_head, check=False)[1] == 0:
+                    conflict = dict(kind='already_merged', **member, paths=[])
+                    break
+                output, status = self.git('merge-tree', '--write-tree', '--name-only', '-z',
+                                          merge_head, member['head_sha'], check=False)
+                fields = output.split('\0')
+                if status == 1:
+                    paths = fields[1:fields.index('', 1)] if '' in fields[1:] else fields[1:]
+                    conflict = dict(kind='merge_conflict', **member, paths=paths,
+                                    merge_head=merge_head, base_sha=base)
+                    break
+                if status:
+                    raise Failure('git_failed', operation='merge-tree', exit_status=status, pr=member['pr'])
+                merge_head = self.git('commit-tree', fields[0].strip(), '-p', merge_head,
+                                      '-p', member['head_sha'], input='bors selection ancestry\n',
+                                      extra_env=env)[0].strip()
+            if conflict:
+                merge_head = checkpoint
+                skipped.append(dict(members=unit, conflict=conflict))
+            else:
+                accepted.extend(unit)
+        self.enforce_budget()
+        return dict(status='ok', identity=self.request['identity'], accepted=accepted,
+                    skipped=skipped, complete=True)
 
     def assemble(self):
         members = self.request['members']
@@ -1066,7 +1116,7 @@ def local_imports(content):
 def validate(request):
     if not REPO.fullmatch(request['repository']) or '..' in request['repository']:
         raise Failure('invalid_repository')
-    if request['operation'] not in ['assemble', 'publish', 'promote', 'compatibility', *OFFLINE_OPERATIONS]:
+    if request['operation'] not in ['select', 'assemble', 'publish', 'promote', 'compatibility', *OFFLINE_OPERATIONS]:
         raise Failure('invalid_operation')
     if request['operation'] in OFFLINE_OPERATIONS:
         binding, paths = request['binding'], request['paths']
@@ -1094,6 +1144,17 @@ def validate(request):
         if request['operation'] == 'collision_sources' and len(paths) != 2:
             raise Failure('invalid_collision_request')
         shas = [binding['commit'], binding['base_sha']]
+    elif request['operation'] == 'select':
+        units = request.get('units')
+        if (not isinstance(units, list) or not units or any(not isinstance(u, list) or not u for u in units)):
+            raise Failure('invalid_units')
+        members = [m for unit in units for m in unit]
+        if (len(members) > ASSEMBLY_MEMBER_LIMIT
+                or any(not isinstance(m, dict) or set(m) != {'pr', 'head_sha'}
+                       or type(m['pr']) is not int or m['pr'] <= 0 for m in members)
+                or len({m['pr'] for m in members}) != len(members)):
+            raise Failure('invalid_units')
+        shas = [request['base_sha']] + [m['head_sha'] for m in members]
     elif request['operation'] in ['assemble', 'compatibility']:
         if not request['members']:
             raise Failure('empty_members')

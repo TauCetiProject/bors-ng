@@ -70,6 +70,16 @@ defmodule BorsNG.Worker.LocalGit do
     end
   end
 
+  def select(project, conn, base, units, identity) do
+    run(%{repository: project.name, conn: conn}, %{
+      operation: "select",
+      timeout: 60,
+      base_sha: base,
+      identity: identity,
+      units: units
+    })
+  end
+
   # Caller performs live/identity checks and persists CI intent first. No
   # temporary remote refs exist to leak after process/container restart.
   def push(result, context, expected) do

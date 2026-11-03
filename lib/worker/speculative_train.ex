@@ -53,14 +53,25 @@ defmodule BorsNG.Worker.SpeculativeTrain do
 
   def budget_available?(project_id) do
     used =
-      Repo.aggregate(
+      Repo.all(
         from(e in CandidateEvent,
           join: c in Candidate,
           on: c.id == e.candidate_id,
-          where: c.project_id == ^project_id and e.kind == "successor_reserved"
-        ),
-        :count
+          where: c.project_id == ^project_id and e.kind == "successor_reserved",
+          select: {c, e.details}
+        )
       )
+      |> Enum.count(fn {parent, details} ->
+        child =
+          case details["candidate_id"] do
+            id when is_integer(id) -> Repo.get(Candidate, id)
+            _ -> nil
+          end
+
+        # Reclaim only a proved member/head-bound local construction conflict.
+        # Published/constructed or ambiguous attempts retain their charge.
+        is_nil(local_conflict_head(parent, child))
+      end)
 
     used < successor_limit()
   end
@@ -183,8 +194,10 @@ defmodule BorsNG.Worker.SpeculativeTrain do
     end)
   end
 
-  defp successor_available?(parent),
-    do: Enum.all?(successor_attempts(parent), &(local_conflict_head(parent, &1) != nil))
+  defp successor_available?(parent) do
+    attempts = successor_attempts(parent)
+    length(attempts) < 16 and Enum.all?(attempts, &(local_conflict_head(parent, &1) != nil))
+  end
 
   defp local_conflict_head(_parent, nil), do: nil
 
@@ -215,10 +228,34 @@ defmodule BorsNG.Worker.SpeculativeTrain do
   end
 
   def blocked_successor_heads(parent) do
-    successor_attempts(parent)
-    |> Enum.map(&local_conflict_head(parent, &1))
-    |> Enum.reject(&is_nil/1)
-    |> MapSet.new()
+    attempts =
+      successor_attempts(parent)
+      |> Enum.map(&local_conflict_head(parent, &1))
+      |> Enum.reject(&is_nil/1)
+
+    selected = Enum.map(parent.snapshot["members"], &Map.take(&1, ["pr", "head_sha"]))
+
+    deferred =
+      Repo.all(
+        from(e in CandidateEvent,
+          where: e.candidate_id == ^parent.id and e.kind == "merge_selection"
+        )
+      )
+      |> Enum.flat_map(fn event ->
+        details = event.details
+
+        if details["complete"] == true and details["accepted"] == selected and
+             get_in(details, ["identity", "batch_id"]) == parent.batch_id and
+             get_in(details, ["identity", "base_sha"]) == parent.snapshot["base_sha"] do
+          for unit <- details["skipped"] || [],
+              member <- unit["members"] || [],
+              do: {member["pr"], member["head_sha"]}
+        else
+          []
+        end
+      end)
+
+    MapSet.new(attempts ++ deferred)
   end
 
   def compatible_successor?(blocked, links),

@@ -8,7 +8,7 @@ defmodule BorsNG.Worker.Batcher.QueueAge do
 
   # Neutral topology/membership changes cannot spend the unchanged survivors'
   # failure allowance. Unknown reasons conservatively consume it.
-  @neutral_retries ~w(train_invalidated stale_dispatch member_removed cancellation non_fast_forward provisional_remainder provisional_unconfirmed)
+  @neutral_retries ~w(train_invalidated stale_dispatch member_removed cancellation non_fast_forward provisional_remainder provisional_unconfirmed merge_conflict_deferred)
 
   # Old journals have no counter: allow bounded rollout grace, then persist
   # failed/inconclusive retries. Saturation cannot renew the preference.
