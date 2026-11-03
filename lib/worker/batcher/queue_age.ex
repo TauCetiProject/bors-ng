@@ -52,11 +52,16 @@ defmodule BorsNG.Worker.Batcher.QueueAge do
       rows == [] or length(Enum.uniq(ids)) != length(ids) or :unknown in ages ->
         {fallback(batch, now), :poll_fallback}
 
+      preferred_remainder?(batch, rows) ->
+        # A newly located removal earns its own bounded allowance even when
+        # earlier conflicts/bisections exhausted generic age inheritance.
+        age =
+          rows |> Enum.map(fn {_, _, a} -> a.snapshot["original_admitted_at"] end) |> Enum.min()
+
+        {age, {:diagnostic_remainder, length(rows)}}
+
       :exhausted in ages ->
         {fallback(batch, now), :retry_fairness}
-
-      preferred_remainder?(batch, rows) ->
-        {Enum.min(ages), {:diagnostic_remainder, length(rows)}}
 
       true ->
         {Enum.min(ages), :original_admission}

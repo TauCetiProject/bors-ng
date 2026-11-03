@@ -115,6 +115,26 @@ defmodule BorsNG.Worker.QueueAgeTest do
     assert QueueAge.next_remainder(nil, "diagnostic_remainder") == 4
   end
 
+  test "located removal earns bounded preference after old conflicts exhausted generic retry age" do
+    ordinary = batch(1, 10)
+    retained = batch(2, 20)
+
+    for count <- 0..4 do
+      rows =
+        remainder(retained, 3, 20, count)
+        |> Enum.map(fn {l, h, a} ->
+          {l, h, %{a | snapshot: Map.put(a.snapshot, "queue_age_retries", 3)}}
+        end)
+
+      keys = QueueAge.keys([ordinary, retained], [member(ordinary, 1, 1) | rows], 100)
+
+      assert Enum.sort_by([ordinary, retained], &QueueAge.order_key(&1, keys)) ==
+               if(count <= 3, do: [retained, ordinary], else: [ordinary, retained])
+
+      assert elem(Map.fetch!(keys, retained.id), 0) |> is_integer()
+    end
+  end
+
   test "frozen Oct16 queue replays exactly, retaining running sentinel and all member data" do
     frozen = [
       {854, "2026-10-16T04:26:53Z", "2026-10-14T20:28:37.304621Z", 1},

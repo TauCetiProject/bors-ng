@@ -18,7 +18,10 @@ reason. Existing `provisional_remainder` admissions receive the preference too.
 Legacy ambiguous splits are not retrospectively declared healthy. A per-head
 `remainder_retries` counter saturates at four; only the first three removals can
 earn preference. Neutral invalidation cannot reset it. The existing failed-retry
-age fairness limit also remains in force. No patch priorities are rewritten.
+age fairness limit still applies to ordinary/inconclusive retries; a newly
+located removal earns its independent, bounded remainder allowance even if old
+conflicts/bisections exhausted generic inherited age. No patch priorities are
+rewritten.
 
 A root failure's reserved successor no longer blocks the existing atomic
 provisional handoff. Native terminal completion invalidates all descendants and
