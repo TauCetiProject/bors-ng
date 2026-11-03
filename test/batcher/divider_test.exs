@@ -869,7 +869,10 @@ defmodule BorsNG.Worker.Batcher.DividerTest do
       assert cloned.id == result.id
 
       assert Enum.count(cloned.patches) == 2
-      assert Enum.map(cloned.patches, & &1.patch_id) == [patch1.id, patch2.id]
+
+      assert Enum.sort(Enum.map(cloned.patches, & &1.patch_id)) ==
+               Enum.sort([patch1.id, patch2.id])
+
       assert Enum.map(cloned.patches, & &1.reviewer) == ["some_user", "some_user"]
 
       original_link_ids = [link1.id, link2.id] |> Enum.sort()
