@@ -87,7 +87,7 @@ defmodule BorsNG.Worker.CandidateJournal do
 
   def admission(link_id), do: Repo.get_by(CandidateAdmission, link_id: link_id)
 
-  # One read bounded by current waiting membership, including missing admissions.
+  # Reads bounded by current waiting membership and its immediate split parents.
   # No historical scan, per-member lookup, JSON SQL or GitHub calls.
   def queue_age_members(batches) do
     ids = for b <- batches, b.state == :waiting, do: b.id
@@ -105,7 +105,82 @@ defmodule BorsNG.Worker.CandidateJournal do
           select: {l, p.commit, a}
         )
       )
+      |> annotate_legacy_remainders()
     end
+  end
+
+  # Older diagnostic retries used the same reason for suspect and remainder.
+  # Recover the role only from an exact, two-part immutable partition. More
+  # complex singleton/component layouts remain ambiguous. This is one bounded
+  # database join for current waiting parents, never a scan or a GitHub read.
+  defp annotate_legacy_remainders(rows) do
+    reasons =
+      ~w(compiler_diagnostics import_provider_hint bounded_provider_hint recovered_parent_diagnostics)
+
+    parents =
+      for {_, _, a} <- rows,
+          a != nil,
+          a.snapshot["retry_reason"] in reasons,
+          is_integer(a.snapshot["parent_candidate_id"]),
+          do: a.snapshot["parent_candidate_id"]
+
+    parents = Enum.uniq(parents)
+
+    observations =
+      if parents == [],
+        do: [],
+        else:
+          Repo.all(
+            from(c in Candidate,
+              join: e in CandidateEvent,
+              on: e.candidate_id == c.id,
+              where:
+                c.id in ^parents and e.kind == "failure_partition" and
+                  e.source == "bors.failure_isolation",
+              order_by: [desc: e.id],
+              select: {c, e}
+            )
+          )
+
+    profiles =
+      Enum.flat_map(observations, fn {c, e} ->
+        members = Map.new(c.snapshot["members"], &{&1["pr"], &1["head_sha"]})
+
+        case e.details["groups"] do
+          [suspects, remainder] when suspects != [] and remainder != [] ->
+            all = suspects ++ remainder
+
+            if e.details["ownership_complete"] == true and e.details["authority"] == "retry_only" and
+                 Enum.sort(all) == Enum.sort(Map.keys(members)) and
+                 length(Enum.uniq(all)) == length(all),
+               do: [{c, e, members, MapSet.new(remainder)}],
+               else: []
+
+          _ ->
+            []
+        end
+      end)
+      |> Enum.group_by(fn {c, _, _, _} -> c.id end)
+
+    Enum.map(rows, fn {link, head, a} = row ->
+      if a && a.snapshot["retry_reason"] in reasons do
+        matched =
+          Enum.any?(Map.get(profiles, a.snapshot["parent_candidate_id"], []), fn {c, e, members,
+                                                                                  remainder} ->
+            c.project_id == a.project_id and c.into_branch == a.into_branch and
+              e.observed_at <= a.observed_at and
+              e.details["strategy"] == a.snapshot["retry_reason"] and
+              MapSet.member?(remainder, a.snapshot["pr"]) and members[a.snapshot["pr"]] == head and
+              head == link.head_sha and head == a.snapshot["head_sha"]
+          end)
+
+        if matched,
+          do: {link, head, %{a | snapshot: Map.put(a.snapshot, "verified_remainder", true)}},
+          else: row
+      else
+        row
+      end
+    end)
   end
 
   def latest(batch_id) do

@@ -102,7 +102,8 @@ defmodule BorsNG.Worker.Batcher.QueueAge do
         s = admission.snapshot
         count = Map.get(s, "remainder_retries", 0)
 
-        s["source"] == "bors.retry" and s["retry_reason"] in @remainder_reasons and
+        s["source"] == "bors.retry" and
+          (s["retry_reason"] in @remainder_reasons or s["verified_remainder"] == true) and
           is_integer(s["parent_candidate_id"]) and s["parent_candidate_id"] > 0 and
           is_integer(count) and count in 0..3
       end)

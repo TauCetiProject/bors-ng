@@ -1145,6 +1145,48 @@ defmodule BorsNG.Worker.FailureIsolationTest do
     end
   end
 
+  test "legacy two-part diagnostic remainders recover scheduling role without rewriting admissions",
+       c do
+    {batch, evidence} = terminal(c)
+
+    BorsNG.Worker.FailureDiagnostics.observe(batch, evidence, :conn, fn _, _ ->
+      log_result(["TauCeti/File3.lean"])
+    end)
+
+    FailureIsolation.classified(batch, "candidate_failure", evidence)
+    assert :retrying = FailureIsolation.split(c.links, batch)
+    children = Repo.all(from(b in Batch, where: b.id != ^batch.id))
+
+    for child <- children, link <- stored_links(child.id) do
+      a = CandidateJournal.admission(link.id)
+
+      s =
+        a.snapshot
+        |> Map.put("retry_reason", "compiler_diagnostics")
+        |> Map.put("queue_age_retries", 3)
+        |> Map.delete("remainder_retries")
+
+      Repo.update!(Ecto.Changeset.change(a, snapshot: s))
+    end
+
+    before = Repo.all(BorsNG.Database.CandidateAdmission)
+    rows = CandidateJournal.queue_age_members(children)
+    keys = BorsNG.Worker.Batcher.QueueAge.keys(children, rows, System.system_time(:microsecond))
+
+    [retained, suspect] =
+      Enum.sort_by(children, &BorsNG.Worker.Batcher.QueueAge.order_key(&1, keys))
+
+    assert prs([stored_links(retained.id), stored_links(suspect.id)]) == [[1, 2, 4], [3]]
+    assert elem(keys[retained.id], 1) == {:diagnostic_remainder, 3}
+    assert before == Repo.all(BorsNG.Database.CandidateAdmission)
+    # New heads cannot inherit an old partition's scheduling hint.
+    patch = Enum.at(c.links, 0).patch
+    Repo.update!(Ecto.Changeset.change(patch, commit: "moved"))
+    rows = CandidateJournal.queue_age_members(children)
+    keys = BorsNG.Worker.Batcher.QueueAge.keys(children, rows, System.system_time(:microsecond))
+    assert elem(keys[retained.id], 1) == :poll_fallback
+  end
+
   test "optional dependency timeout retains compiler isolation and immutable approvals", c do
     alias BorsNG.Worker.FailureDiagnostics
     {batch, evidence} = terminal(c)

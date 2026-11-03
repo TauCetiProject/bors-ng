@@ -15,7 +15,11 @@ Normal eligibility deadlines remain independent of ordering.
 The native partition records the non-suspect groups as `diagnostic_remainder`.
 All suspect components, including multiple singleton units, retain their original
 reason. Existing `provisional_remainder` admissions receive the preference too.
-Legacy ambiguous splits are not retrospectively declared healthy. A per-head
+Legacy groups can recover the same scheduling role through one bounded journal
+join, only when an exact two-part immutable partition proves every retained
+head's membership outside the suspect group. More complex legacy splits remain
+ambiguous. The annotation is read-time only; historical admissions are not
+rewritten. A per-head
 `remainder_retries` counter saturates at four; only the first three removals can
 earn preference. Neutral invalidation cannot reset it. The existing failed-retry
 age fairness limit still applies to ordinary/inconclusive retries; a newly
