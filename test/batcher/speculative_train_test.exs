@@ -173,6 +173,86 @@ defmodule BorsNG.Worker.SpeculativeTrainTest do
         put_in(GitHub.ServerMock.get_state(), [@conn, :branches, "main"], head)
       )
 
+  test "pending eligibility can hold an already-red root until the thirty-minute poll", %{
+    project: project
+  } do
+    {batch, c, links} = candidate(project, 1)
+    CandidateJournal.event(c, "train_reserved", "bors.train", %{cap: 3})
+
+    batch =
+      Repo.update!(Batch.changeset(batch, %{timeout_at: Outbox.now() + 3600, last_polled: 0}))
+      |> Repo.preload(:project)
+
+    GitHub.ServerMock.put_state(
+      put_in(GitHub.ServerMock.get_state(), [@conn, :statuses, batch.commit], %{"build" => :error})
+    )
+
+    [link] = Repo.preload(links, :patch)
+    eligibility = Outbox.enqueue(project.id, "cast", {:eligibility, link.patch.pr_xref})
+    assert eligibility.subject_id == link.patch_id
+    assert Train.guard(batch, @conn) == {:hold, :withdrawal_pending}
+
+    assert :ok =
+             Batcher.do_handle_cast(
+               {:status, {batch.commit, "build", :error, "run-url"}},
+               project.id
+             )
+
+    held = Repo.get!(Batch, batch.id) |> Repo.preload(:project)
+    assert held.state == :running
+    assert Repo.get_by!(Status, batch_id: batch.id, identifier: "build").state == :error
+    assert held.last_polled >= Outbox.now() - 2
+
+    [event] =
+      Repo.all(
+        from(e in CandidateEvent,
+          where: e.candidate_id == ^c.id and e.kind == "completion_deferred"
+        )
+      )
+
+    assert event.details["reason"] == "withdrawal_pending"
+    assert event.details["summary"] == "error"
+    assert event.details["next_recheck_at"] == nil
+    assert event.details["fallback_poll_at"] >= Outbox.now() + 1798
+
+    assert [%{"id" => id, "kind" => "cast", "subject_id" => subject}] =
+             Enum.map(
+               event.details["blockers"]["jobs"],
+               &Map.take(&1, ["id", "kind", "subject_id"])
+             )
+
+    assert id == eligibility.id and subject == link.patch_id
+    assert hd(event.details["blockers"]["jobs"])["command"] == "eligibility"
+
+    for _ <- 1..12 do
+      BorsNG.Worker.CompletionDiagnostics.record(held, :withdrawal_pending)
+    end
+
+    assert Repo.aggregate(
+             from(e in CandidateEvent,
+               where: e.candidate_id == ^c.id and e.kind == "completion_deferred"
+             ),
+             :count,
+             :id
+           ) == 1
+
+    # The eligibility job disappears seconds later, but nothing wakes completion.
+    Repo.update!(Ecto.Changeset.change(eligibility, state: "done"))
+    assert Train.guard(held, @conn) == :ok
+    refute Batch.next_poll_is_past(held, Outbox.now() + 60)
+    assert {:noreply, _} = Batcher.handle_info({:poll, :once}, project.id)
+    assert Repo.get!(Batch, batch.id).state == :running
+
+    refute Repo.exists?(
+             from(j in BorsNG.Database.OrchestrationJob,
+               where: j.kind == "info" and j.project_id == ^project.id
+             )
+           )
+
+    assert Batch.next_poll_is_past(held, held.last_polled + 1801)
+    assert Repo.get!(Patch, link.patch_id).queue_pending
+  end
+
   defp landed(batch, c) do
     batch |> Batch.changeset(%{state: :ok}) |> Repo.update!()
     CandidateJournal.event(c, "promoted", "test", %{commit: batch.commit})

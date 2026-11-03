@@ -366,6 +366,24 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
     end)
   end
 
+  def record_exception(job, details) do
+    with_project(job.project_id, fn ->
+      if current = Repo.one(from(j in owned(job), lock: "FOR UPDATE")) do
+        timing =
+          Map.put(
+            current.attempt_timing || %{},
+            "last_exception",
+            Map.merge(details, %{
+              at_ms: System.system_time(:millisecond),
+              attempt: current.attempts
+            })
+          )
+
+        current |> Ecto.Changeset.change(attempt_timing: timing) |> Repo.update!()
+      end
+    end)
+  end
+
   defp with_project(project_id, action) do
     {:ok, result} =
       Repo.transaction(fn ->
@@ -630,6 +648,48 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
                   (j.subject_id in ^patch_ids or j.subject_id == 0)))
       )
     )
+  end
+
+  # Identical predicate to withdrawal_pending?, for diagnosis only. No payloads
+  # or approval tokens leave this query. An extra row signals truncation.
+  def withdrawal_blockers(project_id, patch_ids) do
+    rows =
+      Repo.all(
+        from(j in OrchestrationJob,
+          where:
+            j.project_id == ^project_id and j.state == "pending" and
+              (j.kind == "cancel_all" or
+                 (j.kind in ["cancel", "cast"] and
+                    (j.subject_id in ^patch_ids or j.subject_id == 0))),
+          order_by: j.id,
+          limit: 9,
+          select: j
+        )
+      )
+
+    jobs =
+      rows
+      |> Enum.take(8)
+      |> Enum.map(fn job ->
+        command =
+          case payload(job) do
+            {:eligibility, _} -> "eligibility"
+            {:cancel_generation, _, _, _, _} -> "cancel_generation"
+            {:cancel_all_generation, _} -> "cancel_all_generation"
+            {:reviewed_generation, _, _, _, _} -> "reviewed_generation"
+            _ -> "other"
+          end
+
+        %{
+          id: job.id,
+          kind: job.kind,
+          subject_id: job.subject_id,
+          available_at: job.available_at,
+          command: command
+        }
+      end)
+
+    %{jobs: jobs, truncated: length(rows) > 8}
   end
 
   def pending?(project_id, key) do

@@ -39,6 +39,7 @@ defmodule BorsNG.Worker.Batcher do
   alias BorsNG.Database.LinkPatchBatch
   alias BorsNG.Worker.Orchestration.Outbox
   alias BorsNG.Worker.CandidateJournal
+  alias BorsNG.Worker.CompletionDiagnostics
   alias BorsNG.Worker.SpeculativeTrain, as: Train
   alias BorsNG.GitHub
   alias BorsNG.Endpoint
@@ -1662,6 +1663,7 @@ defmodule BorsNG.Worker.Batcher do
     delay = max(deadline - DateTime.to_unix(DateTime.utc_now()) + 1, 1)
     timer = schedule_message(self(), {:retry_promotion, batch.id, batch.commit}, delay * 1_000)
     Process.put({:batch_recheck, batch.id}, timer)
+    CompletionDiagnostics.record(batch, :retry_scheduled, %{next_recheck_at: deadline + 1})
   end
 
   defp staging_dispatch?(batch) do
@@ -3530,6 +3532,10 @@ defmodule BorsNG.Worker.Batcher do
 
     if (batch.promotion_retry_at || 0) <= now and (batch.recovery_after || 0) <= now do
       maybe_complete_batch_due(batch, false, check_interruption)
+    else
+      CompletionDiagnostics.record(batch, :retry_deadline, %{
+        next_recheck_at: max(batch.promotion_retry_at || 0, batch.recovery_after || 0) + 1
+      })
     end
   end
 
@@ -3538,7 +3544,9 @@ defmodule BorsNG.Worker.Batcher do
       :ok ->
         maybe_complete_valid_batch(batch, status_read_failed, check_interruption)
 
-      {:hold, _} ->
+      {:hold, reason} ->
+        CompletionDiagnostics.hold(batch, reason)
+
         batch
         |> Batch.changeset(%{last_polled: DateTime.to_unix(DateTime.utc_now())})
         |> Repo.update!()

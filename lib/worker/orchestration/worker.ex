@@ -116,7 +116,9 @@ defmodule BorsNG.Worker.Orchestration.Worker do
 
         :ok
       rescue
-        error -> {:error, error.__struct__}
+        error ->
+          BorsNG.Worker.Orchestration.ExceptionDiagnostics.record(job, error, __STACKTRACE__)
+          {:error, error.__struct__}
       catch
         :throw, {:diagnostic_retry, reason} ->
           {:error, {:diagnostic_retry, reason}}
