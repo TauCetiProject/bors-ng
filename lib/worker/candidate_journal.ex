@@ -42,6 +42,15 @@ defmodule BorsNG.Worker.CandidateJournal do
         "parent_batch_id" => if(source_link, do: source_link.batch_id),
         "parent_candidate_id" => if(parent, do: parent.id),
         "parent_admission_id" => if(original, do: original.id),
+        "remainder_retries" =>
+          if(source_link,
+            do:
+              BorsNG.Worker.Batcher.QueueAge.next_remainder(
+                if(original, do: original.snapshot),
+                retry_reason
+              ),
+            else: 0
+          ),
         "queue_age_retries" =>
           if(source_link,
             do:

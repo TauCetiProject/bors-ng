@@ -148,8 +148,8 @@ defmodule BorsNG.Worker.FailureIsolation do
         end
       end
 
-    case partition(links, hints, conflict) do
-      {:ok, groups, reason} ->
+    case partition_details(links, hints, conflict) do
+      {:ok, groups, reason, suspects} ->
         CandidateJournal.event(candidate, "failure_partition", "bors.failure_isolation", %{
           strategy: reason,
           groups: Enum.map(groups, fn group -> Enum.map(group, & &1.patch.pr_xref) end),
@@ -183,8 +183,19 @@ defmodule BorsNG.Worker.FailureIsolation do
           end
 
         Enum.each(groups, fn group ->
-          if is_nil(Divider.clone_batch(group, batch.project_id, batch.into_branch, reason)),
-            do: throw(:retry_membership_unavailable)
+          # Suspect components can span several singleton/bundle groups.
+          # Preserve the remainder's role without changing any user's priority
+          # or declaring its members green. All normal gates still apply.
+          retry_reason =
+            if Enum.all?(group, &(&1.patch.pr_xref not in suspects)) and
+                 reason in ~w(compiler_diagnostics import_provider_hint bounded_provider_hint recovered_parent_diagnostics),
+               do: "diagnostic_remainder",
+               else: reason
+
+          if is_nil(
+               Divider.clone_batch(group, batch.project_id, batch.into_branch, retry_reason)
+             ),
+             do: throw(:retry_membership_unavailable)
         end)
 
         :retrying
@@ -237,7 +248,14 @@ defmodule BorsNG.Worker.FailureIsolation do
 
   # Pure planner. Every result is a strict partition of atomic bundle units.
   # No diagnostic can discard a member or prove that an individual is failing.
-  def partition(links, hints, conflict) when is_map(hints) do
+  def partition(links, hints, conflict) do
+    case partition_details(links, hints, conflict) do
+      {:ok, groups, reason, _} -> {:ok, groups, reason}
+      other -> other
+    end
+  end
+
+  defp partition_details(links, hints, conflict) when is_map(hints) do
     units = Divider.group_units(links)
     changed = hints["changed_files"] || []
     heads = Map.new(links, &{&1.patch.pr_xref, &1.head_sha})
@@ -334,13 +352,14 @@ defmodule BorsNG.Worker.FailureIsolation do
           ids |> Enum.filter(&(&1 in part)) |> Enum.flat_map(&Enum.at(units, &1))
         end)
 
-      if length(groups) > 1, do: {:ok, groups, reason}, else: :fallback
+      suspect_prs = for {unit, i} <- numbered, i in suspects, link <- unit, do: link.patch.pr_xref
+      if length(groups) > 1, do: {:ok, groups, reason, suspect_prs}, else: :fallback
     else
       :fallback
     end
   end
 
-  def partition(_, _, _), do: :fallback
+  defp partition_details(_, _, _), do: :fallback
 
   defp balanced_components(components) do
     {left, right} =

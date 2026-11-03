@@ -5,6 +5,17 @@ defmodule BorsNG.Worker.Batcher.QueueAge do
   """
 
   @inherited_retries 3
+  @remainder_reasons ~w(provisional_remainder diagnostic_remainder)
+
+  # A head gets at most three preferred remainder attempts. Repeated failures
+  # cannot renew this scheduling preference through neutral clone operations.
+  def next_remainder(snapshot, reason) do
+    count = if is_map(snapshot), do: Map.get(snapshot, "remainder_retries", 0), else: 4
+
+    if is_integer(count) and count >= 0,
+      do: min(count + if(reason in @remainder_reasons, do: 1, else: 0), 4),
+      else: 4
+  end
 
   # Neutral topology/membership changes cannot spend the unchanged survivors'
   # failure allowance. Unknown reasons conservatively consume it.
@@ -44,6 +55,9 @@ defmodule BorsNG.Worker.Batcher.QueueAge do
       :exhausted in ages ->
         {fallback(batch, now), :retry_fairness}
 
+      preferred_remainder?(batch, rows) ->
+        {Enum.min(ages), {:diagnostic_remainder, length(rows)}}
+
       true ->
         {Enum.min(ages), :original_admission}
     end
@@ -77,6 +91,18 @@ defmodule BorsNG.Worker.Batcher.QueueAge do
 
   defp member_age(_, _, _), do: :unknown
 
+  defp preferred_remainder?(batch, rows) do
+    batch.sealed == true and length(rows) > 1 and
+      Enum.all?(rows, fn {_, _, admission} ->
+        s = admission.snapshot
+        count = Map.get(s, "remainder_retries", 0)
+
+        s["source"] == "bors.retry" and s["retry_reason"] in @remainder_reasons and
+          is_integer(s["parent_candidate_id"]) and s["parent_candidate_id"] > 0 and
+          is_integer(count) and count in 0..3
+      end)
+  end
+
   defp fallback(batch, now) do
     case batch.last_polled do
       seconds when is_integer(seconds) and seconds >= 0 -> seconds * 1_000_000
@@ -85,9 +111,16 @@ defmodule BorsNG.Worker.Batcher.QueueAge do
   end
 
   def order_key(batch, ages) do
-    {age, _source} = Map.fetch!(ages, batch.id)
+    {age, source} = Map.fetch!(ages, batch.id)
+
+    rank =
+      case source do
+        {:diagnostic_remainder, size} -> {0, -size}
+        _ -> {1, 0}
+      end
+
     # Running batches precede waiting even with an explicit priority >100.
-    {if(batch.state == :running, do: 0, else: 1), -batch.priority, age, batch.last_polled,
+    {if(batch.state == :running, do: 0, else: 1), -batch.priority, rank, age, batch.last_polled,
      batch.id}
   end
 

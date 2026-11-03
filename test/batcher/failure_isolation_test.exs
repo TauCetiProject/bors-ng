@@ -101,8 +101,11 @@ defmodule BorsNG.Worker.FailureIsolationTest do
     )
 
     batch = %{c.batch | commit: "staged", base_sha: "base"}
+    {batch, terminal_evidence(batch)}
+  end
 
-    evidence = %{
+  defp terminal_evidence(batch) do
+    %{
       run_id: 100,
       run_attempt: 1,
       run_created_at: DateTime.utc_now() |> DateTime.add(1, :second) |> DateTime.to_iso8601(),
@@ -117,8 +120,6 @@ defmodule BorsNG.Worker.FailureIsolationTest do
         }
       ]
     }
-
-    {batch, evidence}
   end
 
   defp log_result(paths, kind \\ "compiler_error") do
@@ -637,7 +638,10 @@ defmodule BorsNG.Worker.FailureIsolationTest do
         assert admission["original_admitted_at"] == before.snapshot["original_admitted_at"]
         assert admission["parent_candidate_id"] == c.candidate.id
         assert admission["parent_admission_id"] == before.id
-        assert admission["retry_reason"] == unquote(reason)
+
+        assert admission["retry_reason"] ==
+                 if(link.patch.pr_xref == 3, do: unquote(reason), else: "diagnostic_remainder")
+
         assert link.patch.queue_approval == original.patch.queue_approval
         assert link.patch.source_compatibility == original.patch.source_compatibility
         assert link.patch.bundle_id == original.patch.bundle_id
@@ -794,7 +798,13 @@ defmodule BorsNG.Worker.FailureIsolationTest do
 
       assert admission["parent_candidate_id"] == c.candidate.id
       assert admission["parent_admission_id"] == original_admission.id
-      assert admission["retry_reason"] == "import_provider_hint"
+
+      assert admission["retry_reason"] ==
+               if(link.patch.pr_xref == 3,
+                 do: "import_provider_hint",
+                 else: "diagnostic_remainder"
+               )
+
       assert link.patch.queue_pending
       assert link.patch.queue_approval == before.patch.queue_approval
       assert link.patch.source_compatibility == before.patch.source_compatibility
@@ -1096,6 +1106,43 @@ defmodule BorsNG.Worker.FailureIsolationTest do
       "reason" => "timeout",
       "provenance" => provenance
     })
+  end
+
+  test "multiple singleton suspects cannot acquire the remainder's scheduling preference", c do
+    for pr <- [2, 3] do
+      patch = Enum.find(c.links, &(&1.patch.pr_xref == pr)).patch
+      Repo.update!(Ecto.Changeset.change(patch, is_single: true))
+    end
+
+    links = stored_links(c.batch.id)
+    candidate = CandidateJournal.begin(c.batch, links, "base")
+    c = %{c | links: links, candidate: candidate}
+    {batch, evidence} = terminal(c)
+
+    CandidateJournal.event(candidate, "local_assembled", "bors.local_git", %{
+      commit: "staged",
+      tree: "tree",
+      evidence: %{diagnostic_hints: ownership_hints(c)}
+    })
+
+    BorsNG.Worker.FailureDiagnostics.observe(batch, evidence, :conn, fn _, _ ->
+      log_result(["TauCeti/File2.lean", "TauCeti/File3.lean"])
+    end)
+
+    FailureIsolation.classified(batch, "candidate_failure", evidence)
+    assert :retrying = FailureIsolation.split(links, batch)
+    children = Repo.all(from(b in Batch, where: b.id != ^batch.id, order_by: b.id))
+    assert prs(Enum.map(children, &stored_links(&1.id))) == [[2], [3], [1, 4]]
+
+    for child <- children, link <- stored_links(child.id) do
+      admission = CandidateJournal.admission(link.id).snapshot
+
+      assert admission["retry_reason"] ==
+               if(link.patch.pr_xref in [2, 3],
+                 do: "compiler_diagnostics",
+                 else: "diagnostic_remainder"
+               )
+    end
   end
 
   test "optional dependency timeout retains compiler isolation and immutable approvals", c do
@@ -1874,6 +1921,167 @@ defmodule BorsNG.Worker.FailureIsolationTest do
       assert Repo.aggregate(BorsNG.Database.OrchestrationJob, :count, :id) == 1
     end
 
+    test "root with a reserved child repairs suspect; native invalidation retains child approval",
+         c do
+      {batch, conn} = provisional_candidate(c)
+      child = Repo.insert!(Batch.new(c.project.id, "main"))
+
+      patch =
+        Repo.insert!(%Patch{
+          project_id: c.project.id,
+          pr_xref: 5,
+          commit: "head5",
+          into_branch: "main",
+          open: true,
+          queue_pending: true,
+          queue_approval: %{"head_sha" => "head5", "state" => "approved", "reviewer" => "r"}
+        })
+
+      CandidateJournal.insert_member(
+        LinkPatchBatch.changeset(%LinkPatchBatch{}, %{
+          batch_id: child.id,
+          patch_id: patch.id,
+          head_sha: patch.commit,
+          reviewer: "r"
+        })
+      )
+
+      cc = CandidateJournal.begin(child, stored_links(child.id), "staged", c.candidate.id)
+
+      CandidateJournal.bind(
+        cc,
+        "child-staged",
+        "child-tree",
+        "staged",
+        %BorsToml{status: ["build"]},
+        %{}
+      )
+
+      child =
+        Repo.update!(
+          Batch.changeset(child, %{state: :running, commit: "child-staged", base_sha: "staged"})
+        )
+
+      CandidateJournal.event(c.candidate, "successor_reserved", "bors.train", %{
+        candidate_id: cc.id
+      })
+
+      assert :retrying = FailureIsolation.split(c.links, batch, nil, conn)
+      assert Repo.get!(Batch, batch.id).state == :error
+      assert Repo.get!(Patch, Enum.at(c.links, 2).patch_id).queue_approval["state"] == "withdrawn"
+      BorsNG.Worker.SpeculativeTrain.invalidate_descendants(batch)
+      BorsNG.Worker.SpeculativeTrain.invalidate_descendants(batch)
+      assert Repo.get!(Batch, child.id).state == :canceled
+      waiting = Repo.all(from(b in Batch, where: b.state == :waiting, order_by: b.id))
+      assert prs(Enum.map(waiting, &stored_links(&1.id))) == [[1, 2, 4], [5]]
+      assert Repo.get!(Patch, patch.id).queue_approval == patch.queue_approval
+      assert BorsNG.Worker.SpeculativeTrain.event?(cc, "train_invalidated")
+
+      assert Repo.aggregate(
+               from(e in CandidateEvent, where: e.kind == "provisional_repair"),
+               :count,
+               :id
+             ) == 1
+    end
+
+    test "verified private module uses the existing exact-head provisional repair handoff", c do
+      alias BorsNG.Worker.FailureDiagnostics
+      {batch, conn} = provisional_candidate(c)
+      Repo.delete_all(from(e in CandidateEvent, where: e.kind == "failure_diagnostics"))
+
+      finding = %{
+        linter: "unusedArguments",
+        declaration: "_private.TauCeti.File3.0.TauCeti.slopeSetoid",
+        unknown: "unsupported_origin"
+      }
+
+      evidence = terminal_evidence(batch)
+      raw = environment_result([finding])
+
+      assert :ok =
+               FailureDiagnostics.observe(
+                 batch,
+                 evidence,
+                 conn,
+                 fn _, _ -> raw end,
+                 nil,
+                 fn _, _, _, _ -> flunk("private origin must not use collision lookup") end,
+                 fn _, _, binding, ["TauCeti/File3.lean"] ->
+                   collision_sources(binding, ["TauCeti/File3.lean"])
+                   |> Map.put("policy", "private-origin-source-v1")
+                 end
+               )
+
+      assert {:ok, [3]} = FailureDiagnostics.suspects(c.candidate, ownership_hints(c))
+      assert :retrying = FailureIsolation.split(c.links, batch, nil, conn)
+      [waiting] = Repo.all(from(b in Batch, where: b.state == :waiting))
+      assert prs([stored_links(waiting.id)]) == [[1, 2, 4]]
+      suspect = Repo.get!(Patch, Enum.at(c.links, 2).patch_id)
+      assert suspect.queue_approval["state"] == "withdrawn"
+      refute suspect.source_compatibility["provisional"]["proof_authority"]
+    end
+
+    test "complete legacy private observations recover once without changing queue intent", c do
+      alias BorsNG.Worker.{FailureDiagnostics, PrivateOrigins}
+      alias BorsNG.Worker.Orchestration.Outbox
+      {batch, conn} = provisional_candidate(c)
+      Repo.delete_all(from(e in CandidateEvent, where: e.kind == "failure_diagnostics"))
+      evidence = terminal_evidence(batch)
+
+      raw =
+        environment_result([
+          %{
+            linter: "unusedArguments",
+            declaration: "_private.TauCeti.File3.0.slopeSetoid",
+            unknown: "unsupported_origin"
+          }
+        ])
+        |> Map.put("parser_version", "streaming-v2")
+
+      FailureDiagnostics.observe(
+        batch,
+        evidence,
+        conn,
+        fn _, _ -> raw end,
+        nil,
+        fn _, _, _, _ -> flunk("unexpected collision") end,
+        fn _, _, _, _ -> %{"complete" => false} end
+      )
+
+      event = Repo.one!(from(e in CandidateEvent, where: e.kind == "failure_diagnostics"))
+
+      Repo.update!(
+        Ecto.Changeset.change(event, details: Map.delete(event.details, "private_origin_policy"))
+      )
+
+      before = Repo.all(Patch) |> Enum.map(&{&1.id, &1.commit, &1.queue_approval})
+      FailureDiagnostics.resume_pending()
+      FailureDiagnostics.resume_pending()
+
+      [job] =
+        Repo.all(from(j in BorsNG.Database.OrchestrationJob, where: j.kind == "diagnostics"))
+
+      assert String.ends_with?(job.dedup_key, ":" <> PrivateOrigins.policy())
+
+      assert :ok =
+               FailureDiagnostics.recover(
+                 c.candidate.id,
+                 batch.id,
+                 evidence,
+                 fn _, _ -> raw end,
+                 fn _, _, binding, paths ->
+                   collision_sources(binding, paths)
+                   |> Map.put("policy", PrivateOrigins.policy())
+                 end
+               )
+
+      assert {:ok, [3]} = FailureDiagnostics.suspects(c.candidate, ownership_hints(c))
+      assert before == Repo.all(Patch) |> Enum.map(&{&1.id, &1.commit, &1.queue_approval})
+      assert Repo.get!(Batch, batch.id).state == :running
+      refute Repo.exists?(from(e in CandidateEvent, where: e.kind == "provisional_repair"))
+      assert Outbox.enabled?()
+    end
+
     test "verified base collision uses existing atomic provisional handoff and keeps its neighbor",
          c do
       {batch, _, hints, _} = base_collision_terminal(c)
@@ -1914,7 +2122,7 @@ defmodule BorsNG.Worker.FailureIsolationTest do
       assert Repo.aggregate(BorsNG.Database.OrchestrationJob, :count, :id) == 1
     end
 
-    for variant <- [:manual, :held, :moved_main, :successor, :existing_request, :automatic_bump] do
+    for variant <- [:manual, :held, :moved_main, :existing_request, :automatic_bump] do
       @collision_guard variant
       test "verified base collision respects existing #{@collision_guard} provisional guard", c do
         {batch, _, _, _} = base_collision_terminal(c)
@@ -1944,11 +2152,6 @@ defmodule BorsNG.Worker.FailureIsolationTest do
 
           :moved_main ->
             GitHub.ServerMock.put_state(put_in(state, [conn, :branches, "main"], "new-main"))
-
-          :successor ->
-            CandidateJournal.event(c.candidate, "successor_reserved", "bors.train", %{
-              candidate_id: 999
-            })
 
           :existing_request ->
             patch
@@ -2042,6 +2245,47 @@ defmodule BorsNG.Worker.FailureIsolationTest do
       assert Repo.get!(Patch, suspect.patch_id).queue_approval["state"] == "approved"
     end
 
+    for state <- [:promoted, :running, :failed, :superseded] do
+      @predecessor_state state
+      test "child #{@predecessor_state} predecessor requires an independently landed exact base",
+           c do
+        parent = Repo.insert!(Batch.new(c.project.id, "main"))
+        predecessor = CandidateJournal.begin(parent, [], "older-base")
+
+        CandidateJournal.bind(
+          predecessor,
+          "base",
+          "parent-tree",
+          "older-base",
+          %BorsToml{status: ["build"]},
+          %{}
+        )
+
+        parent =
+          Repo.update!(
+            Batch.changeset(parent, %{state: :ok, commit: "base", base_sha: "older-base"})
+          )
+
+        CandidateJournal.event(predecessor, "promoted", "bors.git", %{commit: "base"})
+
+        case @predecessor_state do
+          :running -> Repo.update!(Batch.changeset(parent, %{state: :running}))
+          :failed -> Repo.update!(Batch.changeset(parent, %{state: :error}))
+          :superseded -> CandidateJournal.begin(parent, [], "older-base")
+          _ -> :ok
+        end
+
+        child = CandidateJournal.begin(c.batch, c.links, "base", predecessor.id)
+        c = %{c | candidate: child}
+        {batch, conn} = provisional_candidate(c)
+        assert :retrying = FailureIsolation.split(c.links, batch, nil, conn)
+        repaired = Repo.exists?(from(e in CandidateEvent, where: e.kind == "provisional_repair"))
+        assert repaired == (@predecessor_state == :promoted)
+        suspect = Repo.get!(Patch, Enum.at(c.links, 2).patch_id)
+        assert suspect.queue_approval["state"] == "withdrawn" == repaired
+      end
+    end
+
     test "a genuine speculative predecessor keeps conservative retries", c do
       CandidateJournal.bind(
         c.candidate,
@@ -2072,7 +2316,6 @@ defmodule BorsNG.Worker.FailureIsolationTest do
           :held,
           :manual,
           :api_outage,
-          :successor,
           :component
         ] do
       @variant variant
@@ -2118,11 +2361,6 @@ defmodule BorsNG.Worker.FailureIsolationTest do
             p
             |> Ecto.Changeset.change(manual_approval: %{"head_sha" => "head3"})
             |> Repo.update!()
-
-          :successor ->
-            CandidateJournal.event(c.candidate, "successor_reserved", "bors.train", %{
-              candidate_id: 999
-            })
 
           :component ->
             hints =

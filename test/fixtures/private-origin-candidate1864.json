@@ -1,0 +1,978 @@
+{
+  "hints": {
+    "complete": true,
+    "elapsed_ms": 882,
+    "provenance": {
+      "tree": "9747264341ab3e437a444ab50d5dcf3261cb965f",
+      "commit": "99ccf812d82860f42284817eaefa41bfbc311586",
+      "members": [
+        {
+          "pr": 24669,
+          "head_sha": "4872c97655c8b4a347a6b23cf291a8f7e449e983"
+        },
+        {
+          "pr": 25376,
+          "head_sha": "a8883245eeff805a80b3bb8a7af8af11ac4d4531"
+        },
+        {
+          "pr": 25446,
+          "head_sha": "d9a91e85c20d7136827ff25466e0a551557cb87d"
+        },
+        {
+          "pr": 26135,
+          "head_sha": "2b056a7d452d0f8eba0beb6e19b776771e3cc908"
+        },
+        {
+          "pr": 26149,
+          "head_sha": "11fe5556c2216ab74ff7c53a9fddb645b2ee7c5a"
+        },
+        {
+          "pr": 26157,
+          "head_sha": "c2922329ef2b15ede70c07f90bbeb11f5db3c1c5"
+        },
+        {
+          "pr": 26164,
+          "head_sha": "9955989f42f56f2709089d4f9ed5e37eeea184a0"
+        },
+        {
+          "pr": 26169,
+          "head_sha": "17f651870a4b0342d7e2ff7e3af9bc1299723729"
+        },
+        {
+          "pr": 26188,
+          "head_sha": "9eac8dfc8f350d5a2c3c2830ce27ede830339224"
+        },
+        {
+          "pr": 26202,
+          "head_sha": "b2b3f0a91815081c027ce6f55c0f5e598897c91c"
+        },
+        {
+          "pr": 26207,
+          "head_sha": "c1a52a4265267053cd53d8dfb79d31884fa80e5c"
+        },
+        {
+          "pr": 26209,
+          "head_sha": "15391625f739586c00f149687e61fb14cf3a0a47"
+        },
+        {
+          "pr": 26212,
+          "head_sha": "3c264b171d0a7b53e66259a20db35bc9fc5cbf53"
+        },
+        {
+          "pr": 26213,
+          "head_sha": "eb67549511915fd478c73c76e7592ff1e7f7a129"
+        },
+        {
+          "pr": 26216,
+          "head_sha": "1989d66f0938a99684c22916c40b680b342af23b"
+        },
+        {
+          "pr": 26220,
+          "head_sha": "6b727d79811719c25ad78f2382ffc237e0a4a455"
+        },
+        {
+          "pr": 26241,
+          "head_sha": "caa60fa49d0f204ce8e2ff3404268183e675b25b"
+        },
+        {
+          "pr": 26261,
+          "head_sha": "4427afe75ab26ee2ad73e295d2043b490667e983"
+        },
+        {
+          "pr": 26271,
+          "head_sha": "1bd4a4bbd7a6405296ca9eed996ef7f1e85d371e"
+        },
+        {
+          "pr": 26290,
+          "head_sha": "d593051ff7f8d4f142c23c32272b2edefc49cb7c"
+        },
+        {
+          "pr": 26416,
+          "head_sha": "3c737fb156228a5d623b864e77eeb59a77f1045b"
+        },
+        {
+          "pr": 26493,
+          "head_sha": "746ae58a6fa04f0342bb52ecb7894cb863205a37"
+        },
+        {
+          "pr": 26549,
+          "head_sha": "7463bdb2180b88431796f5fb91b0947e8883c9b3"
+        },
+        {
+          "pr": 26840,
+          "head_sha": "1ff927ace3fc7b7f3783fcd8ccecf906be4b6b38"
+        },
+        {
+          "pr": 26862,
+          "head_sha": "63218622095a1d83bfa7cfcede1e16f0d56d3976"
+        },
+        {
+          "pr": 26889,
+          "head_sha": "49424eadbae6227ebd290227220ef3f96991f629"
+        },
+        {
+          "pr": 26900,
+          "head_sha": "ad1f9945d2c0c4947984a43d09e510d636bddec1"
+        }
+      ],
+      "base_sha": "8c3e8d8caaa07a6dc5f0a54c301f9376aa333aec",
+      "generation": 1,
+      "candidate_id": 1864,
+      "members_digest": "7ae1495b376c99901fd305e00ad83d5b086f6967594e529b2454ff7e42129724"
+    },
+    "import_edges": [
+      [
+        26212,
+        25376
+      ]
+    ],
+    "changed_files": [
+      {
+        "pr": 24669,
+        "paths": [
+          "TauCeti/Algebra/Category/ModuleCat/RestrictScalars.lean",
+          "TauCeti/CommutativeAlgebra/MatrixFactorization/Basic.lean",
+          "TauCeti/CommutativeAlgebra/MatrixFactorization/Cokernel/BaseChange.lean",
+          "TauCeti/CommutativeAlgebra/MatrixFactorization/Cokernel/FullyFaithful.lean",
+          "TauCeti/CommutativeAlgebra/MatrixFactorization/Cokernel/Resolution.lean"
+        ],
+        "head_sha": "4872c97655c8b4a347a6b23cf291a8f7e449e983",
+        "dependency_paths": [
+          "TauCeti/Algebra/Category/ModuleCat/Projective/Dimension.lean",
+          "TauCeti/Algebra/Category/ModuleCat/RestrictScalars.lean",
+          "TauCeti/Algebra/Homology/Curved/Duplex.lean",
+          "TauCeti/Algebra/Module/Projective/Trans.lean",
+          "TauCeti/CategoryTheory/Linear/FullSubcategory.lean",
+          "TauCeti/CommutativeAlgebra/MatrixFactorization/BaseChange/Basic.lean",
+          "TauCeti/CommutativeAlgebra/MatrixFactorization/Cokernel/BaseChange.lean",
+          "TauCeti/CommutativeAlgebra/MatrixFactorization/Cokernel/Basic.lean",
+          "TauCeti/CommutativeAlgebra/MatrixFactorization/Cokernel/GorensteinProjective.lean"
+        ]
+      },
+      {
+        "pr": 25376,
+        "paths": [
+          "TauCeti/AlgebraicTopology/Singular/Contractible.lean",
+          "TauCeti/AlgebraicTopology/Singular/Torus/FirstHomology.lean",
+          "TauCeti/Geometry/Manifold/Instances/ClosedBall/Boundary.lean",
+          "TauCeti/KnotTheory/Slice/ShakeGenus.lean",
+          "TauCeti/LowDimTopology/DehnSurgery/SeifertFraming.lean",
+          "TauCeti/LowDimTopology/DehnSurgery/Unknot.lean",
+          "TauCeti/LowDimTopology/SolidTorusNeighborhood/Basic.lean"
+        ],
+        "head_sha": "a8883245eeff805a80b3bb8a7af8af11ac4d4531",
+        "dependency_paths": [
+          "TauCeti/AlgebraicTopology/Homotopy/Hurewicz/One/Naturality.lean",
+          "TauCeti/AlgebraicTopology/Singular/Contractible.lean",
+          "TauCeti/AlgebraicTopology/Singular/Homotopy/Invariance.lean",
+          "TauCeti/AlgebraicTopology/Singular/MayerVietoris/Reduced.lean",
+          "TauCeti/AlgebraicTopology/Singular/Reduced.lean",
+          "TauCeti/AlgebraicTopology/Singular/ReducedRelative.lean",
+          "TauCeti/AlgebraicTopology/Singular/Sphere.lean",
+          "TauCeti/AlgebraicTopology/UniversalCover/Torus/FundamentalGroup.lean",
+          "TauCeti/Analysis/Complex/Circle.lean",
+          "TauCeti/Geometry/Euclidean/Angle/Unoriented/CrossProduct.lean",
+          "TauCeti/Geometry/Manifold/Boundary/SmoothMap.lean",
+          "TauCeti/Geometry/Manifold/Instances/ClosedBall/Basic.lean",
+          "TauCeti/Geometry/Manifold/Instances/ClosedBall/Boundary.lean",
+          "TauCeti/Geometry/Manifold/Instances/Sphere.lean",
+          "TauCeti/Geometry/Manifold/TubularNeighborhood/Euclidean.lean",
+          "TauCeti/Geometry/Sphere/HemisphereGraph.lean",
+          "TauCeti/KnotTheory/Slice/Genus.lean",
+          "TauCeti/LowDimTopology/DehnSurgery/Framing.lean",
+          "TauCeti/LowDimTopology/DehnSurgery/SeifertFraming.lean",
+          "TauCeti/LowDimTopology/DehnSurgery/Uniqueness.lean",
+          "TauCeti/LowDimTopology/DehnSurgery/Unknot.lean",
+          "TauCeti/LowDimTopology/SeifertFibration.lean",
+          "TauCeti/LowDimTopology/SolidTorusNeighborhood/Unknot.lean",
+          "TauCeti/Topology/Category/TopCat/DisjointOpens.lean",
+          "TauCeti/Topology/Category/TopPair.lean",
+          "TauCeti/Topology/Circle/Loop.lean",
+          "TauCeti/Topology/Homeomorph/SetCongr.lean",
+          "TauCeti/Topology/Homotopy/HomotopyEquiv.lean",
+          "TauCeti/Topology/Homotopy/PuncturedStarConvex.lean",
+          "TauCeti/Topology/JordanCurve/Basic.lean"
+        ]
+      },
+      {
+        "pr": 25446,
+        "paths": [
+          "TauCeti/Analysis/Calculus/BumpFunction/Cutoff.lean",
+          "TauCeti/Analysis/Calculus/Deriv/EqLine.lean",
+          "TauCeti/Analysis/Calculus/Deriv/Projection.lean",
+          "TauCeti/Analysis/Calculus/Sard/Projection.lean",
+          "TauCeti/Geometry/Manifold/SmoothEmbedding/Basic.lean",
+          "TauCeti/Geometry/Manifold/SmoothEmbedding/EqLine.lean",
+          "TauCeti/Geometry/Manifold/SmoothIsotopy/Arc.lean",
+          "TauCeti/Geometry/Manifold/SmoothIsotopy/Basic.lean",
+          "TauCeti/LinearAlgebra/Projection.lean"
+        ],
+        "head_sha": "d9a91e85c20d7136827ff25466e0a551557cb87d",
+        "dependency_paths": [
+          "TauCeti/Analysis/Calculus/BumpFunction/Cutoff.lean",
+          "TauCeti/Analysis/Calculus/Deriv/CountableLevels.lean",
+          "TauCeti/Analysis/Calculus/Deriv/EqLine.lean",
+          "TauCeti/Analysis/Calculus/Deriv/Projection.lean",
+          "TauCeti/Analysis/Calculus/Sard/LowDimension.lean",
+          "TauCeti/Analysis/Calculus/Sard/Projection.lean",
+          "TauCeti/Analysis/Normed/Module/Dual/Submodule.lean",
+          "TauCeti/Analysis/SpecialFunctions/SmoothTransition.lean",
+          "TauCeti/Geometry/Manifold/Immersion/Differential.lean",
+          "TauCeti/Geometry/Manifold/Instances/Icc.lean",
+          "TauCeti/Geometry/Manifold/SmoothEmbedding/Basic.lean",
+          "TauCeti/Geometry/Manifold/SmoothEmbedding/EqLine.lean",
+          "TauCeti/Geometry/Manifold/SmoothIsotopy/Trans.lean",
+          "TauCeti/LinearAlgebra/Projection.lean",
+          "TauCeti/Order/SupIndep.lean",
+          "TauCeti/Topology/Homotopy/Isotopy/Basic.lean"
+        ]
+      },
+      {
+        "pr": 26135,
+        "paths": [
+          "TauCeti/RepresentationTheory/Homological/ContCohomology/Cup/MapDegreeTwo.lean",
+          "TauCeti/RepresentationTheory/Homological/ContCohomology/Cup/Naturality.lean"
+        ],
+        "head_sha": "2b056a7d452d0f8eba0beb6e19b776771e3cc908",
+        "dependency_paths": [
+          "TauCeti/RepresentationTheory/Homological/ContCohomology/Cup/Comparison.lean",
+          "TauCeti/RepresentationTheory/Homological/ContCohomology/Cup/Naturality.lean",
+          "TauCeti/RepresentationTheory/Homological/ContCohomology/Cup/Product.lean",
+          "TauCeti/RepresentationTheory/Homological/ContCohomology/MapDegreeTwo.lean"
+        ]
+      },
+      {
+        "pr": 26149,
+        "paths": [
+          "TauCeti/Algebra/AlgebraicGroup/GeneralLinear/Tangent/Map.lean",
+          "TauCeti/Algebra/AlgebraicGroup/SplitTorus/Tangent.lean",
+          "TauCeti/Algebra/Lie/E7/Minuscule/Coroot.lean",
+          "TauCeti/Algebra/Lie/E7/Minuscule/Generated/Coroot.lean",
+          "TauCeti/Algebra/Lie/E7/Minuscule/Generated/Serre.lean",
+          "TauCeti/Algebra/Lie/E7/Minuscule/Root/Coordinates.lean",
+          "TauCeti/Algebra/Lie/E7/Minuscule/Root/Coroot.lean"
+        ],
+        "head_sha": "11fe5556c2216ab74ff7c53a9fddb645b2ee7c5a",
+        "dependency_paths": [
+          "TauCeti/Algebra/AlgebraicGroup/DiagonalizableGroup/Cocharacter.lean",
+          "TauCeti/Algebra/AlgebraicGroup/GeneralLinear/Tangent.lean",
+          "TauCeti/Algebra/AlgebraicGroup/GeneralLinear/Tangent/Map.lean",
+          "TauCeti/Algebra/AlgebraicGroup/GeneralLinear/Weight/Differential.lean",
+          "TauCeti/Algebra/AlgebraicGroup/MultiplicativeGroup/Tangent.lean",
+          "TauCeti/Algebra/AlgebraicGroup/SplitTorus/Cocharacter.lean",
+          "TauCeti/Algebra/AlgebraicGroup/SplitTorus/Tangent.lean",
+          "TauCeti/Algebra/AlgebraicGroup/Tangent/Lie/Map.lean",
+          "TauCeti/Algebra/Lie/E7/Minuscule/Basic.lean",
+          "TauCeti/Algebra/Lie/E7/Minuscule/Generated/RootWeight.lean",
+          "TauCeti/Algebra/Lie/E7/Minuscule/Generated/Serre.lean",
+          "TauCeti/Algebra/Lie/E7/Minuscule/Root/Coordinates.lean",
+          "TauCeti/Algebra/Lie/E7/Minuscule/Root/Coroot.lean",
+          "TauCeti/Algebra/Lie/E7/Minuscule/Root/Differential.lean",
+          "TauCeti/Algebra/Lie/Matrix/IntegralCast.lean",
+          "TauCeti/Algebra/Lie/Presentation/Serre.lean",
+          "TauCeti/LinearAlgebra/RootSystem/SimplyConnectedRootDatum/KostantForm.lean"
+        ]
+      },
+      {
+        "pr": 26157,
+        "paths": [
+          "TauCeti/Data/Int/Sqrt.lean",
+          "TauCeti/NumberTheory/BinaryQuadraticForm/Basic.lean",
+          "TauCeti/NumberTheory/BinaryQuadraticForm/IndefiniteReduction.lean",
+          "TauCeti/NumberTheory/BinaryQuadraticForm/LagrangeReduction.lean"
+        ],
+        "head_sha": "c2922329ef2b15ede70c07f90bbeb11f5db3c1c5",
+        "dependency_paths": [
+          "TauCeti/Algebra/QuadraticDiscriminant.lean",
+          "TauCeti/Data/Int/Sqrt.lean",
+          "TauCeti/LinearAlgebra/Matrix/SpecialLinearGroup/Basic.lean",
+          "TauCeti/NumberTheory/BinaryQuadraticForm/Content.lean",
+          "TauCeti/NumberTheory/BinaryQuadraticForm/LagrangeReduction.lean"
+        ]
+      },
+      {
+        "pr": 26164,
+        "paths": [
+          "TauCeti/Analysis/Calculus/FDeriv/Comp.lean",
+          "TauCeti/Analysis/Calculus/GroupAction/Submersion.lean",
+          "TauCeti/RepresentationTheory/Continuous/RightInverse.lean",
+          "TauCeti/Topology/OpenPartialHomeomorph/MulAction.lean"
+        ],
+        "head_sha": "9955989f42f56f2709089d4f9ed5e37eeea184a0",
+        "dependency_paths": [
+          "TauCeti/Algebra/BigOperators/Finset/Average.lean",
+          "TauCeti/Analysis/Calculus/FDeriv/Comp.lean",
+          "TauCeti/Analysis/Calculus/InverseFunctionTheorem.lean",
+          "TauCeti/RepresentationTheory/Continuous/RightInverse.lean",
+          "TauCeti/RepresentationTheory/Invariants.lean",
+          "TauCeti/Topology/OpenPartialHomeomorph/MulAction.lean"
+        ]
+      },
+      {
+        "pr": 26169,
+        "paths": [
+          "TauCeti/NumberTheory/Divisors.lean",
+          "TauCeti/NumberTheory/ModularForms/LevelOne/TraceFormula/Formula.lean",
+          "TauCeti/RingTheory/Polynomial/Dickson.lean"
+        ],
+        "head_sha": "17f651870a4b0342d7e2ff7e3af9bc1299723729",
+        "dependency_paths": [
+          "TauCeti/NumberTheory/Divisors.lean",
+          "TauCeti/NumberTheory/HurwitzClassNumber.lean",
+          "TauCeti/NumberTheory/ModularForms/LevelOne/TraceFormula/ExplicitElement/Hyperbolic.lean",
+          "TauCeti/NumberTheory/ModularForms/LevelOne/TraceFormula/ExplicitElement/Parabolic.lean",
+          "TauCeti/NumberTheory/ModularForms/LevelOne/TraceFormula/ExplicitElement/Trace.lean"
+        ]
+      },
+      {
+        "pr": 26188,
+        "paths": [
+          "TauCeti/RingTheory/Affinoid/Pushout.lean",
+          "TauCeti/RingTheory/Affinoid/Pushout/Basic.lean",
+          "TauCeti/RingTheory/Affinoid/Pushout/Quotient.lean",
+          "TauCeti/RingTheory/Affinoid/Subdomain/Preimage.lean"
+        ],
+        "head_sha": "9eac8dfc8f350d5a2c3c2830ce27ede830339224",
+        "dependency_paths": [
+          "TauCeti/RingTheory/Affinoid/ContractiveRenorming.lean",
+          "TauCeti/RingTheory/Affinoid/Pushout/Basic.lean",
+          "TauCeti/RingTheory/Affinoid/QuotientNorm.lean",
+          "TauCeti/RingTheory/Affinoid/Restricted.lean",
+          "TauCeti/RingTheory/Affinoid/Subdomain/Basic.lean",
+          "TauCeti/Topology/Algebra/Ring/Ideal.lean"
+        ]
+      },
+      {
+        "pr": 26202,
+        "paths": [
+          "TauCeti/Algebra/Lie/G2/ShortRoot/PrimeField/Root/Long.lean"
+        ],
+        "head_sha": "b2b3f0a91815081c027ce6f55c0f5e598897c91c",
+        "dependency_paths": [
+          "TauCeti/Algebra/AlgebraicGroup/GeneralLinear/Adjoint/Basic.lean",
+          "TauCeti/Algebra/Lie/G2/ShortRoot/PrimeField/Root/Positive.lean"
+        ]
+      },
+      {
+        "pr": 26207,
+        "paths": [
+          "TauCeti/Analysis/InnerProductSpace/Comass.lean",
+          "TauCeti/Analysis/InnerProductSpace/ExteriorPower.lean",
+          "TauCeti/Analysis/InnerProductSpace/ExteriorPower/AlmostComplexType.lean",
+          "TauCeti/Analysis/InnerProductSpace/ExteriorPower/Basic.lean",
+          "TauCeti/Analysis/InnerProductSpace/HodgeStar/Isometry.lean",
+          "TauCeti/Analysis/InnerProductSpace/HodgeStar/Kahler.lean",
+          "TauCeti/Analysis/PDE/SeibergWitten/Naturality.lean",
+          "TauCeti/LinearAlgebra/BilinearForm/Complexification.lean"
+        ],
+        "head_sha": "c1a52a4265267053cd53d8dfb79d31884fa80e5c",
+        "dependency_paths": [
+          "TauCeti/Algebra/Lie/ExteriorPower.lean",
+          "TauCeti/Analysis/InnerProductSpace/AlternatingForm.lean",
+          "TauCeti/Analysis/InnerProductSpace/ExteriorPower/Basic.lean",
+          "TauCeti/Analysis/InnerProductSpace/Gram/Hadamard.lean",
+          "TauCeti/Analysis/InnerProductSpace/HodgeStar/Basic.lean",
+          "TauCeti/Analysis/InnerProductSpace/HodgeStar/Isometry.lean",
+          "TauCeti/Analysis/InnerProductSpace/Orthonormal/Sum.lean",
+          "TauCeti/Analysis/InnerProductSpace/Trace/Free.lean",
+          "TauCeti/Analysis/Normed/Module/Alternating/Dual.lean",
+          "TauCeti/Analysis/Normed/Operator/LinearIsometryEquiv/QuadraticForm.lean",
+          "TauCeti/Analysis/PDE/SeibergWitten/QuadraticTwoForm.lean",
+          "TauCeti/Geometry/Symplectic/AlmostComplex.lean",
+          "TauCeti/LinearAlgebra/BilinearForm/BaseChange.lean",
+          "TauCeti/LinearAlgebra/BilinearForm/Complexification.lean",
+          "TauCeti/LinearAlgebra/CliffordAlgebra/Functoriality.lean",
+          "TauCeti/LinearAlgebra/Complex/Conjugation.lean",
+          "TauCeti/LinearAlgebra/ExteriorPower/AlmostComplexType.lean",
+          "TauCeti/LinearAlgebra/ExteriorPower/WedgePairing.lean",
+          "TauCeti/LinearAlgebra/Matrix/Adjugate/Basic.lean",
+          "TauCeti/LinearAlgebra/Matrix/Determinant/FinFour.lean",
+          "TauCeti/Topology/Algebra/Module/Alternating/TopDegree.lean"
+        ]
+      },
+      {
+        "pr": 26209,
+        "paths": [
+          "TauCeti/Geometry/Contact/Basic.lean",
+          "TauCeti/Geometry/Contact/Flat.lean",
+          "TauCeti/Geometry/Contact/Hamiltonian.lean",
+          "TauCeti/Geometry/Contact/Jacobi.lean",
+          "TauCeti/Geometry/Contact/Reeb.lean",
+          "TauCeti/Geometry/Manifold/DifferentialForm/ExtDeriv.lean",
+          "TauCeti/Geometry/Manifold/DifferentialForm/Regularity.lean"
+        ],
+        "head_sha": "15391625f739586c00f149687e61fb14cf3a0a47",
+        "dependency_paths": [
+          "TauCeti/Analysis/Calculus/ContDiff/ContinuousAlternatingMap.lean",
+          "TauCeti/Analysis/Calculus/DifferentialForm/Basic.lean",
+          "TauCeti/Analysis/Calculus/DifferentialForm/Const.lean",
+          "TauCeti/Analysis/Calculus/DifferentialForm/Regularity.lean",
+          "TauCeti/Geometry/Contact/Basic.lean",
+          "TauCeti/Geometry/Contact/Flat.lean",
+          "TauCeti/Geometry/Contact/Hamiltonian.lean",
+          "TauCeti/Geometry/Contact/Reeb.lean",
+          "TauCeti/Geometry/Manifold/DifferentialForm/Chart.lean",
+          "TauCeti/Geometry/Manifold/DifferentialForm/Continuity.lean",
+          "TauCeti/Geometry/Manifold/DifferentialForm/DegreeOne.lean",
+          "TauCeti/Geometry/Manifold/DifferentialForm/LieDeriv.lean",
+          "TauCeti/Geometry/Manifold/DifferentialForm/Pullback/Basic.lean",
+          "TauCeti/Geometry/Manifold/DifferentialForm/Pullback/Chart.lean",
+          "TauCeti/Geometry/Manifold/DifferentialForm/Regularity.lean",
+          "TauCeti/Geometry/Manifold/DifferentialForm/Support.lean",
+          "TauCeti/Geometry/Manifold/DifferentialForm/Wedge/Leibniz.lean",
+          "TauCeti/Geometry/Manifold/MFDeriv/Constancy.lean",
+          "TauCeti/Geometry/Manifold/MFDeriv/NormedSpace.lean",
+          "TauCeti/Geometry/Manifold/VectorBundle/Hom.lean",
+          "TauCeti/Geometry/Manifold/VectorField/LieBracket.lean",
+          "TauCeti/Geometry/Manifold/VectorField/Regularity.lean",
+          "TauCeti/Geometry/Symplectic/Manifold/Flat.lean",
+          "TauCeti/LinearAlgebra/BilinearForm/Contact/NormalForm.lean",
+          "TauCeti/Topology/Algebra/Module/Alternating/TopDegree.lean",
+          "TauCeti/Topology/Algebra/Module/BilinearForm.lean"
+        ]
+      },
+      {
+        "pr": 26212,
+        "paths": [
+          "TauCeti/AlgebraicTopology/FundamentalGroup/VanKampen/Basic.lean",
+          "TauCeti/AlgebraicTopology/NotSimplyConnected.lean",
+          "TauCeti/AlgebraicTopology/UniversalCover/LensSpace/FundamentalGroup.lean",
+          "TauCeti/LowDimTopology/DehnSurgery/NontrivialKnot.lean",
+          "TauCeti/LowDimTopology/DehnSurgery/Slope.lean"
+        ],
+        "head_sha": "3c264b171d0a7b53e66259a20db35bc9fc5cbf53",
+        "dependency_paths": [
+          "TauCeti/Algebra/Module/Primitive.lean",
+          "TauCeti/AlgebraicTopology/FundamentalGroup/Basic.lean",
+          "TauCeti/AlgebraicTopology/FundamentalGroup/CoverGeneration.lean",
+          "TauCeti/AlgebraicTopology/FundamentalGroup/Homeomorph.lean",
+          "TauCeti/AlgebraicTopology/FundamentalGroupoid/Pushout.lean",
+          "TauCeti/AlgebraicTopology/NotSimplyConnected.lean",
+          "TauCeti/AlgebraicTopology/Singular/Sphere.lean",
+          "TauCeti/AlgebraicTopology/Sphere/SimplyConnected.lean",
+          "TauCeti/AlgebraicTopology/UniversalCover/LensSpace/Basic.lean",
+          "TauCeti/AlgebraicTopology/UniversalCover/LensSpace/FundamentalGroup.lean",
+          "TauCeti/CategoryTheory/Groupoid/SingleObj.lean",
+          "TauCeti/Geometry/Manifold/SmoothEmbedding/SmoothAmbientIsotopy/Basic.lean",
+          "TauCeti/LowDimTopology/DehnSurgery/LensSpace.lean",
+          "TauCeti/LowDimTopology/DehnSurgery/Unknot.lean",
+          "TauCeti/Topology/Connected/PathConnected.lean"
+        ]
+      },
+      {
+        "pr": 26213,
+        "paths": [
+          "TauCeti/RepresentationTheory/Induction/Clifford/ProjectiveCorrespondence.lean",
+          "TauCeti/RepresentationTheory/Irreducible.lean",
+          "TauCeti/RepresentationTheory/Tensor/External.lean"
+        ],
+        "head_sha": "eb67549511915fd478c73c76e7592ff1e7f7a129",
+        "dependency_paths": [
+          "TauCeti/LinearAlgebra/TensorProduct/Separation.lean",
+          "TauCeti/RepresentationTheory/Induction/Clifford/TensorFactorization.lean",
+          "TauCeti/RepresentationTheory/Irreducible.lean",
+          "TauCeti/RepresentationTheory/Subrepresentation.lean",
+          "TauCeti/RingTheory/KrullSchmidt/Indecomposable.lean",
+          "TauCeti/RingTheory/Semisimple/DoubleCentralizer.lean",
+          "TauCeti/RingTheory/Semisimple/Schur.lean"
+        ]
+      },
+      {
+        "pr": 26216,
+        "paths": [
+          "TauCeti/Analysis/Convex/Sequence/Envelope.lean",
+          "TauCeti/Analysis/Convex/Sequence/Face.lean",
+          "TauCeti/Analysis/Convex/Sequence/Vertex.lean",
+          "TauCeti/NumberTheory/NewtonPolygon/Mul.lean"
+        ],
+        "head_sha": "1989d66f0938a99684c22916c40b680b342af23b",
+        "dependency_paths": [
+          "TauCeti/Analysis/Convex/Sequence/Basic.lean",
+          "TauCeti/Analysis/Convex/Sequence/Face.lean",
+          "TauCeti/Analysis/Convex/Sequence/Minkowski/SlopeData.lean",
+          "TauCeti/Analysis/Convex/Sequence/Supporting.lean",
+          "TauCeti/Analysis/Convex/Sequence/Vertex.lean",
+          "TauCeti/NumberTheory/NewtonPolygon/Slopes.lean"
+        ]
+      },
+      {
+        "pr": 26220,
+        "paths": [
+          "TauCeti/Probability/ConditionalProbability.lean",
+          "TauCeti/Probability/Distributions/TruncatedNormal/Measurability.lean"
+        ],
+        "head_sha": "6b727d79811719c25ad78f2382ffc237e0a4a455",
+        "dependency_paths": [
+          "TauCeti/Probability/Distributions/TruncatedNormal/Basic.lean"
+        ]
+      },
+      {
+        "pr": 26241,
+        "paths": [
+          "TauCeti/Geometry/Symplectic/JHolomorphic/Energy/Area.lean",
+          "TauCeti/Geometry/Symplectic/Wirtinger.lean"
+        ],
+        "head_sha": "caa60fa49d0f204ce8e2ff3404268183e675b25b",
+        "dependency_paths": [
+          "TauCeti/Geometry/Symplectic/CompatibleMetric.lean",
+          "TauCeti/Geometry/Symplectic/JHolomorphic/Energy/Integral.lean",
+          "TauCeti/Geometry/Symplectic/Wirtinger.lean"
+        ]
+      },
+      {
+        "pr": 26261,
+        "paths": [
+          "TauCeti/Combinatorics/PlanarMatching/HalfDiagram.lean"
+        ],
+        "head_sha": "4427afe75ab26ee2ad73e295d2043b490667e983",
+        "dependency_paths": [
+          "TauCeti/Combinatorics/NoncrossingPartition/PerfectMatching.lean",
+          "TauCeti/Combinatorics/PlanarMatching/Basic.lean"
+        ]
+      },
+      {
+        "pr": 26271,
+        "paths": [
+          "TauCeti/Analysis/ExteriorPower/Overlap.lean",
+          "TauCeti/LinearAlgebra/ExteriorPower/Plucker.lean"
+        ],
+        "head_sha": "1bd4a4bbd7a6405296ca9eed996ef7f1e85d371e",
+        "dependency_paths": [
+          "TauCeti/Analysis/ExteriorPower/Nonarchimedean.lean",
+          "TauCeti/LinearAlgebra/ExteriorPower/Basic.lean",
+          "TauCeti/LinearAlgebra/Matrix/Determinant/SumElim.lean",
+          "TauCeti/LinearAlgebra/Matrix/Gram.lean",
+          "TauCeti/LinearAlgebra/Matrix/Rank.lean",
+          "TauCeti/LinearAlgebra/Submodule/Primitive.lean"
+        ]
+      },
+      {
+        "pr": 26290,
+        "paths": [
+          "TauCeti/AlgebraicTopology/UniversalCover/Group.lean",
+          "TauCeti/Topology/Algebra/CliffordAlgebra/Spin/Covering.lean",
+          "TauCeti/Topology/Algebra/CliffordAlgebra/Spin/UniversalCover.lean",
+          "TauCeti/Topology/Algebra/QuadraticForm/RealSpecialOrthogonal.lean"
+        ],
+        "head_sha": "d593051ff7f8d4f142c23c32272b2edefc49cb7c",
+        "dependency_paths": [
+          "TauCeti/AlgebraicTopology/FundamentalGroup/Homeomorph.lean",
+          "TauCeti/AlgebraicTopology/FundamentalGroup/TopologicalMonoid.lean",
+          "TauCeti/AlgebraicTopology/UniversalCover/Classification/Pointed.lean",
+          "TauCeti/AlgebraicTopology/UniversalCover/Covering.lean",
+          "TauCeti/AlgebraicTopology/UniversalCover/Group.lean",
+          "TauCeti/AlgebraicTopology/UniversalCover/SemilocallySimplyConnected.lean",
+          "TauCeti/Geometry/Lie/CliffordAlgebra/Spin/Projection.lean",
+          "TauCeti/LinearAlgebra/CliffordAlgebra/RealForm/Basic.lean",
+          "TauCeti/LinearAlgebra/CliffordAlgebra/Spin/LowRank/Zero.lean",
+          "TauCeti/LinearAlgebra/QuadraticForm/SpecialOrthogonal/WeightedSumSquares.lean",
+          "TauCeti/Topology/Algebra/CliffordAlgebra/Spin/Basic.lean",
+          "TauCeti/Topology/Algebra/CliffordAlgebra/Spin/Connected.lean",
+          "TauCeti/Topology/Algebra/CliffordAlgebra/Spin/Covering.lean",
+          "TauCeti/Topology/Algebra/CliffordAlgebra/Spin/SimplyConnected.lean",
+          "TauCeti/Topology/Algebra/ContinuousMonoidHom/Basic.lean",
+          "TauCeti/Topology/Algebra/ContinuousMonoidHom/Descent.lean",
+          "TauCeti/Topology/Algebra/OrthogonalGroup.lean",
+          "TauCeti/Topology/Algebra/QuadraticForm/SpecialOrthogonal.lean",
+          "TauCeti/Topology/Algebra/UnitaryGroup.lean",
+          "TauCeti/Topology/Homotopy/Covering.lean"
+        ]
+      },
+      {
+        "pr": 26416,
+        "paths": [
+          "TauCeti/Computability/SingleOracle/Race.lean",
+          "TauCeti/Computability/SingleOracle/Stage.lean",
+          "TauCeti/Computability/Staged/Race.lean",
+          "TauCeti/Examples/Computability/SingleOracle/Race.lean"
+        ],
+        "head_sha": "3c737fb156228a5d623b864e77eeb59a77f1045b",
+        "dependency_paths": [
+          "TauCeti/Computability/SingleOracle/Primrec.lean",
+          "TauCeti/Computability/SingleOracle/Race.lean",
+          "TauCeti/Computability/SingleOracle/Stage.lean",
+          "TauCeti/Computability/Staged/Race.lean"
+        ]
+      },
+      {
+        "pr": 26493,
+        "paths": [
+          "TauCeti/Algebra/Lie/Sl2/Kostant/Multiplication.lean",
+          "TauCeti/Algebra/Lie/Sl2/Kostant/Span.lean"
+        ],
+        "head_sha": "746ae58a6fa04f0342bb52ecb7894cb863205a37",
+        "dependency_paths": [
+          "TauCeti/Algebra/Lie/Sl2/Kostant/Multiplication.lean",
+          "TauCeti/Algebra/Lie/Sl2/Straightening.lean",
+          "TauCeti/Algebra/Lie/UniversalEnveloping/Kostant/Form.lean",
+          "TauCeti/RingTheory/Binomial.lean",
+          "TauCeti/RingTheory/DividedPowers/Commutation.lean"
+        ]
+      },
+      {
+        "pr": 26549,
+        "paths": [
+          "TauCeti/Algebra/Lie/NormTwoShell/FullCartan/Derived.lean"
+        ],
+        "head_sha": "7463bdb2180b88431796f5fb91b0947e8883c9b3",
+        "dependency_paths": [
+          "TauCeti/Algebra/Lie/NormTwoShell/FullCartan/Basic.lean"
+        ]
+      },
+      {
+        "pr": 26840,
+        "paths": [
+          "TauCeti/Analysis/Matrix/GeometricMean.lean",
+          "TauCeti/Analysis/SpecialFunctions/ContinuousFunctionalCalculus/GeometricMean.lean"
+        ],
+        "head_sha": "1ff927ace3fc7b7f3783fcd8ccecf906be4b6b38",
+        "dependency_paths": [
+          "TauCeti/Analysis/Matrix/Sqrt.lean",
+          "TauCeti/Analysis/SpecialFunctions/ContinuousFunctionalCalculus/GeometricMean.lean"
+        ]
+      },
+      {
+        "pr": 26862,
+        "paths": [
+          "TauCeti/Algebra/Group/Subgroup/Finite.lean"
+        ],
+        "head_sha": "63218622095a1d83bfa7cfcede1e16f0d56d3976",
+        "dependency_paths": []
+      },
+      {
+        "pr": 26889,
+        "paths": [
+          ".github/actions/checkout-merge-policy/action.yml",
+          ".github/workflows/auto-merge.yml",
+          ".github/workflows/infrastructure-tests.yml",
+          ".github/workflows/merge-sweep.yml",
+          ".github/workflows/roadmap-label-reconcile.yml",
+          ".github/workflows/roadmap-label.yml",
+          "scripts/control_batches/README.md",
+          "scripts/control_batches/merge_batch.py",
+          "scripts/control_batches/roadmap_batch.py",
+          "scripts/control_batches/trusted-label-run.jq",
+          "scripts/roadmap_label.md",
+          "scripts/run-infrastructure-tests.sh",
+          "scripts/test_control_batch_budget.py",
+          "scripts/test_control_batch_merge.py",
+          "scripts/test_control_batch_workflows.py",
+          "scripts/test_roadmap_api.py",
+          "scripts/test_workflow_pins.py"
+        ],
+        "head_sha": "49424eadbae6227ebd290227220ef3f96991f629",
+        "dependency_paths": []
+      },
+      {
+        "pr": 26900,
+        "paths": [
+          "TauCeti/Algebra/Lie/D4/Tripled/WeightTorus.lean"
+        ],
+        "head_sha": "ad1f9945d2c0c4947984a43d09e510d636bddec1",
+        "dependency_paths": [
+          "TauCeti/Algebra/AlgebraicGroup/GeneralLinear/DiagonalTorus/Maximal.lean",
+          "TauCeti/Algebra/AlgebraicGroup/Hopf/KernelPoints.lean",
+          "TauCeti/Algebra/AlgebraicGroup/HopfIdeal/Points/Order.lean",
+          "TauCeti/Algebra/AlgebraicGroup/Torus/Basic.lean",
+          "TauCeti/Algebra/Lie/D4/Tripled/BaseChange.lean",
+          "TauCeti/Algebra/Lie/D4/Tripled/MaximalTorus.lean"
+        ]
+      }
+    ],
+    "missing_imports": [],
+    "dependency_paths": [
+      "TauCeti/Algebra/AlgebraicGroup/DiagonalizableGroup/Cocharacter.lean",
+      "TauCeti/Algebra/AlgebraicGroup/GeneralLinear/Adjoint/Basic.lean",
+      "TauCeti/Algebra/AlgebraicGroup/GeneralLinear/DiagonalTorus/Maximal.lean",
+      "TauCeti/Algebra/AlgebraicGroup/GeneralLinear/Tangent.lean",
+      "TauCeti/Algebra/AlgebraicGroup/GeneralLinear/Tangent/Map.lean",
+      "TauCeti/Algebra/AlgebraicGroup/GeneralLinear/Weight/Differential.lean",
+      "TauCeti/Algebra/AlgebraicGroup/Hopf/KernelPoints.lean",
+      "TauCeti/Algebra/AlgebraicGroup/HopfIdeal/Points/Order.lean",
+      "TauCeti/Algebra/AlgebraicGroup/MultiplicativeGroup/Tangent.lean",
+      "TauCeti/Algebra/AlgebraicGroup/SplitTorus/Cocharacter.lean",
+      "TauCeti/Algebra/AlgebraicGroup/SplitTorus/Tangent.lean",
+      "TauCeti/Algebra/AlgebraicGroup/Tangent/Lie/Map.lean",
+      "TauCeti/Algebra/AlgebraicGroup/Torus/Basic.lean",
+      "TauCeti/Algebra/BigOperators/Finset/Average.lean",
+      "TauCeti/Algebra/Category/ModuleCat/Projective/Dimension.lean",
+      "TauCeti/Algebra/Category/ModuleCat/RestrictScalars.lean",
+      "TauCeti/Algebra/Homology/Curved/Duplex.lean",
+      "TauCeti/Algebra/Lie/D4/Tripled/BaseChange.lean",
+      "TauCeti/Algebra/Lie/D4/Tripled/MaximalTorus.lean",
+      "TauCeti/Algebra/Lie/E7/Minuscule/Basic.lean",
+      "TauCeti/Algebra/Lie/E7/Minuscule/Generated/RootWeight.lean",
+      "TauCeti/Algebra/Lie/E7/Minuscule/Generated/Serre.lean",
+      "TauCeti/Algebra/Lie/E7/Minuscule/Root/Coordinates.lean",
+      "TauCeti/Algebra/Lie/E7/Minuscule/Root/Coroot.lean",
+      "TauCeti/Algebra/Lie/E7/Minuscule/Root/Differential.lean",
+      "TauCeti/Algebra/Lie/ExteriorPower.lean",
+      "TauCeti/Algebra/Lie/G2/ShortRoot/PrimeField/Root/Positive.lean",
+      "TauCeti/Algebra/Lie/Matrix/IntegralCast.lean",
+      "TauCeti/Algebra/Lie/NormTwoShell/FullCartan/Basic.lean",
+      "TauCeti/Algebra/Lie/Presentation/Serre.lean",
+      "TauCeti/Algebra/Lie/Sl2/Kostant/Multiplication.lean",
+      "TauCeti/Algebra/Lie/Sl2/Straightening.lean",
+      "TauCeti/Algebra/Lie/UniversalEnveloping/Kostant/Form.lean",
+      "TauCeti/Algebra/Module/Primitive.lean",
+      "TauCeti/Algebra/Module/Projective/Trans.lean",
+      "TauCeti/Algebra/QuadraticDiscriminant.lean",
+      "TauCeti/AlgebraicTopology/FundamentalGroup/Basic.lean",
+      "TauCeti/AlgebraicTopology/FundamentalGroup/CoverGeneration.lean",
+      "TauCeti/AlgebraicTopology/FundamentalGroup/Homeomorph.lean",
+      "TauCeti/AlgebraicTopology/FundamentalGroup/TopologicalMonoid.lean",
+      "TauCeti/AlgebraicTopology/FundamentalGroupoid/Pushout.lean",
+      "TauCeti/AlgebraicTopology/Homotopy/Hurewicz/One/Naturality.lean",
+      "TauCeti/AlgebraicTopology/NotSimplyConnected.lean",
+      "TauCeti/AlgebraicTopology/Singular/Contractible.lean",
+      "TauCeti/AlgebraicTopology/Singular/Homotopy/Invariance.lean",
+      "TauCeti/AlgebraicTopology/Singular/MayerVietoris/Reduced.lean",
+      "TauCeti/AlgebraicTopology/Singular/Reduced.lean",
+      "TauCeti/AlgebraicTopology/Singular/ReducedRelative.lean",
+      "TauCeti/AlgebraicTopology/Singular/Sphere.lean",
+      "TauCeti/AlgebraicTopology/Sphere/SimplyConnected.lean",
+      "TauCeti/AlgebraicTopology/UniversalCover/Classification/Pointed.lean",
+      "TauCeti/AlgebraicTopology/UniversalCover/Covering.lean",
+      "TauCeti/AlgebraicTopology/UniversalCover/Group.lean",
+      "TauCeti/AlgebraicTopology/UniversalCover/LensSpace/Basic.lean",
+      "TauCeti/AlgebraicTopology/UniversalCover/LensSpace/FundamentalGroup.lean",
+      "TauCeti/AlgebraicTopology/UniversalCover/SemilocallySimplyConnected.lean",
+      "TauCeti/AlgebraicTopology/UniversalCover/Torus/FundamentalGroup.lean",
+      "TauCeti/Analysis/Calculus/BumpFunction/Cutoff.lean",
+      "TauCeti/Analysis/Calculus/ContDiff/ContinuousAlternatingMap.lean",
+      "TauCeti/Analysis/Calculus/Deriv/CountableLevels.lean",
+      "TauCeti/Analysis/Calculus/Deriv/EqLine.lean",
+      "TauCeti/Analysis/Calculus/Deriv/Projection.lean",
+      "TauCeti/Analysis/Calculus/DifferentialForm/Basic.lean",
+      "TauCeti/Analysis/Calculus/DifferentialForm/Const.lean",
+      "TauCeti/Analysis/Calculus/DifferentialForm/Regularity.lean",
+      "TauCeti/Analysis/Calculus/FDeriv/Comp.lean",
+      "TauCeti/Analysis/Calculus/InverseFunctionTheorem.lean",
+      "TauCeti/Analysis/Calculus/Sard/LowDimension.lean",
+      "TauCeti/Analysis/Calculus/Sard/Projection.lean",
+      "TauCeti/Analysis/Complex/Circle.lean",
+      "TauCeti/Analysis/Convex/Sequence/Basic.lean",
+      "TauCeti/Analysis/Convex/Sequence/Face.lean",
+      "TauCeti/Analysis/Convex/Sequence/Minkowski/SlopeData.lean",
+      "TauCeti/Analysis/Convex/Sequence/Supporting.lean",
+      "TauCeti/Analysis/Convex/Sequence/Vertex.lean",
+      "TauCeti/Analysis/ExteriorPower/Nonarchimedean.lean",
+      "TauCeti/Analysis/InnerProductSpace/AlternatingForm.lean",
+      "TauCeti/Analysis/InnerProductSpace/ExteriorPower/Basic.lean",
+      "TauCeti/Analysis/InnerProductSpace/Gram/Hadamard.lean",
+      "TauCeti/Analysis/InnerProductSpace/HodgeStar/Basic.lean",
+      "TauCeti/Analysis/InnerProductSpace/HodgeStar/Isometry.lean",
+      "TauCeti/Analysis/InnerProductSpace/Orthonormal/Sum.lean",
+      "TauCeti/Analysis/InnerProductSpace/Trace/Free.lean",
+      "TauCeti/Analysis/Matrix/Sqrt.lean",
+      "TauCeti/Analysis/Normed/Module/Alternating/Dual.lean",
+      "TauCeti/Analysis/Normed/Module/Dual/Submodule.lean",
+      "TauCeti/Analysis/Normed/Operator/LinearIsometryEquiv/QuadraticForm.lean",
+      "TauCeti/Analysis/PDE/SeibergWitten/QuadraticTwoForm.lean",
+      "TauCeti/Analysis/SpecialFunctions/ContinuousFunctionalCalculus/GeometricMean.lean",
+      "TauCeti/Analysis/SpecialFunctions/SmoothTransition.lean",
+      "TauCeti/CategoryTheory/Groupoid/SingleObj.lean",
+      "TauCeti/CategoryTheory/Linear/FullSubcategory.lean",
+      "TauCeti/Combinatorics/NoncrossingPartition/PerfectMatching.lean",
+      "TauCeti/Combinatorics/PlanarMatching/Basic.lean",
+      "TauCeti/CommutativeAlgebra/MatrixFactorization/BaseChange/Basic.lean",
+      "TauCeti/CommutativeAlgebra/MatrixFactorization/Cokernel/BaseChange.lean",
+      "TauCeti/CommutativeAlgebra/MatrixFactorization/Cokernel/Basic.lean",
+      "TauCeti/CommutativeAlgebra/MatrixFactorization/Cokernel/GorensteinProjective.lean",
+      "TauCeti/Computability/SingleOracle/Primrec.lean",
+      "TauCeti/Computability/SingleOracle/Race.lean",
+      "TauCeti/Computability/SingleOracle/Stage.lean",
+      "TauCeti/Computability/Staged/Race.lean",
+      "TauCeti/Data/Int/Sqrt.lean",
+      "TauCeti/Geometry/Contact/Basic.lean",
+      "TauCeti/Geometry/Contact/Flat.lean",
+      "TauCeti/Geometry/Contact/Hamiltonian.lean",
+      "TauCeti/Geometry/Contact/Reeb.lean",
+      "TauCeti/Geometry/Euclidean/Angle/Unoriented/CrossProduct.lean",
+      "TauCeti/Geometry/Lie/CliffordAlgebra/Spin/Projection.lean",
+      "TauCeti/Geometry/Manifold/Boundary/SmoothMap.lean",
+      "TauCeti/Geometry/Manifold/DifferentialForm/Chart.lean",
+      "TauCeti/Geometry/Manifold/DifferentialForm/Continuity.lean",
+      "TauCeti/Geometry/Manifold/DifferentialForm/DegreeOne.lean",
+      "TauCeti/Geometry/Manifold/DifferentialForm/LieDeriv.lean",
+      "TauCeti/Geometry/Manifold/DifferentialForm/Pullback/Basic.lean",
+      "TauCeti/Geometry/Manifold/DifferentialForm/Pullback/Chart.lean",
+      "TauCeti/Geometry/Manifold/DifferentialForm/Regularity.lean",
+      "TauCeti/Geometry/Manifold/DifferentialForm/Support.lean",
+      "TauCeti/Geometry/Manifold/DifferentialForm/Wedge/Leibniz.lean",
+      "TauCeti/Geometry/Manifold/Immersion/Differential.lean",
+      "TauCeti/Geometry/Manifold/Instances/ClosedBall/Basic.lean",
+      "TauCeti/Geometry/Manifold/Instances/ClosedBall/Boundary.lean",
+      "TauCeti/Geometry/Manifold/Instances/Icc.lean",
+      "TauCeti/Geometry/Manifold/Instances/Sphere.lean",
+      "TauCeti/Geometry/Manifold/MFDeriv/Constancy.lean",
+      "TauCeti/Geometry/Manifold/MFDeriv/NormedSpace.lean",
+      "TauCeti/Geometry/Manifold/SmoothEmbedding/Basic.lean",
+      "TauCeti/Geometry/Manifold/SmoothEmbedding/EqLine.lean",
+      "TauCeti/Geometry/Manifold/SmoothEmbedding/SmoothAmbientIsotopy/Basic.lean",
+      "TauCeti/Geometry/Manifold/SmoothIsotopy/Trans.lean",
+      "TauCeti/Geometry/Manifold/TubularNeighborhood/Euclidean.lean",
+      "TauCeti/Geometry/Manifold/VectorBundle/Hom.lean",
+      "TauCeti/Geometry/Manifold/VectorField/LieBracket.lean",
+      "TauCeti/Geometry/Manifold/VectorField/Regularity.lean",
+      "TauCeti/Geometry/Sphere/HemisphereGraph.lean",
+      "TauCeti/Geometry/Symplectic/AlmostComplex.lean",
+      "TauCeti/Geometry/Symplectic/CompatibleMetric.lean",
+      "TauCeti/Geometry/Symplectic/JHolomorphic/Energy/Integral.lean",
+      "TauCeti/Geometry/Symplectic/Manifold/Flat.lean",
+      "TauCeti/Geometry/Symplectic/Wirtinger.lean",
+      "TauCeti/KnotTheory/Slice/Genus.lean",
+      "TauCeti/LinearAlgebra/BilinearForm/BaseChange.lean",
+      "TauCeti/LinearAlgebra/BilinearForm/Complexification.lean",
+      "TauCeti/LinearAlgebra/BilinearForm/Contact/NormalForm.lean",
+      "TauCeti/LinearAlgebra/CliffordAlgebra/Functoriality.lean",
+      "TauCeti/LinearAlgebra/CliffordAlgebra/RealForm/Basic.lean",
+      "TauCeti/LinearAlgebra/CliffordAlgebra/Spin/LowRank/Zero.lean",
+      "TauCeti/LinearAlgebra/Complex/Conjugation.lean",
+      "TauCeti/LinearAlgebra/ExteriorPower/AlmostComplexType.lean",
+      "TauCeti/LinearAlgebra/ExteriorPower/Basic.lean",
+      "TauCeti/LinearAlgebra/ExteriorPower/WedgePairing.lean",
+      "TauCeti/LinearAlgebra/Matrix/Adjugate/Basic.lean",
+      "TauCeti/LinearAlgebra/Matrix/Determinant/FinFour.lean",
+      "TauCeti/LinearAlgebra/Matrix/Determinant/SumElim.lean",
+      "TauCeti/LinearAlgebra/Matrix/Gram.lean",
+      "TauCeti/LinearAlgebra/Matrix/Rank.lean",
+      "TauCeti/LinearAlgebra/Matrix/SpecialLinearGroup/Basic.lean",
+      "TauCeti/LinearAlgebra/Projection.lean",
+      "TauCeti/LinearAlgebra/QuadraticForm/SpecialOrthogonal/WeightedSumSquares.lean",
+      "TauCeti/LinearAlgebra/RootSystem/SimplyConnectedRootDatum/KostantForm.lean",
+      "TauCeti/LinearAlgebra/Submodule/Primitive.lean",
+      "TauCeti/LinearAlgebra/TensorProduct/Separation.lean",
+      "TauCeti/LowDimTopology/DehnSurgery/Framing.lean",
+      "TauCeti/LowDimTopology/DehnSurgery/LensSpace.lean",
+      "TauCeti/LowDimTopology/DehnSurgery/SeifertFraming.lean",
+      "TauCeti/LowDimTopology/DehnSurgery/Uniqueness.lean",
+      "TauCeti/LowDimTopology/DehnSurgery/Unknot.lean",
+      "TauCeti/LowDimTopology/SeifertFibration.lean",
+      "TauCeti/LowDimTopology/SolidTorusNeighborhood/Unknot.lean",
+      "TauCeti/NumberTheory/BinaryQuadraticForm/Content.lean",
+      "TauCeti/NumberTheory/BinaryQuadraticForm/LagrangeReduction.lean",
+      "TauCeti/NumberTheory/Divisors.lean",
+      "TauCeti/NumberTheory/HurwitzClassNumber.lean",
+      "TauCeti/NumberTheory/ModularForms/LevelOne/TraceFormula/ExplicitElement/Hyperbolic.lean",
+      "TauCeti/NumberTheory/ModularForms/LevelOne/TraceFormula/ExplicitElement/Parabolic.lean",
+      "TauCeti/NumberTheory/ModularForms/LevelOne/TraceFormula/ExplicitElement/Trace.lean",
+      "TauCeti/NumberTheory/NewtonPolygon/Slopes.lean",
+      "TauCeti/Order/SupIndep.lean",
+      "TauCeti/Probability/Distributions/TruncatedNormal/Basic.lean",
+      "TauCeti/RepresentationTheory/Continuous/RightInverse.lean",
+      "TauCeti/RepresentationTheory/Homological/ContCohomology/Cup/Comparison.lean",
+      "TauCeti/RepresentationTheory/Homological/ContCohomology/Cup/Naturality.lean",
+      "TauCeti/RepresentationTheory/Homological/ContCohomology/Cup/Product.lean",
+      "TauCeti/RepresentationTheory/Homological/ContCohomology/MapDegreeTwo.lean",
+      "TauCeti/RepresentationTheory/Induction/Clifford/TensorFactorization.lean",
+      "TauCeti/RepresentationTheory/Invariants.lean",
+      "TauCeti/RepresentationTheory/Irreducible.lean",
+      "TauCeti/RepresentationTheory/Subrepresentation.lean",
+      "TauCeti/RingTheory/Affinoid/ContractiveRenorming.lean",
+      "TauCeti/RingTheory/Affinoid/Pushout/Basic.lean",
+      "TauCeti/RingTheory/Affinoid/QuotientNorm.lean",
+      "TauCeti/RingTheory/Affinoid/Restricted.lean",
+      "TauCeti/RingTheory/Affinoid/Subdomain/Basic.lean",
+      "TauCeti/RingTheory/Binomial.lean",
+      "TauCeti/RingTheory/DividedPowers/Commutation.lean",
+      "TauCeti/RingTheory/KrullSchmidt/Indecomposable.lean",
+      "TauCeti/RingTheory/Semisimple/DoubleCentralizer.lean",
+      "TauCeti/RingTheory/Semisimple/Schur.lean",
+      "TauCeti/Topology/Algebra/CliffordAlgebra/Spin/Basic.lean",
+      "TauCeti/Topology/Algebra/CliffordAlgebra/Spin/Connected.lean",
+      "TauCeti/Topology/Algebra/CliffordAlgebra/Spin/Covering.lean",
+      "TauCeti/Topology/Algebra/CliffordAlgebra/Spin/SimplyConnected.lean",
+      "TauCeti/Topology/Algebra/ContinuousMonoidHom/Basic.lean",
+      "TauCeti/Topology/Algebra/ContinuousMonoidHom/Descent.lean",
+      "TauCeti/Topology/Algebra/Module/Alternating/TopDegree.lean",
+      "TauCeti/Topology/Algebra/Module/BilinearForm.lean",
+      "TauCeti/Topology/Algebra/OrthogonalGroup.lean",
+      "TauCeti/Topology/Algebra/QuadraticForm/SpecialOrthogonal.lean",
+      "TauCeti/Topology/Algebra/Ring/Ideal.lean",
+      "TauCeti/Topology/Algebra/UnitaryGroup.lean",
+      "TauCeti/Topology/Category/TopCat/DisjointOpens.lean",
+      "TauCeti/Topology/Category/TopPair.lean",
+      "TauCeti/Topology/Circle/Loop.lean",
+      "TauCeti/Topology/Connected/PathConnected.lean",
+      "TauCeti/Topology/Homeomorph/SetCongr.lean",
+      "TauCeti/Topology/Homotopy/Covering.lean",
+      "TauCeti/Topology/Homotopy/HomotopyEquiv.lean",
+      "TauCeti/Topology/Homotopy/Isotopy/Basic.lean",
+      "TauCeti/Topology/Homotopy/PuncturedStarConvex.lean",
+      "TauCeti/Topology/JordanCurve/Basic.lean",
+      "TauCeti/Topology/OpenPartialHomeomorph/MulAction.lean"
+    ],
+    "ownership_complete": true,
+    "ownership_elapsed_ms": 509,
+    "dependencies_complete": true
+  },
+  "logs": {
+    "jobs": [
+      {
+        "bytes": 1246899,
+        "job_id": 125778194194,
+        "source": "job_log",
+        "observations": [
+          {
+            "kind": "environment_linter",
+            "paths": [],
+            "linter": "unusedArguments",
+            "unknown": "unsupported_origin",
+            "declaration": "_private.TauCeti.LowDimTopology.DehnSurgery.Slope.0.TauCeti.slopeSetoid"
+          }
+        ]
+      }
+    ],
+    "cpu_ms": 90,
+    "complete": true,
+    "elapsed_ms": 421,
+    "parser_version": "streaming-v2"
+  },
+  "binding": {
+    "commit": "99ccf812d82860f42284817eaefa41bfbc311586",
+    "run_id": 41594342224,
+    "job_ids": [
+      125778194194
+    ],
+    "base_sha": "8c3e8d8caaa07a6dc5f0a54c301f9376aa333aec",
+    "workflow": ".github/workflows/pr-build.yml",
+    "generation": 1,
+    "run_attempt": 1,
+    "candidate_id": 1864,
+    "members_digest": "7ae1495b376c99901fd305e00ad83d5b086f6967594e529b2454ff7e42129724"
+  },
+  "source_lookup": {
+    "complete": true,
+    "policy": "private-origin-source-v1",
+    "binding": {
+      "commit": "99ccf812d82860f42284817eaefa41bfbc311586",
+      "run_id": 41594342224,
+      "job_ids": [
+        125778194194
+      ],
+      "base_sha": "8c3e8d8caaa07a6dc5f0a54c301f9376aa333aec",
+      "workflow": ".github/workflows/pr-build.yml",
+      "generation": 1,
+      "run_attempt": 1,
+      "candidate_id": 1864,
+      "members_digest": "7ae1495b376c99901fd305e00ad83d5b086f6967594e529b2454ff7e42129724"
+    },
+    "files": [
+      {
+        "path": "TauCeti/LowDimTopology/DehnSurgery/Slope.lean",
+        "candidate": {
+          "blob": "cf50b84752e3dadace5f9bb71731f21ae315131d",
+          "bytes": 26259
+        },
+        "base": {
+          "blob": "2e641479254873e481628f33e7e1e69c3884e9f8",
+          "bytes": 25825
+        }
+      }
+    ],
+    "authority": "retry_only",
+    "proof_authority": false
+  },
+  "source_url": "https://github.com/TauCetiProject/TauCeti/blob/99ccf812d82860f42284817eaefa41bfbc311586/TauCeti/LowDimTopology/DehnSurgery/Slope.lean"
+}

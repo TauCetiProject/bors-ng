@@ -552,6 +552,26 @@ class LocalGitTest(unittest.TestCase):
         return request | dict(operation='collision_sources',
                               paths=['TauCeti/Downstream.lean', 'TauCeti/Provider.lean'])
 
+    def test_private_module_identity_reads_exact_single_source_offline_without_bootstrap(self):
+        from unittest.mock import patch
+        request = self.collision_fixture() | dict(operation='private_origin_sources',
+            paths=['TauCeti/Provider.lean'])
+        local.validate(request)
+        mirror = TestMirror(request, self.upstream)
+        with patch.object(mirror, 'fetch', side_effect=AssertionError('network')), \
+                patch.object(mirror, 'initialize', side_effect=AssertionError('bootstrap')):
+            result = mirror.run()
+        self.assertEqual(result['policy'], 'private-origin-source-v1')
+        self.assertEqual(result['binding'], request['binding'])
+        self.assertEqual(result['files'][0]['path'], 'TauCeti/Provider.lean')
+        self.assertNotEqual(result['files'][0]['candidate']['blob'], result['files'][0]['base']['blob'])
+        self.assertFalse(result['proof_authority'])
+        with self.assertRaises(local.Failure):
+            TestMirror(request | dict(paths=['TauCeti/Absent.lean']), self.upstream).run()
+        for paths in [[], ['../outside'], ['TauCeti/Provider.lean'] * 2,
+                      [f'TauCeti/P{i}.lean' for i in range(9)]]:
+            with self.assertRaises(local.Failure): local.validate(request | dict(paths=paths))
+
     def test_collision_source_identity_is_offline_bounded_and_not_provider_authority(self):
         from unittest.mock import patch
         request = self.collision_fixture()

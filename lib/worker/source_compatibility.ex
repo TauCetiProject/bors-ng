@@ -620,8 +620,7 @@ defmodule BorsNG.Worker.SourceCompatibility do
          true <- batch.into_branch == BorsNG.ProjectConfig.branch(),
          true <- hints["ownership_complete"] == true,
          true <- not is_nil(candidate),
-         nil <- candidate.snapshot["speculative_predecessor_id"],
-         false <- BorsNG.Worker.SpeculativeTrain.event?(candidate, "successor_reserved"),
+         true <- independent_provisional_base?(candidate, batch),
          nil <- patch.bundle_id,
          nil <- patch.manual_approval,
          nil <- suspect.manual_approval,
@@ -673,6 +672,7 @@ defmodule BorsNG.Worker.SourceCompatibility do
                   not is_nil(current.manual_approval) or not is_nil(current.bundle_id) or
                   parent.state != :running or
                   parent.commit != batch.commit or parent.base_sha != batch.base_sha or
+                  not independent_provisional_base?(candidate, parent) or
                   BorsNG.Worker.CandidateJournal.current(parent) != candidate,
                 do: Repo.rollback(:stale_provisional_binding)
 
@@ -721,6 +721,35 @@ defmodule BorsNG.Worker.SourceCompatibility do
       end
     else
       _ -> :unavailable
+    end
+  end
+
+  # A child becomes independent only after its exact predecessor actually lands
+  # and its tested base is that landed commit. The live-main check above still
+  # applies. Pending/failed/superseded ancestry cannot authorize individual blame.
+  defp independent_provisional_base?(candidate, batch) do
+    alias BorsNG.Worker.CandidateJournal
+
+    case candidate.snapshot["speculative_predecessor_id"] do
+      nil ->
+        true
+
+      id when is_integer(id) ->
+        with predecessor when not is_nil(predecessor) <- Repo.get(BorsNG.Database.Candidate, id),
+             parent when not is_nil(parent) <- Repo.get(Batch, predecessor.batch_id),
+             true <- parent.state == :ok and parent.id != batch.id,
+             latest when not is_nil(latest) <- CandidateJournal.latest(parent.id),
+             true <- latest.id == id,
+             true <- BorsNG.Worker.SpeculativeTrain.event?(predecessor, "promoted"),
+             true <- CandidateJournal.commit_binding(predecessor)["commit"] == batch.base_sha,
+             true <- parent.commit == batch.base_sha do
+          true
+        else
+          _ -> false
+        end
+
+      _ ->
+        false
     end
   end
 

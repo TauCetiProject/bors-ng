@@ -162,6 +162,15 @@ defmodule BorsNG.Worker.LocalGit do
     })
   end
 
+  def private_origin_sources(project, conn, binding, paths) do
+    run(%{repository: project.name, conn: conn}, %{
+      operation: "private_origin_sources",
+      binding: binding,
+      paths: paths,
+      timeout: 5
+    })
+  end
+
   defp run(context, request) do
     input =
       Path.join(
@@ -188,7 +197,8 @@ defmodule BorsNG.Worker.LocalGit do
         if request.operation in [
              "import_providers",
              "bounded_import_providers",
-             "collision_sources"
+             "collision_sources",
+             "private_origin_sources"
            ],
            do: {:ok, ""},
            else: GitHub.git_token(context.conn)
