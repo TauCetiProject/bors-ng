@@ -3545,11 +3545,24 @@ defmodule BorsNG.Worker.Batcher do
         maybe_complete_valid_batch(batch, status_read_failed, check_interruption)
 
       {:hold, reason} ->
-        CompletionDiagnostics.hold(batch, reason)
+        now = DateTime.to_unix(DateTime.utc_now())
+        statuses = Repo.all(Status.all_for_batch(batch.id))
 
-        batch
-        |> Batch.changeset(%{last_polled: DateTime.to_unix(DateTime.utc_now())})
-        |> Repo.update!()
+        changes =
+          if statuses != [] and Batcher.State.summary_database_statuses(statuses) in [:ok, :error] do
+            deadline =
+              max(now + 60, max(batch.recovery_after || 0, batch.promotion_retry_at || 0))
+
+            # Persist the durable wakeup before moving last_polled/deadlines.
+            # A crash or failed batch write cannot leave a held result unwoken.
+            schedule_recheck(batch, deadline)
+            %{last_polled: now, recovery_after: deadline}
+          else
+            %{last_polled: now}
+          end
+
+        held = batch |> Batch.changeset(changes) |> Repo.update!()
+        CompletionDiagnostics.hold(held, reason)
 
       {:invalidate, reason} ->
         Train.invalidate(batch, reason)

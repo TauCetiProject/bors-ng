@@ -173,9 +173,10 @@ defmodule BorsNG.Worker.SpeculativeTrainTest do
         put_in(GitHub.ServerMock.get_state(), [@conn, :branches, "main"], head)
       )
 
-  test "pending eligibility can hold an already-red root until the thirty-minute poll", %{
-    project: project
-  } do
+  test "completed root held by eligibility gets a durable restart-safe retry before the thirty-minute poll",
+       %{
+         project: project
+       } do
     {batch, c, links} = candidate(project, 1)
     CandidateJournal.event(c, "train_reserved", "bors.train", %{cap: 3})
 
@@ -192,6 +193,13 @@ defmodule BorsNG.Worker.SpeculativeTrainTest do
     assert eligibility.subject_id == link.patch_id
     assert Train.guard(batch, @conn) == {:hold, :withdrawal_pending}
 
+    {:ok, job} =
+      Outbox.claim(
+        Outbox.enqueue(project.id, "cast", {:status, {batch.commit, "build", :error, "run-url"}}).id
+      )
+
+    Process.put(:orchestration_job, job)
+
     assert :ok =
              Batcher.do_handle_cast(
                {:status, {batch.commit, "build", :error, "run-url"}},
@@ -202,17 +210,22 @@ defmodule BorsNG.Worker.SpeculativeTrainTest do
     assert held.state == :running
     assert Repo.get_by!(Status, batch_id: batch.id, identifier: "build").state == :error
     assert held.last_polled >= Outbox.now() - 2
+    assert held.recovery_after in (Outbox.now() + 58)..(Outbox.now() + 60)
+    Outbox.finish(job)
+    Process.delete(:orchestration_job)
 
     [event] =
       Repo.all(
         from(e in CandidateEvent,
-          where: e.candidate_id == ^c.id and e.kind == "completion_deferred"
+          where:
+            e.candidate_id == ^c.id and e.kind == "completion_deferred" and
+              fragment("?->>'reason'", e.details) == "withdrawal_pending"
         )
       )
 
     assert event.details["reason"] == "withdrawal_pending"
     assert event.details["summary"] == "error"
-    assert event.details["next_recheck_at"] == nil
+    assert event.details["next_recheck_at"] == held.recovery_after + 1
     assert event.details["fallback_poll_at"] >= Outbox.now() + 1798
 
     assert [%{"id" => id, "kind" => "cast", "subject_id" => subject}] =
@@ -230,27 +243,125 @@ defmodule BorsNG.Worker.SpeculativeTrainTest do
 
     assert Repo.aggregate(
              from(e in CandidateEvent,
-               where: e.candidate_id == ^c.id and e.kind == "completion_deferred"
+               where:
+                 e.candidate_id == ^c.id and e.kind == "completion_deferred" and
+                   fragment("?->>'reason'", e.details) == "withdrawal_pending"
              ),
              :count,
              :id
            ) == 1
 
-    # The eligibility job disappears seconds later, but nothing wakes completion.
+    [retry] =
+      Repo.all(
+        from(j in BorsNG.Database.OrchestrationJob,
+          where: j.kind == "info" and j.project_id == ^project.id
+        )
+      )
+
+    assert Outbox.payload(retry) == {:retry_promotion, batch.id, batch.commit}
+    assert retry.available_at == held.recovery_after + 1
+    # Ordinary polls do not move the deadline or create additional timers.
+    for _ <- 1..3, do: Batcher.handle_info({:poll, :once}, project.id)
+    assert Repo.get!(Batch, batch.id).recovery_after == held.recovery_after
+
+    # Simulate losing in-memory state and even the original mailbox entry.
+    # Startup restoration reconstructs the timer from the persisted deadline.
+    Repo.delete!(retry)
+    {:ok, restore} = Outbox.claim(Outbox.enqueue(project.id, "info", :restore_rechecks).id)
+    Process.put(:orchestration_job, restore)
+    assert {:noreply, _} = Batcher.handle_info(:restore_rechecks, project.id)
+    Outbox.finish(restore)
+    Process.delete(:orchestration_job)
+
+    [retry] =
+      Repo.all(
+        from(j in BorsNG.Database.OrchestrationJob,
+          where: j.kind == "info" and j.project_id == ^project.id and j.state == "pending"
+        )
+      )
+
+    assert Outbox.payload(retry) == {:retry_promotion, batch.id, batch.commit}
+    assert retry.available_at == held.recovery_after + 1
+
+    # The short wakeup completes the same failed attempt when the blocker clears.
     Repo.update!(Ecto.Changeset.change(eligibility, state: "done"))
     assert Train.guard(held, @conn) == :ok
     refute Batch.next_poll_is_past(held, Outbox.now() + 60)
     assert {:noreply, _} = Batcher.handle_info({:poll, :once}, project.id)
     assert Repo.get!(Batch, batch.id).state == :running
 
-    refute Repo.exists?(
+    assert Batch.next_poll_is_past(held, held.last_polled + 1801)
+    assert Repo.get!(Patch, link.patch_id).queue_pending
+    Repo.update!(Batch.changeset(held, %{recovery_after: 0}))
+    retry = Repo.update!(Ecto.Changeset.change(retry, available_at: 0))
+    {:ok, claimed} = Outbox.claim(retry.id)
+    Process.put(:orchestration_job, claimed)
+    assert {:noreply, _} = Batcher.handle_info(Outbox.payload(claimed), project.id)
+    Outbox.finish(claimed)
+    Process.delete(:orchestration_job)
+    assert Repo.get!(Batch, batch.id).state == :error
+    assert Repo.get!(Patch, link.patch_id).queue_approval["state"] == "failed"
+    assert Train.event?(c, "terminal_observed")
+  end
+
+  test "a completed child held on its predecessor retries without advancing main or losing approvals",
+       %{project: project} do
+    {a, ca, _} = candidate(project, 1)
+    {b, cb, links} = candidate(project, 2, a.commit, ca)
+    Train.reserve(ca, @conn)
+    Train.reserve(cb, @conn)
+
+    GitHub.ServerMock.put_state(
+      put_in(GitHub.ServerMock.get_state(), [@conn, :statuses, b.commit], %{"build" => :ok})
+    )
+
+    before = Enum.map(links, &Repo.get!(Patch, &1.patch_id).queue_approval)
+
+    {:ok, job} =
+      Outbox.claim(
+        Outbox.enqueue(project.id, "cast", {:status, {b.commit, "build", :ok, "run-url"}}).id
+      )
+
+    Process.put(:orchestration_job, job)
+
+    assert :ok =
+             Batcher.do_handle_cast({:status, {b.commit, "build", :ok, "run-url"}}, project.id)
+
+    Outbox.finish(job)
+    Process.delete(:orchestration_job)
+    held = Repo.get!(Batch, b.id)
+    assert held.recovery_after > Outbox.now()
+    assert held.state == :running
+    refute Train.event?(cb, "promotion_requested")
+    assert GitHub.ServerMock.get_state()[@conn].branches["main"] == @base
+    assert before == Enum.map(links, &Repo.get!(Patch, &1.patch_id).queue_approval)
+
+    [retry] =
+      Repo.all(
+        from(j in BorsNG.Database.OrchestrationJob,
+          where: j.kind == "info" and j.project_id == ^project.id and j.state == "pending"
+        )
+      )
+
+    # Even a due mailbox message cannot override a later persisted recovery deadline.
+    later = Outbox.now() + 600
+    Repo.update!(Batch.changeset(held, %{promotion_retry_at: later}))
+    {:ok, restore} = Outbox.claim(Outbox.enqueue(project.id, "info", :restore_rechecks).id)
+    Process.put(:orchestration_job, restore)
+    Batcher.handle_info(Outbox.payload(retry), project.id)
+    Outbox.finish(restore)
+    Process.delete(:orchestration_job)
+    assert Repo.get!(Batch, b.id).promotion_retry_at == later
+
+    assert Repo.exists?(
              from(j in BorsNG.Database.OrchestrationJob,
-               where: j.kind == "info" and j.project_id == ^project.id
+               where:
+                 j.project_id == ^project.id and j.kind == "info" and
+                   j.available_at == ^(later + 1)
              )
            )
 
-    assert Batch.next_poll_is_past(held, held.last_polled + 1801)
-    assert Repo.get!(Patch, link.patch_id).queue_pending
+    refute Train.event?(cb, "promoted")
   end
 
   defp landed(batch, c) do
@@ -432,7 +543,15 @@ defmodule BorsNG.Worker.SpeculativeTrainTest do
       put_in(GitHub.ServerMock.get_state(), [@conn, :statuses, b.commit], %{"build" => :ok})
     )
 
+    {:ok, job} =
+      Outbox.claim(
+        Outbox.enqueue(project.id, "cast", {:status, {b.commit, "build", :ok, "url"}}).id
+      )
+
+    Process.put(:orchestration_job, job)
     Batcher.do_handle_cast({:status, {b.commit, "build", :ok, "url"}}, project.id)
+    Outbox.finish(job)
+    Process.delete(:orchestration_job)
     assert Repo.get!(Batch, b.id).state == :running
     refute Train.event?(cb, "promoted")
     landed(a, ca)

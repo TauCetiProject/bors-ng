@@ -25,7 +25,10 @@ defmodule BorsNG.Worker.CompletionDiagnostics do
       end
 
     record(batch, reason, %{
-      next_recheck_at: nil,
+      next_recheck_at:
+        if(max(batch.recovery_after || 0, batch.promotion_retry_at || 0) > 0,
+          do: max(batch.recovery_after || 0, batch.promotion_retry_at || 0) + 1
+        ),
       blockers: blockers,
       fallback_poll_at: Outbox.now() + batch.project.batch_poll_period_sec,
       predecessor_id: if(candidate, do: candidate.snapshot["speculative_predecessor_id"])
