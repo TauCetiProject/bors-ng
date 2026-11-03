@@ -167,9 +167,6 @@ Tests require a running PostgreSQL instance. The default test config expects:
 postgresql://postgres:Postgres1234@localhost/bors_test
 ```
 
-Set `BORS_DATABASE=mysql` and configure `config/test.exs` to run against MySQL
-instead.
-
 ```bash
 BORS_DATABASE=postgresql ELIXIR_ERL_OPTIONS="+fnu" mix test
 ```
@@ -194,7 +191,7 @@ The CI workflow is `.github/workflows/main.yml`. Key jobs:
 
 | Job | Elixir | OTP | Notes |
 |-----|--------|-----|-------|
-| test (matrix) | 1.17.3 | 27.3.4.13 | PostgreSQL + MySQL |
+| test (matrix) | 1.17.3 | 27.3.4.13 | PostgreSQL |
 | exfmt | 1.17.3 | 27.3.4.13 | `mix format --check-formatted` |
 | lint-test | — | — | Helm chart linting only |
 
