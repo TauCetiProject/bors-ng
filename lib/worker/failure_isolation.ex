@@ -132,6 +132,7 @@ defmodule BorsNG.Worker.FailureIsolation do
     hints =
       if is_map(hints) do
         case BorsNG.Worker.FailureDiagnostics.retry_suspects(candidate, hints) do
+          {:ok, prs, "recovered_parent_diagnostics"} -> Map.put(hints, "recovered_suspects", prs)
           {:ok, prs, "compiler_diagnostics"} -> Map.put(hints, "compiler_suspects", prs)
           {:ok, prs, "import_provider_hint"} -> Map.put(hints, "provider_suspects", prs)
           {:ok, prs, "bounded_provider_hint"} -> Map.put(hints, "bounded_provider_suspects", prs)
@@ -191,7 +192,11 @@ defmodule BorsNG.Worker.FailureIsolation do
       :fallback ->
         CandidateJournal.event(candidate, "failure_partition", "bors.failure_isolation", %{
           strategy: "deterministic_bisection",
-          reason: "unknown, ambiguous or non-narrowing diagnostics"
+          reason: "unknown, ambiguous or non-narrowing diagnostics",
+          groups:
+            Enum.map(Divider.split_groups(links), fn group ->
+              Enum.map(group, & &1.patch.pr_xref)
+            end)
         })
 
         if conflict &&
@@ -270,7 +275,7 @@ defmodule BorsNG.Worker.FailureIsolation do
           ) ++
             Enum.map(
               hints["compiler_suspects"] || hints["provider_suspects"] ||
-                hints["bounded_provider_suspects"] || [],
+                hints["bounded_provider_suspects"] || hints["recovered_suspects"] || [],
               &owner[&1]
             )
         end
@@ -293,6 +298,7 @@ defmodule BorsNG.Worker.FailureIsolation do
                hints["compiler_suspects"] != nil -> "compiler_diagnostics"
                hints["provider_suspects"] != nil -> "import_provider_hint"
                hints["bounded_provider_suspects"] != nil -> "bounded_provider_hint"
+               hints["recovered_suspects"] != nil -> "recovered_parent_diagnostics"
                true -> "missing_import"
              end}
 
@@ -301,8 +307,15 @@ defmodule BorsNG.Worker.FailureIsolation do
 
           dependencies_complete and length(components) > 1 and
               Enum.any?(components, &(length(&1) > 1)) ->
-            [first | rest] = Enum.sort_by(components, &{-length(&1), hd(&1)})
-            {[first, List.flatten(rest)], "dependency_component"}
+            # Connectivity without a located suspect is not evidence that the
+            # first component failed. Pack components evenly instead of peeling
+            # unrelated pairs off a failing remainder on every retry. A giant
+            # inferred component falls back to bundle-preserving bisection.
+            if Enum.max(Enum.map(components, &length/1)) > div(length(units) + 1, 2) do
+              {[], nil}
+            else
+              {balanced_components(components), "balanced_dependency_components"}
+            end
 
           true ->
             {[], nil}
@@ -328,6 +341,19 @@ defmodule BorsNG.Worker.FailureIsolation do
   end
 
   def partition(_, _, _), do: :fallback
+
+  defp balanced_components(components) do
+    {left, right} =
+      components
+      |> Enum.sort_by(&{-length(&1), hd(&1)})
+      |> Enum.reduce({[], []}, fn component, {left, right} ->
+        if length(left) <= length(right),
+          do: {left ++ component, right},
+          else: {left, right ++ component}
+      end)
+
+    [left, right]
+  end
 
   # This marker is added only after exact source and current binding checks.
   # Bundles remain units; imports do not enlarge this directly located suspect.

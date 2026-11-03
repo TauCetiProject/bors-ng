@@ -55,6 +55,13 @@ export class BorsContainer extends Container {
     GITHUB_CLIENT_SECRET: workerEnv.GITHUB_CLIENT_SECRET,
     GITHUB_INTEGRATION_ID: workerEnv.GITHUB_INTEGRATION_ID,
     GITHUB_INTEGRATION_PEM: workerEnv.GITHUB_INTEGRATION_PEM,
+    ZULIP_API_URL: workerEnv.ZULIP_API_URL ?? "",
+    ZULIP_BOT_EMAIL: workerEnv.ZULIP_BOT_EMAIL ?? "",
+    ZULIP_BOT_API_KEY: workerEnv.ZULIP_BOT_API_KEY ?? "",
+    ZULIP_CHANNEL_NAME: workerEnv.ZULIP_CHANNEL_NAME ?? "",
+    // Leave legacy per-PR batch notifications disabled unless explicitly set.
+    // Diagnostic incidents pass their own coalesced topic to the same helper.
+    ZULIP_TOPIC: workerEnv.ZULIP_TOPIC ?? "",
     COMMAND_TRIGGER: "bors",
     BORS_PROJECT: workerEnv.BORS_PROJECT ?? "TauCetiProject/TauCeti",
     BORS_BASE_BRANCH: workerEnv.BORS_BASE_BRANCH ?? "main",

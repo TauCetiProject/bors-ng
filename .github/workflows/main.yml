@@ -64,6 +64,8 @@ jobs:
           BORS_DATABASE: ${{ matrix.database }}
           MIX_ENV: test
 
+      - name: Test streaming failure diagnostics
+        run: python3 -m unittest discover -s test -p failure_diagnostics_test.py
       - run: mix test
         env:
           BORS_DATABASE: ${{ matrix.database }}

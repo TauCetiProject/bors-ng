@@ -87,6 +87,7 @@ defmodule BorsNG.Worker.Orchestration.Dispatcher do
   end
 
   def handle_continue(:start, state) do
+    BorsNG.Worker.FailureDiagnostics.resume_pending()
     Process.send_after(self(), :tick, 1000)
     {:noreply, state}
   end
@@ -153,21 +154,22 @@ defmodule BorsNG.Worker.Orchestration.Dispatcher do
       end
 
     # Separate bounded notification capacity cannot consume a mutation slot.
-    state = launch(Outbox.due(32, :mutation), state, cap, false)
-    launch(Outbox.due(32, :notification), state, 1, true)
+    state = launch(Outbox.due(32, :mutation), state, cap, :mutation)
+    state = launch(Outbox.due(32, :notification), state, 1, :notification)
+    launch(Outbox.due(32, :diagnostics), state, 1, :diagnostics)
   end
 
-  defp launch(jobs, state, cap, notification) do
+  defp launch(jobs, state, cap, lane) do
     Enum.reduce(jobs, state, fn job, state ->
       active =
         Enum.count(state.active, fn {_pid, {_ref, running}} ->
-          Outbox.notification?(running) == notification
+          Outbox.lane(running) == lane
         end)
 
       occupied =
         Enum.any?(state.active, fn {_pid, {_ref, running}} ->
           running.project_id == job.project_id and
-            Outbox.notification?(running) == notification
+            Outbox.lane(running) == lane
         end)
 
       # due/2 can return many rows for a repository that was free when read.
@@ -180,7 +182,7 @@ defmodule BorsNG.Worker.Orchestration.Dispatcher do
 
           {:ok, claimed} ->
             key =
-              if notification, do: {:notification, claimed.project_id}, else: claimed.project_id
+              if lane == :mutation, do: claimed.project_id, else: {lane, claimed.project_id}
 
             {:ok, pid} = Worker.get(key)
             ref = Process.monitor(pid)

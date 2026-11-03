@@ -13,23 +13,38 @@ defmodule BorsNG.Worker.Batcher.Divider do
   # An unbundled patch is a unit of its own.
 
   def split_batch(patch_links, %Batch{project: project, into_branch: into}) do
+    case split_groups(patch_links) do
+      [] ->
+        :failed
+
+      groups ->
+        Enum.each(groups, &clone_batch(&1, project.id, into, "bisection"))
+        :retrying
+    end
+  end
+
+  def split_groups(patch_links) do
     units = group_units(patch_links)
 
-    if Enum.count(units) > 1 do
-      {single_units, divisible_units} =
-        Enum.split_with(units, &unit_is_single?/1)
+    if length(units) > 1 do
+      {single, divisible} = Enum.split_with(units, &unit_is_single?/1)
 
-      Enum.each(single_units, &clone_batch(&1, project.id, into, "bisection"))
+      halves =
+        case divisible do
+          [] ->
+            []
 
-      case divisible_units do
-        [] -> :ok
-        [unit] -> clone_batch(unit, project.id, into, "bisection")
-        units -> bisect(units, project.id, into)
-      end
+          [unit] ->
+            [unit]
 
-      :retrying
+          many ->
+            {lo, hi} = Enum.split(many, div(length(many), 2))
+            [Enum.concat(lo), Enum.concat(hi)]
+        end
+
+      single ++ halves
     else
-      :failed
+      []
     end
   end
 

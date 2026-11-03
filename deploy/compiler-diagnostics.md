@@ -17,19 +17,29 @@ The durable `failure_diagnostics` event binds candidate ID, generation, immutabl
 base, ordered member digest, tested commit, workflow, run ID/attempt and failed
 job IDs. Run creation must follow the generation's construction start. A stale
 head, generation, run attempt or job cannot reuse another observation. The
-latest trusted failure classification selects the matching observation. Complete
-and unavailable results both survive restart and suppress repeated downloads for
-the same identity. A crash before observation persistence may repeat this bounded
-read; native sealed retry creation remains idempotent.
+latest trusted failure classification selects the matching observation. Successful observations survive restart and suppress repeated downloads for the
+same identity. Incomplete collection is retried independently through the existing
+dedicated diagnostic outbox lane. A parser-version change permits reconsideration of an
+incompatible record. Recovery appends evidence; it cannot mutate a superseded
+generation or change queue intent. Native sealed retry creation remains idempotent.
 
-The trusted Python helper reads at most two exact job logs, with one GitHub
-request and at most one storage request per job. It strips credentials before an
-allowlisted HTTPS log-storage redirect and follows no further redirect. Limits:
-16 MiB per log, nine seconds for the entire helper, 128 diagnostic records,
-8 KiB per input line and 512 characters per source path/module. Invalid UTF-8,
-truncation, API errors, oversized logs or parser limits produce unavailable
-evidence. Raw logs, arbitrary log messages and signed URLs are never journaled.
-The event records byte counts and elapsed/CPU milliseconds for available logs.
+The trusted Python helper streams at most two exact job logs. There is no total
+log-byte or observation-count rejection. Reads use fixed-size chunks and an
+incremental UTF-8 decoder; deduplication spills to a temporary SQLite file. The
+reader checks response completeness and removes temporary state on exit. One
+record may buffer at most 1 MiB; an unsupported larger record makes coverage
+explicitly incomplete. Existing supported path/module and source-location syntax
+remain unchanged. Credentials are stripped before an allowlisted HTTPS storage
+redirect; a second redirect is rejected.
+
+A normal staging observation gets an eight-second collection opportunity. A
+failed read does not hold the staging lane waiting for recovery: recovery retries
+receive a thirty-second opportunity, with transport inactivity timeouts and
+a process alarm tied to the requested budget plus one second. Timeout, missing/forbidden logs, unexpected redirects,
+truncation, decoding failure, unsupported records and collector/parser failures
+have separate reason codes. Observations include bytes read, timing, parser
+version, source and the existing immutable binding. Raw content, exception text,
+credentials and signed storage URLs never enter the journal.
 
 ANSI escapes and GitHub timestamps are stripped. Only anchored Lean/Lake source
 error locations and the audit driver's specific duplicate-declaration message
@@ -89,8 +99,8 @@ The reporter obtains locations from declaration origin/range metadata in the
 existing exact candidate linter environment. It never infers an owner from the
 declaration's name. The raw `LINT-ENV-ORIGINS` driver output is not consumed here.
 
-The optional envelope is capped at 1 MiB and 128 findings, within the existing
-16 MiB log/128 observation/time bounds. Duplicate envelopes or JSON keys,
+The optional envelope must fit the 1 MiB record buffer. Findings are deduplicated
+without a total finding-count limit. Duplicate envelopes or JSON keys,
 malformed/incomplete/truncated records, unsupported fields/versions, unsafe paths
 and invalid ranges make log evidence unavailable. Unknown findings retain empty
 paths, forcing the existing mapper to retain deterministic fallback rather than
@@ -134,16 +144,16 @@ The same retry-only parser recognizes Lake's final, anchored
 module targets to project source paths without guessing warning positions or
 declaration origins. Warnings alone produce no observations. Missing/duplicate
 headers, truncated or empty blocks, unsupported/mixed external targets, facets,
-unsafe paths or more than 128 observations invalidate that fallback evidence.
+unsafe paths invalidate that fallback evidence. Repeated targets are deduplicated
+without a target-count rejection.
 
-The target summary is a fallback only. The parser first scans the entire bounded
+The target summary is a fallback only. The parser scans the entire streamed
 log for precise source/audit observations and all environment-linter records.
 When any such records exist, it retains those records and does not consume the
 optional summary. A malformed, truncated or oversized cascade cannot erase a
 precise finding or add unrelated retry owners. Unknown environment origins still
 retain empty paths and force the mapper's conservative fallback; malformed or
-duplicate environment envelopes still make evidence unavailable. The 16 MiB log,
-128 observation, path, line and total-time bounds are unchanged. Warning-only
+duplicate environment envelopes still make evidence unavailable. The total log size and number of observations do not decide availability. Warning-only
 failures still use the strict complete target-summary fallback.
 
 This covers the real batch82548 failure in
@@ -174,7 +184,7 @@ produces one deduplicated compiler path before #47 (`2210cde`), but #47 raises
 `observation_limit` and discards that useful path. Journal event2981 records
 unavailable diagnostics and event2983 selects a dependency-component retry.
 
-The correction restores the primary path without increasing any limit or
+That historical correction restored the primary path without increasing its then-current limits or
 promoting cascading bad imports into missing-source or stacking evidence. On the
 same complete frozen log, local parsing measured 68 ms before #47, 66 ms before
 failing in deployed #47, and 63 ms after the correction; these are single warm
@@ -200,3 +210,59 @@ approvals and unknown global lint findings retaining fallback. Natural productio
 collection/partition verification remains the coordinator's responsibility after
 normal required review, full CI and deployment; the TauCeti reporter's human
 review and new trusted dispatch requirements are separate and unchanged.
+
+
+## Compact console output and raw artifacts
+
+TauCetiTools suppresses routine successful cache-download records and their path
+and URL continuations, retaining transfer counts, lookup context, elapsed time,
+errors, warnings, cache misses, retry notices and fallback results. The build
+console shows a counted sample of cascading bad imports and large final
+failed-target lists. Lake's exit status, including `--iofail`, remains the build
+verdict even if filtering or artifact preparation fails.
+
+The explicit `TAUCETI-DIAGNOSTICS-SAMPLED` marker cannot be treated as a complete
+failed-target list. Precise compiler/audit/linter locations still take precedence.
+Without those locations the collector fetches the exact run/attempt's
+`ci-failure-logs-<run>-<attempt>` artifact and streams its raw `lake-build.log.gz`.
+The authenticated artifact listing must identify the same workflow run. The
+collector reads only that named ZIP member and never extracts arbitrary paths.
+Missing, ambiguous, expired or invalid artifacts produce incomplete coverage.
+Trusted host preparation refuses candidate-planted symlinks and non-regular files;
+artifact contents remain untrusted scheduling hints.
+
+Deploy this consumer before installing the console sampling and raw-log upload
+in TauCeti. The consumer also supports existing unsummarized oversized logs.
+
+## Diagnostic incidents and queue progress
+
+The batch page and statistics endpoint expose collection coverage and fallback
+isolation. Diagnostic incidents and delivery receipts append to the existing
+candidate journal. A first degradation queues an immediate Zulip alert; related
+retries share their ancestry/cause incident and post count updates at a modest
+cadence. Recovery posts a notifying follow-up in the same topic. Alert records contain batch
+links, safe reason codes and counts, never raw candidate output or credentials.
+
+The Cloudflare container forwards `ZULIP_API_URL`, `ZULIP_BOT_EMAIL`,
+`ZULIP_BOT_API_KEY` and `ZULIP_CHANNEL_NAME`. The diagnostic topic is `bors
+diagnostics`. Leave `ZULIP_TOPIC` unset to keep legacy per-PR batch notifications
+disabled. A missing configuration, rejected HTTP response or unsuccessful Zulip
+response cannot count as delivered. Failed delivery remains visible and retries
+with backoff; it does not require operator acknowledgement.
+
+Diagnostic collection has its own single-worker capacity, separate from both
+mutation and notice/projection delivery. Collection retries stop after seven
+days. Deterministic parser failures wait for a parser-version change; startup
+requeues retained incompatible observations instead of polling hourly. Diagnostic retry/alert
+backoff cannot occupy the ordered notice/projection FIFO head. Existing status
+projection ordering remains intact. Late collection only appends still-bound
+historical evidence; it does not rerun CI, withdraw approvals or edit source.
+A later failed child may use recovered immediate-parent locations only as a
+retry grouping hint, after rechecking run binding, base, membership and heads.
+This policy cannot authorize provisional repair or quarantine.
+
+Without a located suspect, the planner packs inferred components into balanced
+halves. A dominant inferred component falls back to deterministic bisection of
+mandatory atomic bundle units. It does not repeatedly peel an unrelated pair off
+a large failing remainder. Precise suspect partitions retain their existing
+provider, bundle and proof-authority checks.

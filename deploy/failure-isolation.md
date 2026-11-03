@@ -70,7 +70,9 @@ only hints matching the actual constructed commit/tree are consumed.
 Retry selection uses atomic bundle units, immutable head identity, import provider
 relationships and shared changed paths. Missing-import components are tested apart
 from unrelated units; structured local conflicts isolate the offending unit;
-otherwise a connected component can be tested apart from the rest. Each diagnostic
+without a located suspect, inferred components are packed into balanced halves.
+A dominant inferred component falls back to deterministic bisection of atomic
+bundle units. Each diagnostic
 partition strictly shrinks the failed unit set and retains every member exactly
 once. A single-only member takes its whole bundle into a separate retry. Unusable,
 ambiguous or non-narrowing evidence falls back to deterministic bundle-aware

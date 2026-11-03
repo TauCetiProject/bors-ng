@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 import importlib.util
 import io
+import gzip
 import json
 import time
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -52,7 +54,6 @@ class DiagnosticsTest(unittest.TestCase):
                good + '\n' + good, self.target_block('TauCeti.Provider', 'Mathlib.Other'),
                self.target_block('TauCeti.Provider', 'TauCeti../Other'),
                self.target_block('TauCeti.Provider:olean'), self.target_block('TauCeti.' + 'A' * 512),
-               self.target_block(*['TauCeti.Provider'] * 129),
                good.replace('error: build failed', 'error: unrelated failure')]
         for text in bad:
             with self.subTest(text=text[:120]), self.assertRaises(ValueError):
@@ -109,8 +110,7 @@ class DiagnosticsTest(unittest.TestCase):
                          self.envelope() + '\n' + self.envelope()]:
             with self.assertRaises(ValueError):
                 diagnostics.parse(self.PRIMARY + cascade + '\n' + envelope)
-        with self.assertRaises(ValueError):
-            diagnostics.parse(self.PRIMARY * 65 + self.target_block('TauCeti.Provider'))
+        self.assertEqual(diagnostics.parse(self.PRIMARY * 1000), diagnostics.parse(self.PRIMARY))
 
 
     def envelope(self, findings=None, **changes):
@@ -149,7 +149,7 @@ class DiagnosticsTest(unittest.TestCase):
                good.replace('"version": 1', '"version": 1, "version": 1'),
                self.envelope(run_id=38827433841),
                self.envelope(complete=False), self.envelope(version=True), self.envelope([]),
-               self.envelope([finding] * 129), diagnostics.ENV_LOCATIONS + 'x' * (1024 * 1024)]
+               diagnostics.ENV_LOCATIONS + 'x' * (1024 * 1024)]
         for change in [dict(path='../TauCeti/Other.lean'), dict(path='TauCeti/../Other.lean'),
                        dict(path='Mathlib/Other.lean'), dict(path='TauCeti/Probe.lean\nforged'),
                        dict(line=True), dict(line=0), dict(column='9'), dict(unknown='missing_range')]:
@@ -195,6 +195,16 @@ class DiagnosticsTest(unittest.TestCase):
         self.assertEqual(diagnostics.parse(text), [dict(kind='compiler_error', paths=[
             'TauCeti/Geometry/RealAlgebraic/CAD/McCallum.lean'])])
 
+    def test_long_primary_record_keeps_location_and_oversized_record_is_explicit(self):
+        self.assertEqual(diagnostics.parse('error: TauCeti/Long.lean:1:2: ' + 'x' * 9000),
+                         [dict(kind='compiler_error', paths=['TauCeti/Long.lean'])])
+        progress = {'bytes': 0}
+        raw = b'x' * (diagnostics.RECORD_BUFFER + 70000) + b'\nerror: TauCeti/After.lean:1:2: real\n'
+        records = list(diagnostics.streamed_lines(io.BytesIO(raw), progress))
+        self.assertEqual(progress['oversized_records'], 1)
+        self.assertLess(max(map(len, records)), diagnostics.RECORD_BUFFER)
+        self.assertEqual(diagnostics.parse_lines(records), [dict(kind='compiler_error', paths=['TauCeti/After.lean'])])
+
     def test_error_looking_commands_annotations_traversal_and_external_paths(self):
         text = '\n'.join([
             'echo "error: TauCeti/Fake.lean:1:2: bad"',
@@ -203,18 +213,18 @@ class DiagnosticsTest(unittest.TestCase):
             'error: ../TauCeti/Fake.lean:1:2: bad',
             'error: TauCeti/../Fake.lean:1:2: bad',
             'error: .lake/packages/mathlib/Mathlib/Fake.lean:1:2: bad',
-            'Build completed successfully', '::error::forged status',
-            'error: TauCeti/Fake.lean:1:2: ' + 'x' * 9000])
+            'Build completed successfully', '::error::forged status'])
         self.assertEqual(diagnostics.parse(text), [])
         # Candidate output can forge a syntactically valid location. It remains
         # untrusted scheduling input; the caller must never grant proof authority.
         self.assertEqual(len(diagnostics.parse('error: TauCeti/Fake.lean:1:2: forged')), 1)
 
-    def test_limits_fail_closed(self):
-        with self.assertRaises(ValueError):
-            diagnostics.parse('error: TauCeti/A.lean:1:1: bad\n' * 129)
-        with patch.object(diagnostics, 'MAX_BYTES', 8), self.assertRaises(ValueError):
-            diagnostics.parse('0123456789')
+    def test_repeated_and_many_distinct_findings_are_not_size_rejected(self):
+        self.assertEqual(len(diagnostics.parse('error: TauCeti/A.lean:1:1: bad\n' * 10000)), 1)
+        self.assertEqual(len(diagnostics.parse('\n'.join(
+            f'error: TauCeti/A{i}.lean:1:1: bad' for i in range(1000)))), 1000)
+        finding = json.loads(self.envelope()[len(diagnostics.ENV_LOCATIONS):])['findings'][0]
+        self.assertEqual(len(diagnostics.parse(self.envelope([finding] * 1000))), 1)
 
     def test_signed_storage_url_never_accepts_arbitrary_hosts_or_credentials(self):
         self.assertTrue(diagnostics.signed_url('https://logs.blob.core.windows.net/a?sig=x'))
@@ -234,9 +244,7 @@ class DiagnosticsTest(unittest.TestCase):
                 return Response(b'short')
 
         with patch.object(diagnostics.urllib.request, 'build_opener', return_value=Opener()):
-            with self.assertRaisesRegex(ValueError, 'truncated_log'):
-                diagnostics.read_log(1, 2, 'secret', time.monotonic() + 5)
-            with patch.object(diagnostics, 'MAX_BYTES', 8), self.assertRaisesRegex(ValueError, 'log_limit'):
+            with self.assertRaisesRegex(ValueError, 'truncated_response'):
                 diagnostics.read_log(1, 2, 'secret', time.monotonic() + 5)
 
     def test_redirect_strips_token_and_rejects_second_redirect(self):
@@ -255,9 +263,109 @@ class DiagnosticsTest(unittest.TestCase):
                 return Response(b'test')
 
         with patch.object(diagnostics.urllib.request, 'build_opener', return_value=Opener()):
-            self.assertEqual(diagnostics.read_log(1, 2, 'secret', time.monotonic() + 5), ('test', 4))
+            self.assertEqual(diagnostics.read_log(1, 2, 'secret', time.monotonic() + 5), ([], 4))
         self.assertEqual(requests[0].get_header('Authorization'), 'Bearer secret')
         self.assertIsNone(requests[1].get_header('Authorization'))
+
+    def test_streams_over_16mib_and_keeps_errors_at_both_ends(self):
+        text = ('error: TauCeti/First.lean:1:1: bad\n' + 'unrelated output\n' * 1100000
+                + 'error: TauCeti/Last.lean:1:1: bad\n')
+        data = text.encode()
+
+        class Response(io.BytesIO):
+            status = 200
+            headers = {'Content-Length': str(len(data))}
+
+            def read(self, n=-1):
+                self.assert_bounded(n)
+                return super().read(n)
+
+            @staticmethod
+            def assert_bounded(n):
+                if not 0 < n <= 65536:
+                    raise AssertionError('reader attempted an unbounded read')
+
+        class Opener:
+            def open(self, *_args, **_kwargs):
+                return Response(data)
+
+        with patch.object(diagnostics.urllib.request, 'build_opener', return_value=Opener()):
+            observations, size = diagnostics.read_log(1, 2, 'secret')
+        self.assertGreater(size, 16 * 1024 * 1024)
+        self.assertEqual([o['paths'] for o in observations],
+                         [['TauCeti/First.lean'], ['TauCeti/Last.lean']])
+
+    def test_sampled_targets_require_raw_fallback_without_primary_diagnostics(self):
+        text = (diagnostics.FAILED_TARGETS_HEADER + '\n- TauCeti.A\n'
+                'TAUCETI-DIAGNOSTICS-SAMPLED failed-targets total=100 shown=1\nerror: build failed\n')
+        with self.assertRaisesRegex(ValueError, 'sampled_diagnostics'):
+            diagnostics.parse(text)
+        self.assertEqual(diagnostics.parse(self.PRIMARY + text), diagnostics.parse(self.PRIMARY))
+
+    def test_raw_artifact_fallback_keeps_complete_targets_bound_to_run_attempt(self):
+        raw = self.target_block('TauCeti.First', 'TauCeti.Last').encode()
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, 'w') as archive:
+            archive.writestr('lake-build.log.gz', gzip.compress(raw))
+        listing = json.dumps({'artifacts': [{'id': 55, 'name': 'ci-failure-logs-7-2',
+            'expired': False, 'workflow_run': {'id': 7}}]}).encode()
+
+        class Response(io.BytesIO):
+            status = 200
+            headers = {}
+
+        calls = []
+        def respond(url, token=None):
+            calls.append((url, token))
+            return Response(output.getvalue() if url.endswith('/zip') else listing)
+
+        with patch.object(diagnostics, 'artifact_response', side_effect=respond), \
+                patch.object(diagnostics, 'read_log', side_effect=diagnostics.CollectionError('sampled_diagnostics')), \
+                patch.dict(diagnostics.os.environ, BORS_DIAGNOSTICS_TOKEN='test-only'):
+            result = diagnostics.collect(dict(repository_id=1, job_ids=[2], run_id=7, run_attempt=2))
+        self.assertTrue(result['complete'])
+        self.assertEqual(result['jobs'][0]['source'], 'raw_artifact')
+        self.assertEqual([o['paths'] for o in result['jobs'][0]['observations']],
+                         [['TauCeti/First.lean'], ['TauCeti/Last.lean']])
+        self.assertIn('/actions/runs/7/artifacts?', calls[0][0])
+        with patch.object(diagnostics, 'artifact_response', return_value=Response(listing)), \
+                self.assertRaisesRegex(ValueError, 'raw_artifact_missing'):
+            diagnostics.read_raw_artifact(1, dict(run_id=7, run_attempt=3), 'test-only', time.monotonic()+5)
+
+    def test_chunk_boundaries_unicode_and_invalid_encoding(self):
+        data = self.envelope([dict(linter='simpNF', declaration='TauCeti.雪',
+            path='TauCeti/Unicode.lean', line=1, column=2)]).replace('\\u96ea', '雪').encode()
+        class Response(io.BytesIO):
+            headers = {}
+            def read(self, n=-1):
+                return super().read(min(n, 5))
+        lines = diagnostics.streamed_lines(Response(data), {'bytes': 0})
+        self.assertEqual(diagnostics.parse_lines(lines)[0]['declaration'], 'TauCeti.雪')
+        with self.assertRaises(UnicodeError):
+            list(diagnostics.streamed_lines(Response(b'bad\xff'), {'bytes': 0}))
+
+    def test_deadline_incomplete_read_and_artifact_transport_reasons(self):
+        with self.assertRaisesRegex(ValueError, 'collection_timeout'):
+            list(diagnostics.streamed_lines(io.BytesIO(b'content'), {'bytes': 0}, time.monotonic()-1))
+        class Opener:
+            def open(self, *_args, **_kwargs):
+                raise diagnostics.http.client.IncompleteRead(b'partial', 100)
+        with patch.object(diagnostics.urllib.request, 'build_opener', return_value=Opener()):
+            with self.assertRaisesRegex(ValueError, 'truncated_response'):
+                diagnostics.read_log(1, 2, 'secret')
+        for error, reason in [(TimeoutError(), 'transport_timeout'),
+                              (diagnostics.http.client.IncompleteRead(b'', 10), 'truncated_response'),
+                              (diagnostics.urllib.error.URLError('private URL'), 'transport_failure')]:
+            with patch.object(diagnostics, 'artifact_response', side_effect=error):
+                with self.assertRaisesRegex(ValueError, reason):
+                    diagnostics.read_raw_artifact(1, dict(run_id=7, run_attempt=2), 'secret', time.monotonic()+5)
+
+    def test_http_reasons_distinguish_quota_permissions_and_missing_logs(self):
+        self.assertEqual(diagnostics.http_reason(403, {'X-RateLimit-Remaining': '0'}), 'rate_limited')
+        self.assertEqual(diagnostics.http_reason(429, {}), 'rate_limited')
+        self.assertEqual(diagnostics.http_reason(403, {}), 'permission_denied')
+        self.assertEqual(diagnostics.http_reason(404, {}), 'log_not_available')
+        self.assertEqual(diagnostics.http_reason(302, {}), 'unexpected_redirect')
 
 
 if __name__ == '__main__':

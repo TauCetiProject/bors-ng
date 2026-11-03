@@ -545,13 +545,55 @@ defmodule BorsNG.Worker.FailureIsolationTest do
                Enum.sort_by(data["members"], & &1["link_id"])
 
       if id == 232 do
-        assert {:ok, baseline, "dependency_component"} =
+        assert {:ok, baseline, "balanced_dependency_components"} =
                  FailureIsolation.partition(links, data["hints"], nil)
 
-        assert prs(groups) == prs(baseline)
-        assert prs(groups) == data["recorded_baseline"]["details"]["groups"]
+        assert Enum.sort(Enum.map(List.flatten(baseline), & &1.id)) ==
+                 Enum.sort(Enum.map(links, & &1.id))
+
+        assert Enum.max(Enum.map(baseline, &length/1)) <= div(length(links) + 1, 2)
       end
     end
+  end
+
+  test "unlocated dependency pairs do not peel two PRs off a 62-member failure", c do
+    links =
+      Enum.map(1..62, fn n ->
+        %LinkPatchBatch{
+          id: n,
+          patch_id: n,
+          head_sha: "head#{n}",
+          reviewer: "reviewer",
+          patch: %Patch{pr_xref: n, commit: "head#{n}"}
+        }
+      end)
+
+    hints = %{
+      c.hints
+      | "changed_files" =>
+          Enum.map(
+            links,
+            &%{
+              "pr" => &1.patch.pr_xref,
+              "head_sha" => &1.head_sha,
+              "paths" => ["TauCeti/File#{&1.patch.pr_xref}.lean"]
+            }
+          ),
+        "import_edges" => [[1, 2], [3, 4], [5, 6], [7, 8], [9, 10]]
+    }
+
+    assert {:ok, groups, "balanced_dependency_components"} =
+             FailureIsolation.partition(links, hints, nil)
+
+    assert Enum.map(groups, &length/1) == [31, 31]
+    assert Enum.sort(Enum.map(List.flatten(groups), & &1.id)) == Enum.to_list(1..62)
+
+    assert :fallback =
+             FailureIsolation.partition(
+               links,
+               Map.put(hints, "import_edges", Enum.map(1..50, &[&1, &1 + 1])),
+               nil
+             )
   end
 
   for {kind, reason} <- [
@@ -1249,6 +1291,102 @@ defmodule BorsNG.Worker.FailureIsolationTest do
     assert :unavailable = FailureDiagnostics.suspects(c.candidate, c.hints)
   end
 
+  test "transient diagnostics recover without changing queue state or accepting a new generation",
+       c do
+    alias BorsNG.Worker.FailureDiagnostics
+    {batch, evidence} = terminal(c)
+
+    Repo.update!(
+      Batch.changeset(c.batch, %{commit: batch.commit, base_sha: batch.base_sha, state: :error})
+    )
+
+    FailureDiagnostics.observe(batch, evidence, :conn, fn _, _ ->
+      %{"complete" => false, "reason" => "transport_timeout", "parser_version" => "streaming-v2"}
+    end)
+
+    before = Repo.all(Patch) |> Enum.map(&{&1.id, &1.commit, &1.queue_approval})
+
+    assert :ok =
+             FailureDiagnostics.recover(c.candidate.id, batch.id, evidence, fn _, [200] ->
+               Map.put(log_result(["TauCeti/File3.lean"]), "parser_version", "streaming-v2")
+             end)
+
+    observations =
+      Repo.all(from(e in CandidateEvent, where: e.kind == "failure_diagnostics", order_by: e.id))
+
+    assert length(observations) == 2
+    assert List.last(observations).details["result"]["complete"] == true
+    assert Repo.get!(Batch, batch.id).state == :error
+    assert before == Repo.all(Patch) |> Enum.map(&{&1.id, &1.commit, &1.queue_approval})
+    FailureIsolation.classified(batch, "candidate_failure", evidence)
+
+    members =
+      Enum.map(
+        c.candidate.snapshot["members"],
+        &Map.put(&1, "parent_candidate_id", c.candidate.id)
+      )
+
+    child = %{
+      c.candidate
+      | id: c.candidate.id + 100_000,
+        snapshot: Map.put(c.candidate.snapshot, "members", members)
+    }
+
+    assert {:ok, [3], "recovered_parent_diagnostics"} =
+             FailureDiagnostics.retry_suspects(child, c.hints)
+
+    stale = %{
+      child
+      | snapshot: put_in(child.snapshot, ["members", Access.at(2), "head_sha"], "new-head")
+    }
+
+    assert :unavailable = FailureDiagnostics.retry_suspects(stale, c.hints)
+    other_base = %{child | snapshot: Map.put(child.snapshot, "base_sha", "new-base")}
+    assert :unavailable = FailureDiagnostics.retry_suspects(other_base, c.hints)
+
+    assert :ok =
+             FailureDiagnostics.recover(c.candidate.id + 1000, batch.id, evidence, fn _, _ ->
+               flunk("a different candidate generation read old logs")
+             end)
+  end
+
+  test "parser incompatibility waits for a version change instead of polling", c do
+    alias BorsNG.Worker.FailureDiagnostics
+    {batch, evidence} = terminal(c)
+
+    Repo.update!(
+      Batch.changeset(c.batch, %{commit: batch.commit, base_sha: batch.base_sha, state: :error})
+    )
+
+    FailureDiagnostics.observe(batch, evidence, :conn, fn _, _ ->
+      %{"complete" => false, "reason" => "parser_failure", "parser_version" => "streaming-v2"}
+    end)
+
+    assert :ok =
+             FailureDiagnostics.recover(c.candidate.id, batch.id, evidence, fn _, _ ->
+               flunk("same parser polled")
+             end)
+
+    # A retained older parser observation becomes eligible after deployment.
+    Repo.delete_all(from(e in CandidateEvent, where: e.kind == "failure_diagnostics"))
+
+    FailureDiagnostics.observe(batch, evidence, :conn, fn _, _ ->
+      %{"complete" => false, "reason" => "parser_failure", "parser_version" => "streaming-v1"}
+    end)
+
+    assert :ok =
+             FailureDiagnostics.recover(c.candidate.id, batch.id, evidence, fn _, _ ->
+               Map.put(log_result(["TauCeti/File3.lean"]), "parser_version", "streaming-v2")
+             end)
+
+    assert Repo.all(
+             from(e in CandidateEvent, where: e.kind == "failure_diagnostics", order_by: e.id)
+           )
+           |> List.last()
+           |> Map.get(:details)
+           |> get_in(["result", "complete"])
+  end
+
   test "compiler and audit suspects preserve bundles, provider groups and every offender", c do
     [a, b, d, e] = c.links
     a = %{a | patch: %{a.patch | bundle_id: 7}}
@@ -1425,10 +1563,8 @@ defmodule BorsNG.Worker.FailureIsolationTest do
     assert {:ok, groups, "missing_import"} = FailureIsolation.partition(c.links, hints, nil)
     assert prs(groups) == [[1, 3, 4], [2]]
 
-    assert {:ok, groups, "dependency_component"} =
+    assert :fallback =
              FailureIsolation.partition(c.links, Map.put(hints, "missing_imports", []), nil)
-
-    assert prs(groups) == [[1, 3, 4], [2]]
   end
 
   test "a structured conflict separates the offending bundle without breaking it", c do
@@ -1827,7 +1963,9 @@ defmodule BorsNG.Worker.FailureIsolationTest do
 
         assert :retrying = FailureIsolation.split(c.links, batch, nil, conn)
         refute Repo.exists?(from(e in CandidateEvent, where: e.kind == "provisional_repair"))
+
         assert Repo.aggregate(BorsNG.Database.OrchestrationJob, :count, :id) == 0
+
         children = Repo.all(from(b in Batch, where: b.id != ^batch.id, order_by: b.id))
         # The manual fixture changes only Patch, leaving its queued approval
         # unchanged. That now invalidates candidate membership, so historical
@@ -2006,7 +2144,15 @@ defmodule BorsNG.Worker.FailureIsolationTest do
         end
 
         assert :retrying = FailureIsolation.split(c.links, batch, nil, conn)
-        assert Repo.aggregate(BorsNG.Database.OrchestrationJob, :count, :id) == 0
+
+        assert Repo.aggregate(
+                 from(j in BorsNG.Database.OrchestrationJob,
+                   where: j.kind != "diagnostic_alert"
+                 ),
+                 :count,
+                 :id
+               ) == 0
+
         refute Repo.exists?(from(e in CandidateEvent, where: e.kind == "provisional_repair"))
         children = Repo.all(from(b in Batch, where: b.id != ^batch.id))
 

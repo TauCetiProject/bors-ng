@@ -24,7 +24,7 @@ defmodule BorsNG.Worker.Orchestration.Worker do
     end
   end
 
-  def init({:notification, project_id}) do
+  def init({lane, project_id}) when lane in [:notification, :diagnostics] do
     # Advisory work has its own serialized executor. It cannot run Batcher
     # mutations; comments/statuses use one bounded API attempt per operation.
     Process.put(:orchestration_notification, true)
@@ -43,7 +43,11 @@ defmodule BorsNG.Worker.Orchestration.Worker do
     started = System.monotonic_time(:millisecond)
 
     if Process.get(:orchestration_notification, false),
-      do: Process.put(:orchestration_advisory_deadline, started + 8_000)
+      do:
+        Process.put(
+          :orchestration_advisory_deadline,
+          started + if(job.kind == "diagnostics", do: 35_000, else: 8_000)
+        )
 
     inserted = job.inserted_at |> DateTime.from_naive!("Etc/UTC") |> DateTime.to_unix()
 
@@ -101,6 +105,12 @@ defmodule BorsNG.Worker.Orchestration.Worker do
 
             {"notice", {conn, pr, body, marker}} ->
               deliver_notice(job, conn, pr, body, marker)
+
+            {"diagnostics", {candidate_id, batch_id, evidence}} ->
+              BorsNG.Worker.FailureDiagnostics.recover(candidate_id, batch_id, evidence)
+
+            {"diagnostic_alert", incident} ->
+              BorsNG.Worker.DiagnosticReporting.deliver(project_id, incident)
           end
         end
 
@@ -108,6 +118,9 @@ defmodule BorsNG.Worker.Orchestration.Worker do
       rescue
         error -> {:error, error.__struct__}
       catch
+        :throw, {:diagnostic_retry, reason} ->
+          {:error, {:diagnostic_retry, reason}}
+
         :throw, {:cancellation_retry, reason} ->
           {:error, reason}
 
