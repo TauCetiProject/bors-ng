@@ -1586,12 +1586,16 @@ defmodule BorsNG.Worker.Batcher do
 
     if parent = Train.predecessor(project, batches, conn) do
       {_state, ordered} = sort_batches(batches, :successor)
+      blocked = Train.blocked_successor_heads(parent)
 
       waiting =
-        Enum.find(
-          ordered,
-          &waiting_eligible?(%{&1 | project: project}, DateTime.to_unix(DateTime.utc_now()))
-        )
+        Enum.find(ordered, fn waiting ->
+          waiting_eligible?(%{waiting | project: project}, DateTime.to_unix(DateTime.utc_now())) and
+            Train.compatible_successor?(
+              blocked,
+              Repo.all(LinkPatchBatch.from_batch(waiting.id))
+            )
+        end)
 
       if waiting do
         links = Repo.all(LinkPatchBatch.from_batch(waiting.id))

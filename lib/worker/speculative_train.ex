@@ -140,9 +140,10 @@ defmodule BorsNG.Worker.SpeculativeTrain do
     )
   end
 
-  # One successor per generation bounds wasted work even if a failing root
-  # repeatedly receives green/red/stale notifications. Bundles remain in B's
-  # existing atomic queue batch; predecessor members are never cloned into it.
+  # At most one dispatched successor per generation. A proven local conflict
+  # may try another group without waiting for the parent to land; every such
+  # construction still consumes the lifetime budget. No ambiguous dispatch is
+  # retried, and bundles remain in their existing atomic queue batches.
   def predecessor(project, batches, conn) do
     running = Enum.filter(batches, &(&1.state == :running))
 
@@ -152,7 +153,7 @@ defmodule BorsNG.Worker.SpeculativeTrain do
          candidate when not is_nil(candidate) <- CandidateJournal.current(parent),
          true <- tracked?(candidate),
          true <- valid?(candidate),
-         false <- event?(candidate, "successor_reserved"),
+         true <- successor_available?(candidate),
          false <- Outbox.pending?(project.id, "dispatch:#{parent.id}"),
          %{commit: main} <- GitHub.get_branch!(conn, parent.into_branch),
          true <- main == parent.base_sha,
@@ -164,6 +165,62 @@ defmodule BorsNG.Worker.SpeculativeTrain do
       _ -> nil
     end
   end
+
+  defp successor_attempts(parent) do
+    Repo.all(
+      from(e in CandidateEvent,
+        where: e.candidate_id == ^parent.id and e.kind == "successor_reserved",
+        order_by: e.id
+      )
+    )
+    |> Enum.map(fn event ->
+      case event.details["candidate_id"] do
+        id when is_integer(id) -> Repo.get(Candidate, id)
+        _ -> nil
+      end
+    end)
+  end
+
+  defp successor_available?(parent),
+    do: Enum.all?(successor_attempts(parent), &(local_conflict_head(parent, &1) != nil))
+
+  defp local_conflict_head(_parent, nil), do: nil
+
+  defp local_conflict_head(parent, child) do
+    batch = Repo.get(Batch, child.batch_id)
+    events = Repo.all(from(e in CandidateEvent, where: e.candidate_id == ^child.id))
+    conflict = Enum.find(events, &(&1.kind == "local_conflict"))
+
+    stopped =
+      Enum.any?(events, fn e ->
+        e.kind == "construction_stopped" and e.details["state"] == "conflict"
+      end)
+
+    published =
+      Enum.any?(
+        events,
+        &(&1.kind in ["constructed", "staging_pushed", "dispatch_requested", "dispatched"])
+      )
+
+    if child.snapshot["speculative_predecessor_id"] == parent.id and not is_nil(batch) and
+         batch.state in [:error, :canceled] and is_nil(batch.commit) and stopped and
+         not published and not is_nil(conflict) and conflict.details["kind"] == "merge_conflict" do
+      identity = {conflict.details["pr"], conflict.details["head_sha"]}
+
+      if Enum.any?(child.snapshot["members"], &({&1["pr"], &1["head_sha"]} == identity)),
+        do: identity
+    end
+  end
+
+  def blocked_successor_heads(parent) do
+    successor_attempts(parent)
+    |> Enum.map(&local_conflict_head(parent, &1))
+    |> Enum.reject(&is_nil/1)
+    |> MapSet.new()
+  end
+
+  def compatible_successor?(blocked, links),
+    do: not Enum.any?(links, &MapSet.member?(blocked, {&1.patch.pr_xref, &1.head_sha}))
 
   def barrier_free?(candidate, conn) do
     binding = CandidateJournal.commit_binding(candidate)
