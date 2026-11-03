@@ -291,6 +291,27 @@ defmodule BorsNG.Worker.SpeculativeTrainTest do
     assert is_nil(Train.predecessor(project, [a], @conn))
   end
 
+  for conclusion <- ["success", "failure", "cancelled"] do
+    test "a completed #{conclusion} parent cannot reserve a successor before status intake", %{
+      project: project
+    } do
+      enable()
+      {a, ca, _} = candidate(project, 1)
+      Train.reserve(ca, @conn)
+      CandidateJournal.event(ca, "dispatch_requested", "test")
+      run(ca, "completed", unquote(conclusion))
+
+      # The first check learns completion while reserving; the second check
+      # must keep that decision even if a later workflow lookup is stale.
+      assert is_nil(Train.predecessor(project, [a], @conn))
+      assert Train.event?(ca, "train_released")
+      run(ca, "in_progress")
+      assert is_nil(Train.predecessor(project, [a], @conn))
+      assert Repo.get!(Batch, a.id).state == :running
+      refute Train.event?(ca, "successor_reserved")
+    end
+  end
+
   test "out-of-order green cannot promote B; exact A landing unlocks it after restart/disable", %{
     project: project
   } do
