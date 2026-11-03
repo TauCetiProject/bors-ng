@@ -814,10 +814,10 @@ defmodule BorsNG.Worker.SourceCompatibility do
               project.id,
               "notice",
               {conn, patch.pr_xref,
-               "The isolated follow-up for head `#{patch.commit}` at main `#{batch.base_sha}` " <>
-                 "now failed authoritative CI: #{result["run_url"]}. The earlier combination " <>
-                 "attribution was provisional; this is individual evidence. Existing repair attempt " <>
-                 "limits remain unchanged.\n\n#{marker}", marker},
+               "This PR also failed when tested on its own against `main`. " <>
+                 "The failure is now confirmed for this PR: [build log](#{result["run_url"]}).\n\n" <>
+                 "Tested head: `#{patch.commit}`. Tested main: `#{batch.base_sha}`.\n\n#{marker}",
+               marker},
               "provisional-outcome:#{project.id}:#{patch.pr_xref}:#{patch.commit}:#{run}"
             )
 
@@ -837,6 +837,28 @@ defmodule BorsNG.Worker.SourceCompatibility do
   end
 
   def request(head, result) do
+    {summary, next_step} =
+      case result["status"] do
+        "suspected_failure" ->
+          {"checking a possible build failure.",
+           "Check this PR on its own against the tested main below. If it passes, report that the cause " <>
+             "is still unconfirmed. If it fails, update the branch from `main`, fix the errors, and run " <>
+             "the build and axiom checks before pushing.\n\n" <>
+             "If there is no update within 95 minutes, bors may test the unchanged PR on its own."}
+
+        "conflict" ->
+          {"this branch conflicts with `main`.",
+           "Update the branch from `main`, resolve the conflicts, and run the build and axiom checks before pushing."}
+
+        "missing_source" ->
+          {"this PR imports modules that are missing from `main`.",
+           "Update the branch from `main`, fix the imports, and run the build and axiom checks before pushing."}
+
+        "integrated_failure" ->
+          {"this PR failed to build with `main`.",
+           "Update the branch from `main`, fix the errors in the build log, and run the build and axiom checks before pushing."}
+      end
+
     details =
       case result["status"] do
         "missing_source" ->
@@ -845,11 +867,11 @@ defmodule BorsNG.Worker.SourceCompatibility do
           end)
 
         "conflict" ->
-          "Textual merge conflicts: " <> Enum.join(Enum.take(result["paths"], 8), ", ")
+          "Conflicting files:\n\n" <>
+            Enum.map_join(Enum.take(result["paths"], 8), "\n", &"- `#{&1}`")
 
         "integrated_failure" ->
-          "Authoritative exact single-PR integrated build failed: #{result["run_url"]}. " <>
-            "Read its actual diagnostics to repair API/proof/duplicate-declaration failures; no filename proximity inference is used."
+          "Bors tested this PR on its own against `main`. [Build log](#{result["run_url"]})."
 
         "suspected_failure" ->
           provisional = result["provisional"]
@@ -861,30 +883,27 @@ defmodule BorsNG.Worker.SourceCompatibility do
             |> Enum.uniq()
             |> Enum.take(8)
 
-          "PROVISIONAL SUSPECT, not a proven individual failure. Complete candidate-bound diagnostics " <>
-            "mapped to this one unbundled PR in failed combination candidate #{provisional["candidate_id"]}, " <>
-            "batch #{provisional["batch_id"]}, commit `#{provisional["binding"]["commit"]}`, " <>
-            "run attempt #{provisional["binding"]["run_attempt"]}: #{result["run_url"]}.\n" <>
-            "Diagnostic paths: #{Enum.join(paths, ", ")}. The remainder proceeds without this exact head; " <>
-            "a separate bors singleton confirmation was skipped. An interaction may be responsible. " <>
-            "Reproduce against the fixed evidence main before claiming repair; if this source passes alone, " <>
-            "report attribution unconfirmed and do not manufacture a source change or call the PR broken. " <>
-            "If no changed head appears within the existing 90-minute round plus 5-minute reconciliation grace, " <>
-            "bors may try this unchanged head once in a sealed isolated candidate, retaining this request. " <>
-            "That fallback is validation, not a repair verdict or another worker attempt."
+          "A batch containing this PR failed, with errors in:\n\n" <>
+            Enum.map_join(paths, "\n", &"- `#{&1}`") <>
+            "\n\nThis PR has not been tested on its own, so we haven't confirmed whether it caused the failure. " <>
+            "[Build log](#{result["run_url"]}).\n\n" <>
+            "Bors is continuing with the other PRs while this one is checked."
       end
 
-    summary =
-      if result["status"] == "suspected_failure",
-        do: "provisional integration repair requested; individual failure unproven.",
-        else: "exact individual source compatibility failed."
+    evidence =
+      if result["status"] == "suspected_failure" do
+        provisional = result["provisional"]
+
+        "\nFailed candidate #{provisional["candidate_id"]}, batch #{provisional["batch_id"]}, " <>
+          "commit `#{provisional["binding"]["commit"]}`, run attempt #{provisional["binding"]["run_attempt"]}."
+      else
+        ""
+      end
 
     "Merge-queue recovery for head `#{String.slice(head, 0, 7)}`: #{summary}\n\n" <>
-      "Tested main: `#{result["base_sha"]}`. Checker policy: `#{result["policy"]}`.\n#{details}\n\n" <>
-      "The prospective tree includes this PR's added modules. This does not change its existing head-CI build status. " <>
-      "Its author or tending worker should integrate one current main snapshot, repair imports/APIs/proofs as necessary, " <>
-      "and pass build and axiom checks before a compare-and-swap safe push. Git rebase alone is not proof of repair. " <>
-      "Normal fresh-head CI and review then apply. Existing ownership/fork/human-path restrictions, claims and per-PR retry caps apply; " <>
-      "untended or unwritable heads require their author/maintainer. Add keep to pause.\n\n<!--tauceti-rebase:v1 #{head}-->"
+      "#{details}\n\n#{next_step}\n\nAdd the `keep` label to pause automatic repair.\n\n" <>
+      "<details>\n<summary>Test details</summary>\n\n" <>
+      "Tested main: `#{result["base_sha"]}`. Checker policy: `#{result["policy"]}`.#{evidence}\n\n" <>
+      "</details>\n\n<!--tauceti-rebase:v1 #{head}-->"
   end
 end

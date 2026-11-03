@@ -177,6 +177,12 @@ defmodule BorsNG.Worker.SourceCompatibilityTest do
     assert [%{payload: payload}] = Repo.all(OrchestrationJob)
     {_conn, 1, body, marker} = :erlang.binary_to_term(payload, [:safe])
     assert String.starts_with?(body, "Merge-queue recovery for head `")
+
+    assert "Tested main: `#{@base}`. Checker policy: `local-source-v3`." in String.split(
+             body,
+             "\n"
+           )
+
     assert body =~ @base and body =~ "TauCeti/Consumer.lean" and body =~ "TauCeti.Removed"
     assert marker == "<!--tauceti-rebase:v1 #{@head}-->"
     SourceCompatibility.apply_results(c.project, @conn, @base, c.patches, [result(1)])
@@ -555,7 +561,7 @@ defmodule BorsNG.Worker.SourceCompatibilityTest do
     {_, _, body, _} = :erlang.binary_to_term(payload, [:safe])
 
     assert body =~ "actions/runs/42" and
-             body =~ "Authoritative exact single-PR integrated build failed"
+             body =~ "Bors tested this PR on its own against `main`"
 
     assert SourceCompatibility.requested?(Repo.get!(Patch, patch.id), @head)
   end
