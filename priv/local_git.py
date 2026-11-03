@@ -200,7 +200,7 @@ class Mirror:
         # Hundreds of merge-base walks otherwise repeatedly scan the same
         # deep repository history. The index is disposable and contains only
         # trusted Git object metadata; it changes no tree or merge semantics.
-        if self.request['operation'] in ['select', 'assemble']:
+        if self.request['operation'] in ['select', 'assemble', 'compatibility']:
             self.git('commit-graph', 'write', '--reachable', '--split', check=False)
         self.enforce_budget()
 

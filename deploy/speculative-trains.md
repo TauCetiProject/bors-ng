@@ -119,6 +119,18 @@ Locked current-membership checks reject races before moving links. Ordinary
 assembly, missing-import preflight, live identity checks and all CI gates remain.
 The parent's exact accepted-member/base-bound selection also excludes its
 deferred heads from immediate successor selection against that same parent.
+
+Deferred, unstarted groups are classified asynchronously in ordinary four-head
+outbox turns, after staging dispatch. Existing deferred groups are discovered
+by a bounded rotating poll scan. The existing source checker reads actual live
+main, independently of speculative ancestry, and rechecks exact PR heads/main.
+Confirmed standalone conflicts use the existing head-bound repair request,
+`needs-rebase` label and serialized queue withdrawal. Healthy and unknown heads
+retain their approvals; untouched waiting groups reopen to ordinary batching,
+so they need not consume singleton CI. Normal gates check again against later
+main commits. Explicit singleton settings, already constructed/running groups,
+bundles and protected-label repair holds keep their existing policies. Source
+checking failures never establish an individual conflict.
 The planning pass has a sixty-second deadline. Local selection and assembly
 maintain Git's disposable split commit-graph index after pinning exact fetched
 inputs, avoiding repeated deep ancestry walks. Index metadata changes no merge
