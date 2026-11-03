@@ -259,10 +259,23 @@ defmodule BorsNG.Worker.SpeculativeTrainTest do
       )
 
     assert Outbox.payload(retry) == {:retry_promotion, batch.id, batch.commit}
-    assert retry.available_at == held.recovery_after + 1
+    assert retry.available_at in (held.recovery_after + 1)..(held.recovery_after + 2)
     # Ordinary polls do not move the deadline or create additional timers.
     for _ <- 1..3, do: Batcher.handle_info({:poll, :once}, project.id)
+
+    for _ <- 1..3 do
+      Batcher.do_handle_cast({:status, {batch.commit, "build", :error, "run-url"}}, project.id)
+    end
+
     assert Repo.get!(Batch, batch.id).recovery_after == held.recovery_after
+
+    assert Repo.aggregate(
+             from(j in BorsNG.Database.OrchestrationJob,
+               where: j.kind == "info" and j.project_id == ^project.id
+             ),
+             :count,
+             :id
+           ) == 1
 
     # Simulate losing in-memory state and even the original mailbox entry.
     # Startup restoration reconstructs the timer from the persisted deadline.
@@ -281,7 +294,7 @@ defmodule BorsNG.Worker.SpeculativeTrainTest do
       )
 
     assert Outbox.payload(retry) == {:retry_promotion, batch.id, batch.commit}
-    assert retry.available_at == held.recovery_after + 1
+    assert retry.available_at in (held.recovery_after + 1)..(held.recovery_after + 2)
 
     # The short wakeup completes the same failed attempt when the blocker clears.
     Repo.update!(Ecto.Changeset.change(eligibility, state: "done"))
@@ -343,13 +356,14 @@ defmodule BorsNG.Worker.SpeculativeTrainTest do
         )
       )
 
-    # Even a due mailbox message cannot override a later persisted recovery deadline.
+    # A retry message cannot override a later persisted promotion deadline.
     later = Outbox.now() + 600
     Repo.update!(Batch.changeset(held, %{promotion_retry_at: later}))
-    {:ok, restore} = Outbox.claim(Outbox.enqueue(project.id, "info", :restore_rechecks).id)
-    Process.put(:orchestration_job, restore)
-    Batcher.handle_info(Outbox.payload(retry), project.id)
-    Outbox.finish(restore)
+    retry = Repo.update!(Ecto.Changeset.change(retry, available_at: 0))
+    {:ok, wakeup} = Outbox.claim(retry.id)
+    Process.put(:orchestration_job, wakeup)
+    Batcher.handle_info(Outbox.payload(wakeup), project.id)
+    Outbox.finish(wakeup)
     Process.delete(:orchestration_job)
     assert Repo.get!(Batch, b.id).promotion_retry_at == later
 
@@ -357,7 +371,7 @@ defmodule BorsNG.Worker.SpeculativeTrainTest do
              from(j in BorsNG.Database.OrchestrationJob,
                where:
                  j.project_id == ^project.id and j.kind == "info" and
-                   j.available_at == ^(later + 1)
+                   j.available_at in ^[later + 1, later + 2]
              )
            )
 

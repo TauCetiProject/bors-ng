@@ -3553,8 +3553,8 @@ defmodule BorsNG.Worker.Batcher do
             deadline =
               max(now + 60, max(batch.recovery_after || 0, batch.promotion_retry_at || 0))
 
-            # Persist the durable wakeup before moving last_polled/deadlines.
-            # A crash or failed batch write cannot leave a held result unwoken.
+            # Queue the wakeup before moving last_polled/deadlines, so a
+            # failed batch write leaves the old poll deadline in place.
             schedule_recheck(batch, deadline)
             %{last_polled: now, recovery_after: deadline}
           else
