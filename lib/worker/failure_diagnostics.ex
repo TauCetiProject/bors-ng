@@ -3,6 +3,9 @@ defmodule BorsNG.Worker.FailureDiagnostics do
   import Ecto.Query
   alias BorsNG.Database.{CandidateEvent, Repo}
   alias BorsNG.Worker.{CandidateAssembler, CandidateJournal, FailureIsolation, LocalGit}
+  alias BorsNG.Worker.DiagnosticReporting
+  alias BorsNG.Worker.Orchestration.Outbox
+  @parser_version "streaming-v2"
 
   @steps [
     "Preflight exact-candidate import headers",
@@ -10,13 +13,13 @@ defmodule BorsNG.Worker.FailureDiagnostics do
   ]
 
   # Runs in the existing per-project orchestration executor, outside the shared
-  # GitHub server/scheduler. A persisted unavailable result is final for this
-  # immutable candidate/run attempt, including after process restart.
+  # GitHub server/scheduler. Incomplete collection retries independently of the
+  # staging lane; successful observations remain bound to their exact attempt.
   def observe(
         batch,
         evidence,
         conn,
-        collector \\ &collect/2,
+        collector \\ nil,
         providers \\ nil,
         sources \\ &LocalGit.collision_sources/4
       ) do
@@ -29,28 +32,182 @@ defmodule BorsNG.Worker.FailureDiagnostics do
          fresh_run?(candidate, evidence) do
       binding = binding(candidate, batch.commit, evidence)
 
-      unless observation(candidate, binding) do
+      previous = observation(candidate, binding)
+
+      if is_nil(previous) or
+           (Process.get(:diagnostic_recovery, false) and
+              (previous.details["result"]["complete"] != true or
+                 previous.details["result"]["parser_version"] != @parser_version)) do
         jobs = job_ids(evidence)
+        collector = collector || fn conn, jobs -> collect(conn, jobs, evidence) end
 
         result =
           if length(jobs) in 1..2,
             do: collector.(conn, jobs),
             else: %{"complete" => false, "reason" => "ambiguous_failed_jobs"}
 
+        collision_sources =
+          collision_lookup(candidate, batch, evidence, hints, result, conn, sources)
+
+        provider_sources =
+          provider_lookup(candidate, batch, evidence, hints, result, conn, providers)
+
         CandidateJournal.event(candidate, "failure_diagnostics", "bors.terminal_logs", %{
           binding: binding,
           result: result,
-          collision_sources:
-            collision_lookup(candidate, batch, evidence, hints, result, conn, sources),
-          provider_lookup:
-            provider_lookup(candidate, batch, evidence, hints, result, conn, providers),
+          collision_sources: collision_sources,
+          provider_lookup: provider_sources,
           authority: "retry_only",
           proof_authority: false
         })
+
+        located =
+          match?({:ok, _}, map_paths(hints, result)) or
+            match?({:ok, _, _}, map_retry_providers(hints, result, binding, provider_sources)) or
+            match?({:ok, _}, map_base_collision(hints, result, binding, collision_sources))
+
+        DiagnosticReporting.record(candidate, result, located)
+
+        if retryable?(result) and Outbox.enabled?() and
+             not Process.get(:diagnostic_recovery, false) do
+          Outbox.enqueue(
+            candidate.project_id,
+            "diagnostics",
+            {candidate.id, batch.id, evidence},
+            "diagnostic-retry:#{candidate.id}:#{evidence[:run_id]}:#{evidence[:run_attempt]}",
+            Outbox.now() + 60
+          )
+        end
       end
     end
 
     :ok
+  end
+
+  def recover(candidate_id, batch_id, evidence, collector \\ nil) do
+    batch = Repo.get(BorsNG.Database.Batch, batch_id)
+
+    if batch do
+      batch = Repo.preload(batch, :project)
+      candidate = CandidateJournal.current(batch)
+      # Historical collection cannot split, quarantine, withdraw, approve or
+      # promote a superseded candidate. Existing bindings still apply.
+      if candidate && candidate.id == candidate_id && eligible?(batch, evidence) &&
+           fresh_run?(candidate, evidence) &&
+           CandidateJournal.commit_binding(candidate)["commit"] == batch.commit &&
+           candidate.snapshot["base_sha"] == batch.base_sha do
+        previous = observation(candidate, binding(candidate, batch.commit, evidence))
+
+        result = if previous, do: previous.details["result"], else: %{}
+        expired = candidate.observed_at < (Outbox.now() - 604_800) * 1_000_000
+
+        if expired or (result["parser_version"] == @parser_version and not retryable?(result)) do
+          :ok
+        else
+          Process.put(:diagnostic_recovery, true)
+
+          try do
+            observe(
+              batch,
+              evidence,
+              BorsNG.Database.Project.installation_connection(batch.project.repo_xref, Repo),
+              collector
+            )
+
+            current = observation(candidate, binding(candidate, batch.commit, evidence))
+
+            unless current && not retryable?(current.details["result"]),
+              do: throw({:diagnostic_retry, :collection_incomplete})
+          after
+            Process.delete(:diagnostic_recovery)
+          end
+        end
+      end
+    end
+
+    :ok
+  end
+
+  # Missing artifacts and logs may appear later, but collection stops after
+  # their seven-day retention window. Deterministic input incompatibilities
+  # wait durably for a parser deployment, without hourly network polling.
+  defp retryable?(result) do
+    result["complete"] != true and
+      result["reason"] not in [
+        "parser_failure",
+        "unsupported_diagnostic_record",
+        "decoding_failure",
+        "ambiguous_failed_jobs",
+        "ambiguous_raw_artifact",
+        "duplicate_environment_locations",
+        "duplicate_failed_targets",
+        "truncated_failed_targets",
+        "unsupported_or_incomplete_failed_targets",
+        "invalid_raw_artifact",
+        "unexpected_redirect"
+      ]
+  end
+
+  def resume_pending do
+    if Outbox.enabled?() do
+      since = (Outbox.now() - 604_800) * 1_000_000
+
+      Repo.all(
+        from(e in CandidateEvent,
+          join: c in BorsNG.Database.Candidate,
+          on: c.id == e.candidate_id,
+          where: c.observed_at >= ^since and e.kind == "failure_diagnostics",
+          order_by: [desc: e.id],
+          select: {e, c}
+        )
+      )
+      |> Enum.uniq_by(fn {_, c} -> c.id end)
+      |> Enum.each(fn {event, candidate} ->
+        if event.details["result"]["complete"] != true and
+             event.details["result"]["parser_version"] != @parser_version do
+          failure =
+            Repo.one(
+              from(e in CandidateEvent,
+                where:
+                  e.candidate_id == ^candidate.id and
+                    e.kind == "failure_classified" and e.source == "bors.trusted_failure",
+                order_by: [desc: e.id],
+                limit: 1
+              )
+            )
+
+          if failure && failure.details["evidence"] do
+            raw = failure.details["evidence"]
+
+            evidence =
+              Map.new(
+                [
+                  :diagnostic,
+                  :conclusion,
+                  :workflow,
+                  :identity,
+                  :run_id,
+                  :run_attempt,
+                  :run_created_at
+                ],
+                &{&1, raw[Atom.to_string(&1)]}
+              )
+              |> Map.merge(normalize_evidence(raw))
+
+            Outbox.enqueue(
+              candidate.project_id,
+              "diagnostics",
+              {candidate.id, candidate.batch_id, evidence},
+              "diagnostic-parser:#{candidate.id}:#{@parser_version}"
+            )
+          end
+        end
+      end)
+    end
+
+    :ok
+  rescue
+    _ -> :ok
   end
 
   defp fresh_run?(candidate, evidence) do
@@ -161,9 +318,55 @@ defmodule BorsNG.Worker.FailureDiagnostics do
                ) do
           {:ok, prs, policy}
         else
-          _ -> :unavailable
+          _ -> recovered_parent_suspects(candidate)
         end
     end
+  end
+
+  # Late recovery can narrow a future failed retry, with no authority to
+  # withdraw a member or bypass its CI. Only immediate, same-base ancestry and
+  # identical reviewed heads may supply this hint.
+  defp recovered_parent_suspects(nil), do: :unavailable
+
+  defp recovered_parent_suspects(candidate) do
+    parents =
+      Enum.map(candidate.snapshot["members"] || [], & &1["parent_candidate_id"])
+      |> Enum.reject(&is_nil/1)
+      |> Enum.uniq()
+
+    current = Map.new(candidate.snapshot["members"] || [], &{&1["pr"], &1["head_sha"]})
+
+    choices =
+      Enum.flat_map(parents, fn id ->
+        parent = Repo.get(BorsNG.Database.Candidate, id)
+
+        with true <-
+               not is_nil(parent) and parent.project_id == candidate.project_id and
+                 parent.into_branch == candidate.into_branch and
+                 parent.snapshot["base_sha"] == candidate.snapshot["base_sha"],
+             true <-
+               Repo.exists?(
+                 from(e in CandidateEvent,
+                   where: e.candidate_id == ^id and e.kind == "diagnostic_recovered"
+                 )
+               ),
+             {:ok, observation} <- bound_observation(parent, true),
+             {:ok, prs} <-
+               map_paths(FailureIsolation.hints(parent), observation.details["result"]),
+             heads <- Map.new(parent.snapshot["members"], &{&1["pr"], &1["head_sha"]}),
+             true <- Enum.all?(prs, &(Map.has_key?(current, &1) and current[&1] == heads[&1])) do
+          [prs]
+        else
+          _ -> []
+        end
+      end)
+
+    case choices do
+      [prs] -> {:ok, prs, "recovered_parent_diagnostics"}
+      _ -> :unavailable
+    end
+  rescue
+    _ -> :unavailable
   end
 
   # Source identity is separate from advisory provider ownership. Only this
@@ -651,7 +854,7 @@ defmodule BorsNG.Worker.FailureDiagnostics do
            Enum.all?(
              jobs,
              &(is_integer(&1["job_id"]) and &1["job_id"] > 0 and
-                 is_integer(&1["bytes"]) and &1["bytes"] in 1..16_777_216)
+                 is_integer(&1["bytes"]) and &1["bytes"] > 0)
            ),
          true <- length(Enum.uniq_by(jobs, & &1["job_id"])) == length(jobs),
          true <- Enum.all?(jobs, &(is_list(&1["observations"]) and &1["observations"] != [])),
@@ -710,7 +913,7 @@ defmodule BorsNG.Worker.FailureDiagnostics do
            Enum.all?(
              jobs,
              &(is_integer(&1["job_id"]) and &1["job_id"] > 0 and
-                 is_integer(&1["bytes"]) and &1["bytes"] in 1..16_777_216)
+                 is_integer(&1["bytes"]) and &1["bytes"] > 0)
            ),
          true <- byte_size(Jason.encode!(sources)) <= 64 * 1024,
          true <- Enum.map(files, & &1["path"]) == pair.paths,
@@ -745,7 +948,7 @@ defmodule BorsNG.Worker.FailureDiagnostics do
 
   defp source_entry?(_), do: false
 
-  defp collect(conn, jobs) do
+  defp collect(conn, jobs, evidence) do
     input =
       Path.join(
         System.tmp_dir!(),
@@ -756,7 +959,18 @@ defmodule BorsNG.Worker.FailureDiagnostics do
       {{_, _}, repo_id} = conn
       {:ok, file} = File.open(input, [:write, :exclusive])
       File.chmod!(input, 0o600)
-      IO.binwrite(file, Jason.encode!(%{repository_id: repo_id, job_ids: jobs}))
+
+      IO.binwrite(
+        file,
+        Jason.encode!(%{
+          repository_id: repo_id,
+          job_ids: jobs,
+          run_id: evidence[:run_id],
+          run_attempt: evidence[:run_attempt],
+          time_budget: if(Process.get(:diagnostic_recovery, false), do: 30, else: 8)
+        })
+      )
+
       File.close(file)
 
       with {:ok, token} <- BorsNG.GitHub.git_token(conn),

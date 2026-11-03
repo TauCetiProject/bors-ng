@@ -38,6 +38,7 @@ defmodule BorsNG.Worker.Statistics do
       observed_at: now,
       queue_authority: false,
       staging_run_ids: staging_run_ids(events, project.name),
+      diagnostics: BorsNG.Worker.DiagnosticReporting.summary(project.id),
       definitions: %{
         completed:
           "terminal batches by their final database update; canceled batches are separate",

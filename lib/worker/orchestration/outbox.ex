@@ -8,8 +8,11 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
   import Ecto.Query
   alias BorsNG.Database.{Batch, LinkPatchBatch, OrchestrationJob, Patch, Project, Repo}
 
-  @notifications ["notice", "projection"]
+  @notifications ["notice", "projection", "diagnostics", "diagnostic_alert"]
+  @ordered_notifications ["notice", "projection"]
   def notification?(job), do: job.kind in @notifications
+  def lane(%{kind: "diagnostics"}), do: :diagnostics
+  def lane(job), do: if(notification?(job), do: :notification, else: :mutation)
 
   def enabled?, do: System.get_env("BORS_ASYNC_ORCHESTRATION", "false") == "true"
   def now, do: System.system_time(:second)
@@ -27,7 +30,9 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
 
     attributes = schedule_attributes(project_id, kind, payload)
     # A read before a future timer's deadline cannot satisfy that timer.
-    wake_key = if available_at <= now(), do: wake_key(project_id, kind, payload)
+    wake_key =
+      if kind == "diagnostic_alert" or available_at <= now(),
+        do: wake_key(project_id, kind, payload)
 
     key =
       if is_nil(key) and kind == "cast" and match?({:status, _}, payload),
@@ -63,6 +68,9 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
   defp wake_key(project, "info", operation)
        when operation in [:recover_queue, :wake_backend_holds],
        do: "wake:#{project}:#{operation}"
+
+  defp wake_key(project, "diagnostic_alert", incident),
+    do: "diagnostic-alert:#{project}:#{incident}"
 
   defp wake_key(_, _, _), do: nil
 
@@ -238,19 +246,26 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
           )
 
         busy_query =
-          if is_notification,
-            do: from(j in busy_query, where: j.kind in ^@notifications),
-            else: from(j in busy_query, where: j.kind not in ^@notifications)
+          cond do
+            job.kind == "diagnostics" ->
+              from(j in busy_query, where: j.kind == "diagnostics")
+
+            is_notification ->
+              from(j in busy_query, where: j.kind in ^@notifications and j.kind != "diagnostics")
+
+            true ->
+              from(j in busy_query, where: j.kind not in ^@notifications)
+          end
 
         busy = Repo.one(busy_query)
 
         older =
-          if is_notification do
+          if job.kind in @ordered_notifications do
             Repo.one(
               from(j in OrchestrationJob,
                 where:
                   j.project_id == ^job.project_id and j.id < ^job.id and
-                    j.kind in ^@notifications and j.state in ["pending", "running"],
+                    j.kind in ^@ordered_notifications and j.state in ["pending", "running"],
                 select: j.id,
                 limit: 1,
                 lock: "FOR UPDATE"
@@ -552,6 +567,7 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
 
   defp fail_other(job, reason) do
     if (notification?(job) or cleanup?(job)) and
+         job.kind not in ["diagnostics", "diagnostic_alert"] and
          (job.attempts >= 6 or match?({:terminal, _}, reason)) do
       category = if cleanup?(job), do: "cleanup", else: "notification"
 
@@ -645,19 +661,32 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
 
   def due(limit, lane \\ :mutation)
 
+  def due(limit, :diagnostics) do
+    Repo.all(
+      from(j in OrchestrationJob,
+        where:
+          j.kind == "diagnostics" and
+            j.state == "pending" and j.available_at <= ^now(),
+        order_by: j.id,
+        limit: ^limit
+      )
+    )
+  end
+
   def due(limit, :notification) do
     heads =
       from(j in OrchestrationJob,
-        where: j.kind in ^@notifications and j.state in ["pending", "running"],
+        where: j.kind in ^@ordered_notifications and j.state in ["pending", "running"],
         group_by: j.project_id,
-        select: %{project_id: j.project_id, id: min(j.id)}
+        select: min(j.id)
       )
 
     Repo.all(
       from(j in OrchestrationJob,
-        join: h in subquery(heads),
-        on: h.id == j.id,
-        where: j.state == "pending" and j.available_at <= ^now(),
+        where:
+          j.kind in ^@notifications and j.kind != "diagnostics" and j.state == "pending" and
+            j.available_at <= ^now() and
+            (j.kind not in ^@ordered_notifications or j.id in subquery(heads)),
         order_by: j.id,
         limit: ^limit
       )

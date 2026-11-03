@@ -35,7 +35,8 @@ defmodule BorsNG.BatchController do
       patches: patches,
       depths: BundleDisplay.depths(patches),
       project: project,
-      statuses: statuses
+      statuses: statuses,
+      diagnostics: BorsNG.Worker.DiagnosticReporting.batch(batch.id)
     )
   end
 end
