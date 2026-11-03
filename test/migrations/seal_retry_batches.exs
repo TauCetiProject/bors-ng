@@ -1,13 +1,13 @@
 # Run against a NEW disposable database (never production):
 # MIX_ENV=test DATABASE_URL_TEST=postgresql://.../empty_db mix run --no-start test/migrations/seal_retry_batches.exs
 import ExUnit.Assertions
-alias BorsNG.Database.{Batch, Installation, Patch, Project, Repo}
+import Ecto.Query
+alias BorsNG.Database.Repo
 
 assert Mix.env() == :test
 Application.ensure_all_started(:ecto_sql)
 Application.ensure_all_started(:postgrex)
-BorsNG.Application.set_repo()
-repo = BorsNG.Application.fetch_repo()
+repo = Repo
 config = Confex.Resolver.resolve!(repo.config())
 repo.__adapter__().storage_up(config)
 {:ok, _} = repo.start_link(pool: DBConnection.ConnectionPool)
@@ -17,13 +17,28 @@ refute Ecto.Migrator.migrations(repo, "priv/repo/migrations")
        |> Enum.any?(&match?({:up, _, _}, &1))
 
 Ecto.Migrator.run(repo, "priv/repo/migrations", :up, to: 20_261_012_010_000)
-inst = Repo.insert!(%Installation{installation_xref: 91})
+# Use the historical table shape rather than current application schemas.
+now = ~N[2026-10-13 00:00:00]
+
+insert = fn table, fields ->
+  {1, [row]} =
+    Repo.insert_all(table, [Map.merge(%{inserted_at: now, updated_at: now}, fields)],
+      returning: [:id]
+    )
+
+  row
+end
+
+inst = insert.("installations", %{installation_xref: 91})
 
 project =
-  Repo.insert!(%Project{name: "TauCetiProject/TauCeti", repo_xref: 14, installation_id: inst.id})
+  insert.("projects", %{
+    name: "TauCetiProject/TauCeti",
+    repo_xref: 14,
+    installation_id: inst.id
+  })
 
-other = Repo.insert!(%Project{name: "other/repo", repo_xref: 15, installation_id: inst.id})
-now = ~N[2026-10-13 00:00:00]
+other = insert.("projects", %{name: "other/repo", repo_xref: 15, installation_id: inst.id})
 
 for {project_id, branch, state} <- [
       {project.id, "main", 0},
@@ -46,23 +61,25 @@ for {project_id, branch, state} <- [
 end
 
 p =
-  Repo.insert!(%Patch{
+  insert.("patches", %{
     project_id: project.id,
     pr_xref: 1,
     commit: "new-head",
     into_branch: "main",
-    manual_approval: %{"head_sha" => "approved-head", "actor_id" => 42},
-    queue_approval: %{"head_sha" => "approved-head", "reviewer" => "r"},
+    manual_approval: %{head_sha: "approved-head", actor_id: 42},
+    queue_approval: %{head_sha: "approved-head", reviewer: "r"},
     queue_pending: true
   })
 
-Repo.insert!(%BorsNG.Database.LinkPatchBatch{
-  batch_id: 1,
-  patch_id: p.id,
-  reviewer: "r",
-  head_sha: "approved-head",
-  manual_approval: p.manual_approval
-})
+Repo.insert_all("link_patch_batch", [
+  %{
+    batch_id: 1,
+    patch_id: p.id,
+    reviewer: "r",
+    head_sha: "approved-head",
+    manual_approval: %{head_sha: "approved-head", actor_id: 42}
+  }
+])
 
 snapshot = fn ->
   for sql <- [
@@ -74,11 +91,25 @@ snapshot = fn ->
 end
 
 before = snapshot.()
-assert Ecto.Migrator.run(repo, "priv/repo/migrations", :up, all: true) == [20_261_014_000_000]
+
+assert Ecto.Migrator.run(repo, "priv/repo/migrations", :up, to: 20_261_014_000_000) == [
+         20_261_014_000_000
+       ]
+
 assert snapshot.() == before
-assert Enum.map(1..5, &Repo.get!(Batch, &1).sealed) == [true, true, false, false, false]
-normal = Repo.insert!(Batch.new(project.id, "main", 7))
-refute normal.sealed
-assert Ecto.Migrator.run(repo, "priv/repo/migrations", :up, all: true) == []
-refute Repo.get!(Batch, normal.id).sealed
+
+assert Repo.all(from(b in "batches", order_by: b.id, select: b.sealed)) == [
+         true,
+         true,
+         false,
+         false,
+         false
+       ]
+
+normal =
+  insert.("batches", %{project_id: project.id, into_branch: "main", state: 0, priority: 7})
+
+refute Repo.one!(from(b in "batches", where: b.id == ^normal.id, select: b.sealed))
+assert Ecto.Migrator.run(repo, "priv/repo/migrations", :up, to: 20_261_014_000_000) == []
+refute Repo.one!(from(b in "batches", where: b.id == ^normal.id, select: b.sealed))
 IO.puts("PASS: legacy seals, unchanged membership/priority/approvals, and restart-safe migration")

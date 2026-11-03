@@ -10,15 +10,14 @@ defmodule BorsNG.ApplicationTest do
   defp child_id(mod) when is_atom(mod), do: mod
 
   defp child_ids do
-    Application.fetch_repo()
-    |> Application.child_specs()
+    Application.child_specs()
     |> Enum.map(&child_id/1)
   end
 
   test "shutdown drain precedes executors, API clients and the database" do
     ids = child_ids()
 
-    assert Enum.find_index(ids, &(&1 == Application.fetch_repo())) <
+    assert Enum.find_index(ids, &(&1 == BorsNG.Database.Repo)) <
              Enum.find_index(ids, &(&1 == BorsNG.Worker.Orchestration.Supervisor))
 
     {:ok, {_, children}} = BorsNG.Worker.Orchestration.Supervisor.init([])

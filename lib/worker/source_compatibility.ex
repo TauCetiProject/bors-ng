@@ -76,8 +76,7 @@ defmodule BorsNG.Worker.SourceCompatibility do
             select: %{id: p.id, commit: p.commit, source_compatibility: p.source_compatibility}
           )
 
-        # Compare decoded identities in Elixir: SQL JSON string casts have
-        # different quoting/collation semantics on PostgreSQL and MySQL 8.4.
+        # Compare decoded identities in Elixir to avoid SQL JSON string quoting.
         # Inspect bounded lightweight metadata and perform source work for only
         # up to four stale heads in one helper call before yielding the mutator lane.
         newer = Repo.all(from(p in metadata, where: p.id > ^cursor, limit: 16))

@@ -80,8 +80,8 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
   defp insert_job(job, key) do
     {:ok, result} =
       Repo.transaction(fn ->
-        # Match claim's lock order. MySQL's unique-key insert plus a locking
-        # read can otherwise deadlock simultaneous producers and completion.
+        # Match claim's project-then-job lock order to avoid deadlocks between
+        # simultaneous producers and completion.
         Repo.one(from(p in Project, where: p.id == ^job.project_id, lock: "FOR UPDATE"))
         Repo.insert!(job, on_conflict: :nothing)
 
@@ -134,7 +134,6 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
   end
 
   defp command_after?(job) do
-    # Current locking read: MySQL may otherwise reuse a pre-lock snapshot.
     not is_nil(
       Repo.one(
         from(j in OrchestrationJob,
@@ -232,8 +231,6 @@ defmodule BorsNG.Worker.Orchestration.Outbox do
       else
         job = Repo.one!(from(j in OrchestrationJob, where: j.id == ^id, lock: "FOR UPDATE"))
 
-        # Current locking read is necessary on MySQL: a consistent read
-        # could reuse the snapshot from before waiting for the project lock.
         is_notification = notification?(job)
 
         busy_query =

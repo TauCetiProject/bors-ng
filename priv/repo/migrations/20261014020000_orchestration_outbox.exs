@@ -2,14 +2,11 @@ defmodule BorsNG.Repo.Migrations.OrchestrationOutbox do
   use Ecto.Migration
 
   def up do
-    # Immutable batch recipes can exceed MySQL's 64 KiB BLOB limit.
-    payload_type = if repo().__adapter__() == Ecto.Adapters.MyXQL, do: :mediumblob, else: :binary
-
     create_if_not_exists table(:orchestration_jobs) do
       add(:project_id, :bigint, null: false)
       add(:kind, :string, null: false)
       add(:subject_id, :bigint)
-      add(:payload, payload_type, null: false)
+      add(:payload, :binary, null: false)
       add(:dedup_key, :string)
       add(:state, :string, null: false, default: "pending")
       add(:attempts, :integer, null: false, default: 0)
@@ -35,11 +32,7 @@ defmodule BorsNG.Repo.Migrations.OrchestrationOutbox do
 
   defp ensure_approval_token do
     sql =
-      if repo().__adapter__() == Ecto.Adapters.MyXQL,
-        do:
-          "SELECT COUNT(*) FROM information_schema.columns WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'patches' AND COLUMN_NAME = 'orchestration_approval_token'",
-        else:
-          "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'patches' AND column_name = 'orchestration_approval_token'"
+      "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'patches' AND column_name = 'orchestration_approval_token'"
 
     %{rows: [[count]]} = Ecto.Adapters.SQL.query!(repo(), sql, [])
 
@@ -49,17 +42,6 @@ defmodule BorsNG.Repo.Migrations.OrchestrationOutbox do
   end
 
   defp ensure_index(index) do
-    if repo().__adapter__() == Ecto.Adapters.MyXQL do
-      %{rows: [[count]]} =
-        Ecto.Adapters.SQL.query!(
-          repo(),
-          "SELECT COUNT(*) FROM information_schema.statistics WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ?",
-          [to_string(index.table), to_string(index.name)]
-        )
-
-      if count == 0, do: create(index)
-    else
-      create_if_not_exists(index)
-    end
+    create_if_not_exists(index)
   end
 end

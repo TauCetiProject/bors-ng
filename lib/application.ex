@@ -5,20 +5,6 @@ defmodule BorsNG.Application do
 
   use Application
 
-  def set_repo do
-    repo_module =
-      case System.get_env("BORS_DATABASE", "postgresql") do
-        "mysql" -> BorsNG.Database.RepoMysql
-        _ -> BorsNG.Database.RepoPostgres
-      end
-
-    :persistent_term.put(:db_repo, repo_module)
-  end
-
-  def fetch_repo do
-    :persistent_term.get(:db_repo)
-  end
-
   defp get_log_level_from_env do
     case System.get_env("BORS_LOG_LEVEL") do
       nil -> nil
@@ -38,31 +24,26 @@ defmodule BorsNG.Application do
       Logger.configure(level: log_level_from_env)
     end
 
-    # Define workers and child supervisors to be supervised
-    set_repo()
-
-    repo = fetch_repo()
-
     # See http://elixir-lang.org/docs/stable/elixir/Supervisor.html
     # for other strategies and supported options
     opts = [strategy: :rest_for_one, name: BorsNG.Supervisor]
-    Supervisor.start_link(child_specs(repo), opts)
+    Supervisor.start_link(child_specs(), opts)
   end
 
   @doc """
-  The ordered list of supervised children, given the chosen repo module.
+  The ordered list of supervised children.
 
   The order matters: the supervisor runs `:rest_for_one`, so PubSub and the
   Endpoint deliberately precede the workers (see the inline note below). This is
-  a pure function of `repo` so the ordering invariant can be asserted in tests
+  a pure function so the ordering invariant can be asserted in tests
   without booting the application.
   """
-  def child_specs(repo) do
+  def child_specs() do
     [
       %{
         type: :supervisor,
-        id: repo,
-        start: {repo, :start_link, []}
+        id: BorsNG.Database.Repo,
+        start: {BorsNG.Database.Repo, :start_link, []}
       },
       %{
         type: :worker,

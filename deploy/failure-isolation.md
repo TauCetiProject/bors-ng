@@ -180,7 +180,7 @@ containing its objects, and the captured job log:
 
 ```sh
 python3 scripts/replay_diagnostic_ownership.py candidate.json replay.git job.log replay.json
-MIX_ENV=test BORS_DATABASE=postgresql mix run --no-start scripts/replay_diagnostic_partition.exs replay.json partition.json
+MIX_ENV=test mix run --no-start scripts/replay_diagnostic_partition.exs replay.json partition.json
 ```
 
 Use `--gh-log` for a `gh run view --log-failed` capture with presentation columns.

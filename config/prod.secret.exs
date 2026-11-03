@@ -1,20 +1,12 @@
 import Config
 
-config :bors, BorsNG.Database.RepoPostgres,
+config :bors, BorsNG.Database.Repo,
   adapter: Ecto.Adapters.Postgres,
   url: {:system, "DATABASE_URL"},
   timeout: {:system, :integer, "DATABASE_TIMEOUT", 15_000},
   pool_size: {:system, :integer, "POOL_SIZE", 10},
   ssl: {:system, :boolean, "DATABASE_USE_SSL", true},
   prepare: {:system, :atom, "DATABASE_PREPARE_MODE", :named},
-  priv: "priv/repo"
-
-config :bors, BorsNG.Database.RepoMysql,
-  adapter: Ecto.Adapters.MyXQL,
-  url: {:system, "DATABASE_URL"},
-  ssl: {:system, :boolean, "DATABASE_USE_SSL", true},
-  timeout: {:system, :integer, "DATABASE_TIMEOUT", 15_000},
-  pool_size: {:system, :integer, "POOL_SIZE", 10},
   priv: "priv/repo"
 
 config :bors, BorsNG.Endpoint,

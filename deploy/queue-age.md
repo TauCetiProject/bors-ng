@@ -38,7 +38,7 @@ per-head worker attempt limits continue to apply.
 
 The scheduler reads current waiting links, current heads and their admissions in
 one bulk join, returning only current waiting membership. A PostgreSQL batch-ID
-index supports membership seeks; MySQL already indexes the foreign key. It
+index supports membership seeks. It
 performs no historical ancestry query, per-batch/member admission lookup or
 GitHub request for ordering. Serial running polls defer the metadata read to
 successor selection, if train eligibility permits one.

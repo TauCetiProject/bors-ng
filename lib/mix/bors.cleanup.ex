@@ -43,7 +43,7 @@ defmodule Mix.Tasks.Bors.Cleanup do
     end)
   end
 
-  def repos, do: [BorsNG.Application.fetch_repo()]
+  def repos, do: [BorsNG.Database.Repo]
 
   defp run_age_pass(months) do
     negative_months = 0 - months

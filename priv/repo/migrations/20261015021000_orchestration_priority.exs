@@ -20,28 +20,20 @@ defmodule BorsNG.Repo.Migrations.OrchestrationPriority do
   defp ensure_index do
     index_name = "orchestration_jobs_state_priority_available_at_id_index"
 
-    {sql, arguments} =
-      if repo().__adapter__() == Ecto.Adapters.MyXQL do
-        {"SELECT index_name FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ? LIMIT 1",
-         ["orchestration_jobs", index_name]}
-      else
-        {"SELECT indexname FROM pg_indexes WHERE schemaname = current_schema() AND tablename = $1 AND indexname = $2",
-         ["orchestration_jobs", index_name]}
-      end
+    sql =
+      "SELECT indexname FROM pg_indexes WHERE schemaname = current_schema() AND tablename = $1 AND indexname = $2"
+
+    arguments = ["orchestration_jobs", index_name]
 
     if Ecto.Adapters.SQL.query!(repo(), sql, arguments).rows == [],
       do: create(index(:orchestration_jobs, [:state, :priority, :available_at, :id]))
   end
 
   defp ensure_columns(table_name, columns) do
-    {sql, arguments} =
-      if repo().__adapter__() == Ecto.Adapters.MyXQL do
-        {"SELECT column_name FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ?",
-         [table_name]}
-      else
-        {"SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = $1",
-         [table_name]}
-      end
+    sql =
+      "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = $1"
+
+    arguments = [table_name]
 
     existing =
       Ecto.Adapters.SQL.query!(repo(), sql, arguments).rows |> List.flatten() |> MapSet.new()
@@ -86,7 +78,7 @@ defmodule BorsNG.Repo.Migrations.OrchestrationPriority do
   # Freeze the upgrade policy here: future application/schema changes must
   # not change old migrations. Terms are trusted internal database payloads;
   # no functions in them are invoked. A malformed row aborts rather than drops
-  # a durable command. Idempotent DDL permits a MySQL upgrade retry after repair.
+  # a durable command. Idempotent DDL permits an upgrade retry after repair.
   defp classify(job, payload) do
     project_id = job.project_id
 

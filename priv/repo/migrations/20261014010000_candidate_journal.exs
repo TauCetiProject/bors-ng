@@ -46,20 +46,6 @@ defmodule BorsNG.Repo.Migrations.CandidateJournal do
   end
 
   defp ensure_index(index) do
-    if repo().__adapter__() == Ecto.Adapters.MyXQL do
-      %{rows: [[count]]} =
-        Ecto.Adapters.SQL.query!(
-          repo(),
-          """
-          SELECT COUNT(*) FROM information_schema.statistics
-          WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ?
-          """,
-          [to_string(index.table), to_string(index.name)]
-        )
-
-      if count == 0, do: create(index)
-    else
-      create_if_not_exists(index)
-    end
+    create_if_not_exists(index)
   end
 end

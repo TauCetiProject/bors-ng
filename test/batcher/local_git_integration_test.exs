@@ -290,7 +290,7 @@ defmodule BorsNG.Worker.LocalGitIntegrationTest do
   # the real mutation immediately after begin freezes its inputs, without a
   # production hook, sleep, mock approval or race-dependent timing.
   defp after_begin(action) do
-    repo = :persistent_term.get(:db_repo)
+    repo = BorsNG.Database.Repo
     handler = make_ref()
     owner = self()
 
@@ -657,7 +657,7 @@ defmodule BorsNG.Worker.LocalGitIntegrationTest do
     # runs in this same caller, after this standalone query has returned.
     owner = self()
     ref = make_ref()
-    repo = :persistent_term.get(:db_repo)
+    repo = BorsNG.Database.Repo
 
     :telemetry.attach(
       ref,

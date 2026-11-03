@@ -21,8 +21,6 @@ jobs:
         elixir: ["1.17.3"]
         otp_release: ["27.3.4.13"]
         os: [ubuntu-24.04]
-    env:
-      BORS_DATABASE: postgresql
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: erlef/setup-beam@fc68ffb90438ef2936bbb3251622353b3dcb2f93 # v1.24.0
@@ -34,13 +32,13 @@ jobs:
       - name: Create Postgres Repo
         run: |
           echo "running postgres database creation"
-          mix ecto.create -r BorsNG.Database.RepoPostgres
+          mix ecto.create -r BorsNG.Database.Repo
         env:
           MIX_ENV: test
       - name: Migrate Postgres Repo
         run: |
           echo "running postgres migration"
-          mix ecto.migrate -r BorsNG.Database.RepoPostgres
+          mix ecto.migrate -r BorsNG.Database.Repo
         env:
           MIX_ENV: test
 

@@ -61,8 +61,7 @@ project cursor and inspecting at most 16 lightweight metadata rows before yieldi
 Cold bootstrap retains its existing one-time 30-second allowance. Live GitHub
 result guards add overhead per selected head; this is not an 8-second total-turn
 limit or a claim of measured fourfold production throughput. Stored identities are
-compared as decoded values, avoiding JSON string quoting/collation differences
-between PostgreSQL and MySQL 8.4. Repeated
+compared as decoded values, avoiding SQL JSON string quoting differences. Repeated
 notifications coalesce; latest actual main is read by the executor. Main moving
 mid-check discards results while retaining cursor progress and a follow-up.
 Background chunks use the existing ordinary priority class; dispatch/promotion

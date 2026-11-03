@@ -50,7 +50,6 @@ defmodule BorsNG.Worker.ManualApproval do
           # Snapshot existing active memberships without locking batches. A
           # later membership/state transition is conservatively reconciled by
           # candidate validation; historical admissions/candidates stay intact.
-          # Updating links directly also avoids MySQL UPDATE JOIN batch locks.
           active_ids =
             Repo.all(
               from(l in LinkPatchBatch,

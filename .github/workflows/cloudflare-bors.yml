@@ -26,7 +26,6 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     env:
-      BORS_DATABASE: postgresql
       DATABASE_URL_TEST: postgresql://postgres:Postgres1234@localhost/bors_test
     steps:
       - uses: actions/checkout@v4

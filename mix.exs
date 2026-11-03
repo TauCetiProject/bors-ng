@@ -76,7 +76,6 @@ defmodule BorsNg.Mixfile do
       {:ex_doc, "~> 0.36", only: :dev},
       {:confex, "~> 3.5"},
       {:postgrex, "~> 0.22"},
-      {:myxql, "~> 0.9"},
       {:ecto, "~> 3.14"},
       {:ecto_sql, "~> 3.14"},
       {:ex_parameterized, "~> 1.3", only: [:dev, :test]},

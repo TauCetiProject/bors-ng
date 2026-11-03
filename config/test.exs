@@ -1,6 +1,6 @@
 import Config
 
-config :bors, BorsNG.Database.RepoPostgres,
+config :bors, BorsNG.Database.Repo,
   url: {:system, "DATABASE_URL_TEST", "postgresql://postgres:Postgres1234@localhost/bors_test"},
   pool: Ecto.Adapters.SQL.Sandbox,
   priv: "priv/repo"

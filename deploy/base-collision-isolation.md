@@ -89,7 +89,7 @@ and clearly labels the added local identity assessment. It does not retrofit an
 observation into the historical journal. Reproduce with:
 
 ```
-MIX_ENV=test BORS_DATABASE=postgresql mix run --no-start \
+MIX_ENV=test mix run --no-start \
   scripts/replay_diagnostic_partition.exs \
   test/fixtures/candidate233-base-collision.json /tmp/candidate233-partition.json
 ```

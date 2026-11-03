@@ -236,9 +236,9 @@ side of completion. A receipt that
 races key removal retries insertion instead of disappearing.
 
 Short mailbox transactions use the same project-then-job lock order for
-receipt, completion, recovery and leases on both adapters. They never hold that
-lock over GitHub work. This prevents MySQL unique-key/gap-lock deadlocks between
-producers and a completing/claiming consumer.
+receipt, completion, recovery and leases. They never hold that lock over GitHub
+work. Consistent lock ordering prevents deadlocks between producers and a
+completing/claiming consumer.
 
 Repeated pending wakeups share one read. Only immediately due wakeups coalesce. Future timers retain their original
 per-deadline keys: an earlier read cannot satisfy a later admission deadline.

@@ -117,7 +117,7 @@ memberships continue through their existing code, with their existing tests.
 In a configured bors checkout, with normal dependencies installed:
 
 ```sh
-MIX_ENV=test BORS_DATABASE=postgresql mix run --no-start scripts/replay_diversity.exs \
+MIX_ENV=test mix run --no-start scripts/replay_diversity.exs \
   test/fixtures/diversity/workload.json /tmp/diversity-replay.json
 python3 scripts/summarize_diversity.py \
   --workload test/fixtures/diversity/workload.json \

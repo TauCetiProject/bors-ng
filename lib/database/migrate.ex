@@ -11,13 +11,12 @@ defmodule BorsNG.Database.Migrate do
   continue running normally afterwards.
   """
 
-  def repos, do: [BorsNG.Application.fetch_repo()]
+  def repos, do: [BorsNG.Database.Repo]
 
   @start_apps [
     :crypto,
     :ssl,
     :postgrex,
-    :myxql,
     :ecto,
     :confex
   ]
@@ -34,7 +33,6 @@ defmodule BorsNG.Database.Migrate do
     # which won't start because the database isn't set up yet,
     # we start the Ecto Repo directly.
     Application.load(:bors)
-    BorsNG.Application.set_repo()
 
     Enum.each(@start_apps, &Application.ensure_all_started/1)
     Enum.each(repos(), & &1.start_link(pool_size: 3))
