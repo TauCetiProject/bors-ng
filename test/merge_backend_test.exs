@@ -261,6 +261,95 @@ defmodule BorsNG.MergeBackendTest do
     assert Repo.get!(Project, project.id).eligibility_cursor == 3
   end
 
+  test "the scan skips members of a candidate under construction and rechecks the rest" do
+    alias BorsNG.Database.{CandidateEvent, LinkPatchBatch, OrchestrationJob}
+    alias BorsNG.Worker.CandidateJournal
+    previous = System.get_env("BORS_ASYNC_ORCHESTRATION")
+    System.put_env("BORS_ASYNC_ORCHESTRATION", "true")
+
+    on_exit(fn ->
+      if previous,
+        do: System.put_env("BORS_ASYNC_ORCHESTRATION", previous),
+        else: System.delete_env("BORS_ASYNC_ORCHESTRATION")
+    end)
+
+    installation = Repo.insert!(%Installation{installation_xref: 91})
+
+    project =
+      Repo.insert!(%Project{
+        name: "TauCetiProject/TauCeti",
+        repo_xref: 14,
+        installation_id: installation.id
+      })
+
+    patches =
+      for pr <- 1..6 do
+        Repo.insert!(%Patch{
+          project_id: project.id,
+          pr_xref: pr,
+          open: true,
+          into_branch: "main",
+          commit: String.pad_leading(Integer.to_string(pr), 40, "0")
+        })
+      end
+
+    batch =
+      Repo.insert!(%Batch{
+        Batch.new(project.id, "main")
+        | sealed: true,
+          last_polled: 0,
+          timeout_at: System.system_time(:second) + 3600
+      })
+
+    for patch <- Enum.slice(patches, 1, 2) do
+      CandidateJournal.insert_member(
+        LinkPatchBatch.changeset(%LinkPatchBatch{}, %{
+          batch_id: batch.id,
+          patch_id: patch.id,
+          head_sha: patch.commit,
+          reviewer: "reviewer"
+        })
+      )
+    end
+
+    base = String.duplicate("b", 40)
+    links = Repo.all(LinkPatchBatch.from_batch(batch.id))
+    reserved = CandidateJournal.begin(batch, links, base, nil)
+    CandidateJournal.event(reserved, "train_reserved", "bors.train", %{cap: 3})
+    assert Enum.map(reserved.snapshot["members"], & &1["pr"]) == [2, 3]
+
+    GitHub.ServerMock.put_state(%{
+      {{:installation, 91}, 14} => %{backend_snapshot: {:error, :unavailable}}
+    })
+
+    initial = %{last_dispatch: nil, observation: nil}
+    assert {:reply, nil, _} = BorsNG.Worker.MergeReconciler.handle_call(:tick, nil, initial)
+    :sys.get_state(Batcher.Registry.get(project.id))
+
+    offered = fn ->
+      Repo.all(
+        from(j in OrchestrationJob,
+          where: j.project_id == ^project.id and j.kind == "cast",
+          order_by: j.id,
+          select: j.subject_id
+        )
+      )
+    end
+
+    # The page was PRs 1..4; the two members under construction were skipped
+    # and the cursor still moved past them.
+    assert offered.() == [Enum.at(patches, 0).id, Enum.at(patches, 3).id]
+    assert Repo.get!(Project, project.id).eligibility_cursor == 4
+
+    # Once the candidate is dispatched its members are ordinary again.
+    CandidateJournal.event(reserved, "dispatch_requested", "bors.train", %{})
+    Repo.update_all(from(p in Project, where: p.id == ^project.id), set: [eligibility_cursor: 0])
+    assert {:reply, nil, _} = BorsNG.Worker.MergeReconciler.handle_call(:tick, nil, initial)
+    :sys.get_state(Batcher.Registry.get(project.id))
+    assert Enum.sort(offered.()) == Enum.sort(Enum.map(Enum.take(patches, 4), & &1.id))
+    assert Repo.exists?(from(e in CandidateEvent, where: e.candidate_id == ^reserved.id))
+  end
+
   test "a superseded timeout cannot revoke a renewed approval at the same head" do
     installation = Repo.insert!(%Installation{installation_xref: 91})
 

@@ -235,7 +235,12 @@ defmodule BorsNG.Worker.MergeReconciler do
         do: Repo.all(from(p in query, where: p.pr_xref <= ^cursor, limit: ^remaining)),
         else: []
 
-    offered = Enum.filter(newer ++ older, &offer_eligibility(project.id, &1))
+    constructing = members_under_construction(project.id)
+
+    offered =
+      (newer ++ older)
+      |> Enum.reject(&MapSet.member?(constructing, &1))
+      |> Enum.filter(&offer_eligibility(project.id, &1))
 
     case List.last(offered) do
       nil ->
@@ -272,6 +277,20 @@ defmodule BorsNG.Worker.MergeReconciler do
     |> Enum.reject(&MapSet.member?(known, &1.pr))
     |> Enum.take(4)
     |> Enum.each(&offer_eligibility(project.id, &1.pr))
+  end
+
+  # A pending recheck for a member of a candidate that is reserved but not
+  # yet dispatched makes its construction yield and start over, and this scan
+  # would offer one roughly every minute of a large assembly. Those members
+  # are skipped here and rechecked on a later pass; webhooks still reach them.
+  defp members_under_construction(project_id) do
+    BorsNG.Worker.SpeculativeTrain.reservations(project_id)
+    |> Enum.reject(&BorsNG.Worker.SpeculativeTrain.event?(&1, "dispatch_requested"))
+    |> Enum.flat_map(&Enum.map(&1.snapshot["members"] || [], fn m -> m["pr"] end))
+    |> Enum.filter(&is_integer/1)
+    |> MapSet.new()
+  rescue
+    _ -> MapSet.new()
   end
 
   defp offer_eligibility(project_id, pr) do
