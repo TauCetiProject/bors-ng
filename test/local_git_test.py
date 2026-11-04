@@ -123,6 +123,9 @@ class LocalGitTest(unittest.TestCase):
         from unittest.mock import patch
         request = self.provider_fixture()
         mirror = TestMirror(request, self.upstream)
+        # Assembly already inventoried the candidate tree into the shared header
+        # cache; drop it so this lookup still exercises the cold path.
+        (mirror.repo / 'bors-headers-local-source-v2.json').unlink()
         with patch.object(mirror, 'fetch', side_effect=AssertionError('network')), \
                 patch.object(mirror, 'initialize', side_effect=AssertionError('initialize')):
             cold = mirror.run()
@@ -1048,7 +1051,7 @@ class LocalGitTest(unittest.TestCase):
         self.request['members'] = [self.member(1, self.commit(self.base, {'TauCeti/A.lean': 'import TauCeti.Absent\n'}))]
 
         class TimedOut(TestMirror):
-            def diagnostic_dependencies(self, *args):
+            def diagnostic_dependencies(self, *args, **kwargs):
                 raise local.Failure('timeout')
 
         mirror = TimedOut(self.request, self.upstream)
