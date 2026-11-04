@@ -911,9 +911,13 @@ defmodule BorsNG.Worker.FailureDiagnostics do
 
         # Both sides of an audit collision are retained. An unchanged base
         # declaration has no changed owner; every changed side is suspected.
-        if observation["kind"] == "duplicate_declaration" or Enum.all?(owners, &(&1 != [])),
-          do: List.flatten(owners),
-          else: []
+        # A missing project import names the expected source and its importer:
+        # a member that deleted the source, or one that added the import, is
+        # suspected while the unchanged side has no owner.
+        if observation["kind"] in ["duplicate_declaration", "missing_import"] or
+             Enum.all?(owners, &(&1 != [])),
+           do: List.flatten(owners),
+           else: []
       end)
 
     # Every owned failure is a suspect even when another failing module has

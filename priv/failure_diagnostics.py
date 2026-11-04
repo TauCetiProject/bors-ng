@@ -43,6 +43,12 @@ AUDIT = re.compile(r"^audit-driver: import (" + MODULE +
 ANY_MODULE = r"[A-Za-z_][A-Za-z0-9_']*(?:\.[A-Za-z_][A-Za-z0-9_']*)*"
 DUPLICATE = re.compile(r'^duplicate-declarations: (\S{1,1024}) is declared in both ('
                        + ANY_MODULE + r') and (' + ANY_MODULE + r')$')
+# scripts/check-imports.py prints one line per header problem. Only a missing
+# project module names a source a batch-mate can own: the expected file was
+# deleted or renamed by one member, or the import is new in another.
+MISSING_IMPORT = re.compile(r'^(' + PATH + r'): missing project import (' + MODULE + r'): expected ('
+                            + PATH + r') in the exact candidate source tree '
+                            r'\(add the source or fix the import\)$')
 UNMATCHED_SAMPLE = 8
 UNMATCHED_BYTES = 512
 ENV_LOCATIONS = 'LINT-ENV-LOCATIONS '
@@ -161,6 +167,7 @@ def parse_lines(lines, sample=None):
                     continue
                 audit = AUDIT.fullmatch(line)
                 duplicate = DUPLICATE.fullmatch(line)
+                missing = MISSING_IMPORT.fullmatch(line)
                 source = SOURCE.match(line) or LAKE.match(line)
                 if audit and all(len(module) <= 512 for module in audit.groups()):
                     add('primary', dict(kind='duplicate_declaration', paths=[
@@ -169,6 +176,11 @@ def parse_lines(lines, sample=None):
                         and all(len(module) <= 508 for module in duplicate.groups()[1:])):
                     add('primary', dict(kind='duplicate_declaration', paths=[
                         module.replace('.', '/') + '.lean' for module in duplicate.groups()[1:]]))
+                elif missing and all(len(group) <= 512 for group in missing.groups()):
+                    # Expected source first, importer second; ownership of either
+                    # side is decided by the mapper, never here.
+                    add('primary', dict(kind='missing_import', module=missing[2],
+                                        paths=[missing[3], missing[1]]))
                 elif source and len(source[1]) <= 512:
                     add('primary', dict(kind='compiler_error', paths=[source[1]]))
                 elif sample is not None and len(sample) < UNMATCHED_SAMPLE and unmatched_failure_line(line):

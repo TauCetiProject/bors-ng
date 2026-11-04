@@ -947,6 +947,32 @@ defmodule BorsNG.Worker.FailureIsolationTest do
     )
   end
 
+  test "a missing project import suspects whichever side a member owns", c do
+    alias BorsNG.Worker.FailureDiagnostics
+    tail = " in the exact candidate source tree (add the source or fix the import)\n"
+
+    # Member 3 deleted the expected source; the importer is unchanged on main.
+    deleted =
+      "TauCeti/Unchanged/Importer.lean: missing project import TauCeti.File3: expected TauCeti/File3.lean" <>
+        tail
+
+    assert {:ok, [3]} = FailureDiagnostics.map_paths(c.hints, parsed_log_result(deleted))
+
+    # Member 3 added an import of a module nobody provides.
+    added =
+      "TauCeti/File3.lean: missing project import TauCeti.Gone: expected TauCeti/Gone.lean" <>
+        tail
+
+    assert {:ok, [3]} = FailureDiagnostics.map_paths(c.hints, parsed_log_result(added))
+
+    # Neither side changed by a member: the diagnosis stays unavailable.
+    unowned =
+      "TauCeti/Other/A.lean: missing project import TauCeti.Other.B: expected TauCeti/Other/B.lean" <>
+        tail
+
+    assert :unavailable = FailureDiagnostics.map_paths(c.hints, parsed_log_result(unowned))
+  end
+
   test "cascading target overflow preserves precise retry hints but not global unknowns", c do
     alias BorsNG.Worker.FailureDiagnostics
     {batch, evidence} = terminal(c)
