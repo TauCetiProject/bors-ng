@@ -4186,7 +4186,12 @@ defmodule BorsNG.Worker.Batcher do
 
     if state == :retrying do
       poll_after_delay(project)
-      send_message(repo_conn, patches, {state, erred})
+      # Failure diagnostics may withdraw suspects for repair rather than
+      # retry them, so only members with a retry batch hear about a retry.
+      retries = retry_batches(batch.id, patches)
+      {retried, withdrawn} = Enum.split_with(patches, &Map.has_key?(retries, &1.id))
+      send_message(repo_conn, retried, {state, erred})
+      send_message(repo_conn, withdrawn, {:withdrawn_suspect, erred})
     else
       # Record confirmed failure. Dependency recovery decides between a retry
       # and an exclusive proof-repair handoff on the next eligibility heartbeat.

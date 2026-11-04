@@ -15,28 +15,42 @@ defmodule BorsNG.Worker.BatcherMessageAutomaticRequeueTest do
     end)
   end
 
-  test "terminal failures do not ask for a manual bors r+" do
+  test "repairable failures do not ask for a manual bors r+" do
     for message <- [
           {:failed, [%{identifier: "ci", url: nil}]},
           {:conflict, :failed, "main"},
-          {:timeout, :failed},
-          {:canceled, :failed, :eligibility_changed},
-          {:canceled, :failed, :something_else}
+          {:withdrawn_suspect, [%{identifier: "ci", url: nil}]}
         ] do
       text = Message.generate_message(message)
-      assert text =~ "You don't need to run `bors r+`", inspect(message)
+      assert text =~ "automatic repair usually takes this on", inspect(message)
+      assert text =~ "`keep`", inspect(message)
       refute text =~ "someone with permission", inspect(message)
     end
   end
 
-  test "an explicit request to stop still says how to re-queue" do
-    assert Message.generate_message({:canceled, :failed, :requested}) =~
-             "Someone with permission can run `bors r+`"
+  test "eligibility cancellations say the review bot re-queues the PR" do
+    text = Message.generate_message({:canceled, :failed, :eligibility_changed})
+    assert text =~ "the review bot re-queues the PR"
+    refute text =~ "someone with permission"
   end
 
-  test "a recovery handoff points at the recovery comment instead" do
+  test "timeouts and unknown cancellations keep the manual next step" do
+    for message <- [{:timeout, :failed}, {:canceled, :failed, :something_else}] do
+      assert Message.generate_message(message) =~ "someone with permission", inspect(message)
+    end
+  end
+
+  test "an explicit request to stop still says how to re-queue" do
+    for reason <- [:requested, :cancel_all] do
+      assert Message.generate_message({:canceled, :failed, reason}) =~
+               "Someone with permission can run `bors r+`"
+    end
+  end
+
+  test "a recovery handoff does not promise a recovery comment" do
     text = Message.generate_message({:canceled, :failed, :source_compatibility})
-    assert text =~ "merge-queue recovery comment"
+    assert text =~ "If merge-queue recovery takes it on"
+    assert text =~ "`keep`"
     refute text =~ "bors r+"
   end
 
