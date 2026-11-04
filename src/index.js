@@ -67,6 +67,9 @@ export class BorsContainer extends Container {
     BORS_BASE_BRANCH: workerEnv.BORS_BASE_BRANCH ?? "main",
     BORS_STAGE_DISPATCH_PROJECT: workerEnv.BORS_PROJECT ?? "TauCetiProject/TauCeti",
     BORS_IMPORT_PROVIDER_POLICY: workerEnv.BORS_IMPORT_PROVIDER_POLICY ?? "bounded_depth_v1",
+    // Tau Ceti's review bot and repair workers re-queue failed PRs, so bors
+    // comments do not tell authors to ask for a manual `bors r+`.
+    BORS_AUTOMATIC_REQUEUE: workerEnv.BORS_AUTOMATIC_REQUEUE ?? (workerEnv.BORS_PROJECT && workerEnv.BORS_PROJECT !== "TauCetiProject/TauCeti" ? "false" : "true"),
     // Conservative rollout: one executing operation, serialized per repository.
     BORS_REVIEW_LOGIN: workerEnv.BORS_REVIEW_LOGIN ?? (workerEnv.BORS_PROJECT && workerEnv.BORS_PROJECT !== "TauCetiProject/TauCeti" ? "" : "tauceti-review-bot[bot]"),
     BORS_ASYNC_ORCHESTRATION: "true",

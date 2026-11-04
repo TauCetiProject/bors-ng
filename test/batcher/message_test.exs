@@ -231,14 +231,18 @@ defmodule BorsNG.Worker.BatcherMessageTest do
   end
 
   test "generate retry message" do
-    expected_message = "Build failed (retrying...):\n  * stat"
+    expected_message =
+      "Build failed (retrying...):\n  * stat\n\nThis PR was tested together with other PRs, and that batch failed. Bors is retrying it in a smaller batch to find the PR that caused the failure. No action is needed: the bors check on this PR links to the batch it is waiting in. Bors will comment again if this PR turns out to be the cause."
+
     example_statuses = [%{url: nil, identifier: "stat"}]
     actual_message = Message.generate_message({:retrying, example_statuses})
     assert expected_message == actual_message
   end
 
   test "generate retry message w/ url" do
-    expected_message = "Build failed (retrying...):\n  * [stat](x)"
+    expected_message =
+      "Build failed (retrying...):\n  * [stat](x)\n\nThis PR was tested together with other PRs, and that batch failed. Bors is retrying it in a smaller batch to find the PR that caused the failure. No action is needed: the bors check on this PR links to the batch it is waiting in. Bors will comment again if this PR turns out to be the cause."
+
     example_statuses = [%{url: "x", identifier: "stat"}]
     actual_message = Message.generate_message({:retrying, example_statuses})
     assert expected_message == actual_message
@@ -246,7 +250,7 @@ defmodule BorsNG.Worker.BatcherMessageTest do
 
   test "generate failure message" do
     expected_message =
-      "Build failed:\n  * stat\n\nFix if necessary, and then someone with permission can run `bors r+` or `bors retry`."
+      "Build failed:\n  * stat\n\nThis PR failed on its own, not because of another PR in its batch, so it has left the merge queue. Fix the failure, then someone with permission can run `bors r+` or `bors retry`."
 
     example_statuses = [%{url: nil, identifier: "stat"}]
     actual_message = Message.generate_message({:failed, example_statuses})
@@ -262,15 +266,21 @@ defmodule BorsNG.Worker.BatcherMessageTest do
 
   test "generate conflict message" do
     expected_message =
-      "Merge conflict.\n\nMerge or rebase `main` into this PR and resolve the conflict, then someone with permission can run `bors r+` or `bors retry`."
+      "Merge conflict.\n\nThis PR conflicts with `main`, so it has left the merge queue. Merge or rebase `main` into this PR and resolve the conflict, then someone with permission can run `bors r+` or `bors retry`."
 
     actual_message = Message.generate_message({:conflict, :failed, "main"})
     assert expected_message == actual_message
   end
 
+  test "generate canceled message for an approval that no longer applies" do
+    text = Message.generate_message({:canceled, :failed, :eligibility_changed})
+    assert text =~ "approval no longer applies"
+    assert text =~ "someone with permission can run `bors r+`"
+  end
+
   test "generate canceled message" do
     expected_message =
-      "Bors build canceled.\n\nAddress comments or fix if necessary, and then someone with permission can run `bors r+`."
+      "Bors build canceled.\n\nThis PR left the merge queue because bors was asked to stop merging it. Someone with permission can run `bors r+` when it is ready."
 
     actual_message = Message.generate_message({:canceled, :failed, :requested})
     assert expected_message == actual_message
@@ -291,7 +301,7 @@ defmodule BorsNG.Worker.BatcherMessageTest do
 
   test "generate canceled/retry message" do
     expected_message =
-      "This PR was included in a batch that was canceled, it will be automatically retried"
+      "Another PR left this PR's batch, so bors canceled the batch. This PR is back in the queue and will be retried automatically. No action is needed: the bors check on this PR links to the batch it is waiting in."
 
     actual_message = Message.generate_message({:canceled, :retrying})
     assert expected_message == actual_message
@@ -299,7 +309,7 @@ defmodule BorsNG.Worker.BatcherMessageTest do
 
   test "generate timeout message" do
     expected_message =
-      "Timed out.\n\nFix if necessary, and then someone with permission can run `bors r+` or `bors retry`."
+      "Timed out.\n\nCI did not finish for this PR within the time limit, so it has left the merge queue. Fix anything that needs fixing, then someone with permission can run `bors r+` or `bors retry`."
 
     actual_message = Message.generate_message({:timeout, :failed})
     assert expected_message == actual_message
@@ -307,7 +317,7 @@ defmodule BorsNG.Worker.BatcherMessageTest do
 
   test "generate timeout/retry message" do
     expected_message =
-      "This PR was included in a batch that timed out, it will be automatically retried"
+      "This PR was in a batch that timed out before CI finished. Bors has put it back in the queue and will retry it automatically. No action is needed: the bors check on this PR links to the batch it is waiting in."
 
     actual_message = Message.generate_message({:timeout, :retrying})
     assert expected_message == actual_message
