@@ -3,6 +3,18 @@ defmodule BorsNG.Worker.BatcherMessageTest do
 
   alias BorsNG.Worker.Batcher.Message
 
+  test "a retried PR gets a pending status that names its new batch" do
+    assert {desc, :running} = Message.generate_status({:retrying, :error, 2602})
+    assert desc == "Batch failed; retrying in batch 2602, no action needed"
+    assert String.length(desc) <= 140
+
+    for outcome <- [:timeout, :canceled, :conflict, :race, :waiting, :delayed] do
+      assert {desc, :running} = Message.generate_status({:retrying, outcome, 123_456})
+      assert desc =~ "retrying in batch 123456"
+      assert String.length(desc) <= 140
+    end
+  end
+
   test "suppress pings" do
     assert Message.suppress_pings(nil) == nil
     assert Message.suppress_pings("") == ""

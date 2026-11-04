@@ -1,7 +1,7 @@
 defmodule BorsNG.Worker.Orchestration.Projections do
   @moduledoc "Bounded advisory writes, with no staging/main or approval authority."
   import Ecto.Query
-  alias BorsNG.Database.{Batch, Repo}
+  alias BorsNG.Database.{Batch, LinkPatchBatch, Patch, Repo}
   alias BorsNG.Worker.CandidateJournal
   alias BorsNG.Worker.Orchestration.Outbox
 
@@ -30,7 +30,12 @@ defmodule BorsNG.Worker.Orchestration.Projections do
 
   defp deliver_status(conn, data, status, batch_id) do
     case Repo.get(Batch, batch_id) do
-      nil when status == :ok ->
+      nil when status in [:ok, :running] ->
+        :ok
+
+      # A pending status ("Waiting in queue", "Running", or a retry) for a
+      # batch that has left the queue would stay pending on the PR forever.
+      %Batch{state: state} when status == :running and state not in [:waiting, :running] ->
         :ok
 
       nil ->
@@ -39,8 +44,13 @@ defmodule BorsNG.Worker.Orchestration.Projections do
       %Batch{state: terminal} when status == :ok and terminal in [:canceled, :error, :conflict] ->
         :ok
 
-      %Batch{state: :ok} when status != :ok ->
-        :ok
+      # A late failure for a member of a batch that went on to succeed is
+      # stale. A PR ejected from that batch is no longer a member, and its
+      # cancellation must still replace the pending status it had.
+      %Batch{state: :ok, id: id} when status != :ok ->
+        if member?(id, elem(data, 0)),
+          do: :ok,
+          else: :ok = BorsNG.GitHub.post_commit_status_once(conn, data)
 
       batch ->
         # A superseded/unbound generation cannot publish a delayed green.
@@ -49,5 +59,15 @@ defmodule BorsNG.Worker.Orchestration.Projections do
            do: :ok,
            else: :ok = BorsNG.GitHub.post_commit_status_once(conn, data)
     end
+  end
+
+  defp member?(batch_id, sha) do
+    Repo.exists?(
+      from(l in LinkPatchBatch,
+        join: p in Patch,
+        on: p.id == l.patch_id,
+        where: l.batch_id == ^batch_id and (l.head_sha == ^sha or p.commit == ^sha)
+      )
+    )
   end
 end

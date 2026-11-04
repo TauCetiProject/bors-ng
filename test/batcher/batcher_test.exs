@@ -38,6 +38,75 @@ defmodule BorsNG.Worker.BatcherTest do
     |> get_in([{{:installation, 91}, 14}, :labels, pr]) || []
   end
 
+  test "cancel all reports the members and tested commit of a deleted paused batch", %{
+    proj: proj
+  } do
+    GitHub.ServerMock.put_state(%{
+      {{:installation, 91}, 14} => %{
+        branches: %{},
+        commits: %{},
+        comments: %{1 => []},
+        statuses: %{},
+        files: %{}
+      }
+    })
+
+    patch =
+      Repo.insert!(%Patch{project_id: proj.id, pr_xref: 1, commit: "N", into_branch: "master"})
+
+    # A preempted batch waits again but keeps its tested commit.
+    batch =
+      Repo.insert!(%Batch{
+        project_id: proj.id,
+        state: :waiting,
+        into_branch: "master",
+        commit: "iniN"
+      })
+
+    Repo.insert!(%LinkPatchBatch{patch_id: patch.id, batch_id: batch.id, head_sha: "N"})
+
+    Batcher.handle_cast({:cancel_all}, proj.id)
+
+    statuses = GitHub.ServerMock.get_state()[{{:installation, 91}, 14}].statuses
+    assert statuses["N"]["bors"] == :error
+    assert statuses["iniN"]["bors"] == :error
+  end
+
+  test "a successful batch drops late member failures but not an ejected PR's cancellation", %{
+    proj: proj
+  } do
+    GitHub.ServerMock.put_state(%{
+      {{:installation, 91}, 14} => %{
+        branches: %{},
+        commits: %{},
+        comments: %{},
+        statuses: %{},
+        files: %{}
+      }
+    })
+
+    member =
+      Repo.insert!(%Patch{project_id: proj.id, pr_xref: 1, commit: "N", into_branch: "master"})
+
+    batch = Repo.insert!(%Batch{project_id: proj.id, state: :ok, into_branch: "master"})
+    Repo.insert!(%LinkPatchBatch{patch_id: member.id, batch_id: batch.id, head_sha: "N"})
+
+    Process.put(:orchestration_job, %{project_id: proj.id})
+    conn = {{:installation, 91}, 14}
+
+    for sha <- ["N", "E"] do
+      BorsNG.Worker.Orchestration.Projections.deliver(
+        {:status, conn, {sha, :error, "Canceled", "u"}, batch.id}
+      )
+    end
+
+    statuses = GitHub.ServerMock.get_state()[conn].statuses
+    refute Map.has_key?(statuses, "N")
+    assert statuses["E"]["bors"] == :error
+  after
+    Process.delete(:orchestration_job)
+  end
+
   test "cancel all", %{proj: proj} do
     patch =
       %Patch{
@@ -234,14 +303,16 @@ defmodule BorsNG.Worker.BatcherTest do
     %LinkPatchBatch{
       patch_id: patch.id,
       batch_id: batch.id,
-      reviewer: "nobody"
+      reviewer: "nobody",
+      head_sha: patch.commit
     }
     |> Repo.insert!()
 
     %LinkPatchBatch{
       patch_id: patch2.id,
       batch_id: batch.id,
-      reviewer: "nobody"
+      reviewer: "nobody",
+      head_sha: patch2.commit
     }
     |> Repo.insert!()
 
@@ -262,7 +333,7 @@ defmodule BorsNG.Worker.BatcherTest do
                },
                statuses: %{
                  "N" => %{"bors" => :error},
-                 "P" => %{"bors" => :error}
+                 "P" => %{"bors" => :running}
                },
                files: %{}
              }
@@ -5769,8 +5840,8 @@ defmodule BorsNG.Worker.BatcherTest do
                },
                statuses: %{
                  "iniNO" => %{"bors" => :error},
-                 "N" => %{"bors" => :error},
-                 "O" => %{"bors" => :error}
+                 "N" => %{"bors" => :running},
+                 "O" => %{"bors" => :running}
                },
                files: %{"staging.tmp" => %{"bors.toml" => ~s/status = [ "ci" ]/}},
                pulls: %{
@@ -5850,7 +5921,7 @@ defmodule BorsNG.Worker.BatcherTest do
                statuses: %{
                  "iniNO" => %{"bors" => :error},
                  "N" => %{"bors" => :running},
-                 "O" => %{"bors" => :error}
+                 "O" => %{"bors" => :running}
                },
                files: %{"staging.tmp" => %{"bors.toml" => ~s/status = [ "ci" ]/}},
                pulls: %{
@@ -5930,7 +6001,7 @@ defmodule BorsNG.Worker.BatcherTest do
                  "iniNO" => %{"bors" => :error},
                  "iniN" => %{"bors" => :error},
                  "N" => %{"bors" => :error},
-                 "O" => %{"bors" => :error}
+                 "O" => %{"bors" => :running}
                },
                files: %{"staging.tmp" => %{"bors.toml" => ~s/status = [ "ci" ]/}},
                pulls: %{
@@ -6918,8 +6989,8 @@ defmodule BorsNG.Worker.BatcherTest do
                },
                statuses: %{
                  "iniNO" => %{"bors" => :error},
-                 "N" => %{"bors" => :error},
-                 "O" => %{"bors" => :error}
+                 "N" => %{"bors" => :running},
+                 "O" => %{"bors" => :running}
                },
                files: %{"staging.tmp" => %{"bors.toml" => ~s/status = [ "ci" ]/}},
                pulls: %{
@@ -7003,7 +7074,7 @@ defmodule BorsNG.Worker.BatcherTest do
                statuses: %{
                  "iniNO" => %{"bors" => :error},
                  "N" => %{"bors" => :running},
-                 "O" => %{"bors" => :error}
+                 "O" => %{"bors" => :running}
                },
                files: %{"staging.tmp" => %{"bors.toml" => ~s/status = [ "ci" ]/}},
                pulls: %{
@@ -7089,7 +7160,7 @@ defmodule BorsNG.Worker.BatcherTest do
                  "iniNO" => %{"bors" => :error},
                  "iniN" => %{"bors" => :error},
                  "N" => %{"bors" => :error},
-                 "O" => %{"bors" => :error}
+                 "O" => %{"bors" => :running}
                },
                files: %{"staging.tmp" => %{"bors.toml" => ~s/status = [ "ci" ]/}},
                pulls: %{
@@ -7678,6 +7749,42 @@ defmodule BorsNG.Worker.BatcherTest do
     assert length(batches) == 3
     patch1Batches = patch1.id |> Batch.all_for_patch() |> Repo.all()
     assert length(Enum.reject(patch1Batches, &(&1.state == :error))) == 1
+
+    # Every member was re-queued by the bisection, so no PR reports a failed
+    # bors check while it waits for its retry; the tested commit still fails.
+    statuses = GitHub.ServerMock.get_state()[{{:installation, 91}, 14}].statuses
+
+    for sha <- ~w(N O P Q) do
+      assert statuses[sha]["bors"] == :running
+    end
+
+    assert statuses["iniNOPQ"]["bors"] == :error
+
+    retries = Batcher.retry_batches(batch.id, [patch1, patch2, patch3, patch4])
+    assert map_size(retries) == 4
+    assert Enum.all?(Map.values(retries), &(&1 > batch.id))
+  end
+
+  test "retry_batches needs a known matching head in a newer queued batch", %{proj: proj} do
+    patch =
+      Repo.insert!(%Patch{project_id: proj.id, pr_xref: 1, commit: "N", into_branch: "master"})
+
+    old = Repo.insert!(%Batch{project_id: proj.id, into_branch: "master", state: :error})
+    Repo.insert!(%LinkPatchBatch{batch_id: old.id, patch_id: patch.id, head_sha: "N"})
+
+    unknown = Repo.insert!(%Batch{project_id: proj.id, into_branch: "master", state: :waiting})
+    Repo.insert!(%LinkPatchBatch{batch_id: unknown.id, patch_id: patch.id, head_sha: nil})
+
+    stale = Repo.insert!(%Batch{project_id: proj.id, into_branch: "master", state: :waiting})
+    Repo.insert!(%LinkPatchBatch{batch_id: stale.id, patch_id: patch.id, head_sha: "M"})
+
+    assert Batcher.retry_batches(old.id, [patch]) == %{}
+
+    retry = Repo.insert!(%Batch{project_id: proj.id, into_branch: "master", state: :waiting})
+    Repo.insert!(%LinkPatchBatch{batch_id: retry.id, patch_id: patch.id, head_sha: "N"})
+
+    assert Batcher.retry_batches(old.id, [patch]) == %{patch.id => retry.id}
+    assert Batcher.retry_batches(retry.id, [patch]) == %{}
   end
 
   test "max_batch_size is enforced", %{proj: proj} do
