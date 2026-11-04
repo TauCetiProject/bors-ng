@@ -2755,7 +2755,10 @@ defmodule BorsNG.Worker.Batcher do
     project = batch.project
     repo_conn = get_repo_conn(project)
     patches = Enum.map(patch_links, & &1.patch)
-    state = BorsNG.Worker.FailureIsolation.split(patch_links, batch, local_conflict(batch))
+
+    state =
+      BorsNG.Worker.FailureIsolation.split(patch_links, batch, local_conflict(batch), repo_conn)
+
     poll_after_delay(project)
 
     if state == :failed do
