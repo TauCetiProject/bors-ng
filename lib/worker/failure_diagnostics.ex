@@ -916,8 +916,12 @@ defmodule BorsNG.Worker.FailureDiagnostics do
           else: []
       end)
 
+    # Every owned failure is a suspect even when another failing module has
+    # no owner: deferring an owned broken module is always right, and the
+    # remainder's next build reports what the unowned failure was about.
+    # With no owned failure at all the diagnosis stays unavailable.
     if FailureIsolation.ownership_complete?(hints) and mapped != [] and
-         Enum.all?(mapped, &(&1 != [])),
+         Enum.any?(mapped, &(&1 != [])),
        do: {:ok, mapped |> List.flatten() |> Enum.uniq()},
        else: :unavailable
   end

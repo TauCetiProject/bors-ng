@@ -15,7 +15,11 @@ defmodule BorsNG.Worker.ImporterOrigins do
   @policy "importer-hop-v1"
   def policy, do: @policy
 
-  @doc "The unchanged module a lint finding names, by listed path or private declaration."
+  @doc """
+  The unchanged module a finding names: a lint finding by listed path or private
+  declaration, or a compile failure in a module no member changed (its import
+  of a changed module broke it).
+  """
   def origin(%{"kind" => "environment_linter"} = observation) do
     case observation["paths"] do
       [path] when is_binary(path) -> if project_path?(path), do: path
@@ -23,6 +27,9 @@ defmodule BorsNG.Worker.ImporterOrigins do
       _ -> nil
     end
   end
+
+  def origin(%{"kind" => "compiler_error", "paths" => [path]}) when is_binary(path),
+    do: if(project_path?(path), do: path)
 
   def origin(_), do: nil
 

@@ -966,7 +966,7 @@ defmodule BorsNG.Worker.FailureIsolationTest do
       findings: [%{linter: "simpNF", declaration: "_private.Probe", unknown: "missing_range"}]
     }
 
-    assert :unavailable =
+    assert {:ok, [3]} =
              FailureDiagnostics.map_paths(
                c.hints,
                parsed_log_result(
@@ -1071,7 +1071,9 @@ defmodule BorsNG.Worker.FailureIsolationTest do
 
     unknown = %{linter: "checkType", declaration: "_private.Probe", unknown: "missing_range"}
 
-    assert :unavailable =
+    # The owned finding is a suspect even beside an unlocated one; the
+    # remainder's next build reports what the unlocated finding was about.
+    assert {:ok, [2]} =
              FailureDiagnostics.map_paths(c.hints, environment_result([finding, unknown]))
 
     unchanged = %{finding | path: "TauCeti/Provider.lean"}
