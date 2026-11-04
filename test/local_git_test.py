@@ -982,6 +982,36 @@ class LocalGitTest(unittest.TestCase):
         self.request['members'] = [self.member(1, importer)]
         self.assertEqual(self.run_mirror()['diagnostic_hints']['missing_imports'][0]['provider_path'], 'TauCeti/Provider.lean')
 
+    def test_removed_source_breaks_an_unchanged_importer_at_assembly(self):
+        fork = self.commit(self.base, {'TauCeti/Provider.lean': 'module\ndef x := 1\n'})
+        # Main gains an importer after the member's head was forked; the member
+        # never touches it, so only the whole-tree pass can see the gap.
+        main = self.commit(fork, {'TauCeti/Importer.lean': 'module\npublic import TauCeti.Provider\ndef y := 1\n'})
+        deleter = self.commit(fork, {'TauCeti/Provider.lean': None})
+        other = self.commit(fork, {'TauCeti/Other.lean': 'module\ndef z := 1\n'})
+        self.request['identity']['base_sha'] = main
+        self.request['members'] = [self.member(1, deleter), self.member(2, other)]
+        hints = self.run_mirror()['diagnostic_hints']
+        self.assertTrue(hints['complete'])
+        self.assertEqual(hints['missing_imports'], [dict(
+            pr=1, path='TauCeti/Importer.lean', module='TauCeti.Provider',
+            provider_path='TauCeti/Provider.lean', removed=True)])
+        # A member importing the removed source is charged for its own import
+        # and the remover is charged once more; nothing is reported twice.
+        consumer = self.commit(fork, {'TauCeti/Consumer.lean': 'module\npublic import TauCeti.Provider\n'})
+        self.request['members'] = [self.member(1, deleter), self.member(3, consumer)]
+        hints = self.run_mirror()['diagnostic_hints']
+        self.assertEqual(sorted((f['pr'], f['path'], f.get('removed', False)) for f in hints['missing_imports']), [
+            (1, 'TauCeti/Consumer.lean', True), (1, 'TauCeti/Importer.lean', True),
+            (3, 'TauCeti/Consumer.lean', False)])
+        # A gap already on main is main's own, never charged to a member.
+        broken = self.commit(main, {'TauCeti/Stale.lean': 'module\npublic import TauCeti.Gone\n'})
+        self.request['identity']['base_sha'] = broken
+        self.request['members'] = [self.member(2, other), self.member(4, self.commit(fork, {'TauCeti/Four.lean': 'module\n'}))]
+        hints = self.run_mirror()['diagnostic_hints']
+        self.assertTrue(hints['complete'])
+        self.assertEqual(hints['missing_imports'], [])
+
     def test_large_diagnostic_ownership_uses_batched_assembly_provenance(self):
         self.request.update(timeout=120, members=[
             self.member(n, self.commit(self.base, {f'TauCeti/F{n}.lean': 'def x := 1\n'}))

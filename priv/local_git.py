@@ -330,7 +330,7 @@ class Mirror:
             # Optional imports get their own five-second cap inside the unchanged
             # total 15s budget. Publish them atomically; partial absence is unknown.
             self.deadline = min(self.deadline, time.monotonic() + 5)
-            optional = self.diagnostic_dependencies(changed, candidate)
+            optional = self.diagnostic_dependencies(changed, candidate, base=base)
             if time.monotonic() >= self.deadline:
                 raise Failure('timeout')
             hints.update(optional, dependencies_complete=True, complete=True)
@@ -403,6 +403,51 @@ class Mirror:
             raise Failure('diagnostic_limit')
         return changed
 
+    def removed_source_imports(self, changed, candidate, base, owners, known):
+        """Imports broken by a source a member removed, charged to that member.
+
+        The CI preflight checks every header in the exact candidate tree, so a
+        deleted or renamed module fails the whole batch through an importer no
+        member touched (the per-member pass above only reads changed files).
+        One inventory of the assembled tree, with headers cached by blob, finds
+        the same gaps here. Charged to the member whose diff removed the source,
+        else to a member that changed the importer. Gaps already on the base are
+        main's own. Best effort inside the remaining optional budget: anything
+        incomplete or over budget yields no finding, never a failure.
+        """
+        reserve = 0.5
+        if time.monotonic() >= self.deadline - 2 * reserve:
+            return []
+        previous = self.deadline
+        self.deadline = previous - reserve
+        try:
+            headers = {}
+            baseline = self.source_inventory(base, headers)
+            baseline_missing = {(path, module) for path, modules in baseline.items()
+                                for module in modules
+                                if module.replace('.', '/') + '.lean' not in baseline}
+            inventory = self.source_inventory(candidate, headers)
+            seen = {(f['pr'], f['path'], f['module']) for f in known}
+            findings = []
+            for path, modules in sorted(inventory.items()):
+                for module in modules:
+                    provider = module.replace('.', '/') + '.lean'
+                    if provider in inventory or (path, module) in baseline_missing:
+                        continue
+                    removed = owners.get(provider, [])
+                    for pr in removed or owners.get(path, []):
+                        if (pr, path, module) not in seen:
+                            seen.add((pr, path, module))
+                            findings.append(dict(pr=pr, path=path, module=module, provider_path=provider,
+                                                 removed=bool(removed)))
+                    if len(findings) > 64:
+                        return []
+            return findings
+        except (Failure, UnicodeError):
+            return []
+        finally:
+            self.deadline = previous
+
     def diagnostic_objects(self, oids, kind):
         data = self.git('cat-file', '--batch', input=''.join(oid + '\n' for oid in oids),
                         binary=True, output_limit=4 * 1024 * 1024)[0]
@@ -422,7 +467,7 @@ class Mirror:
             raise Failure('diagnostic_provenance')
         return objects
 
-    def diagnostic_dependencies(self, changed, candidate, owners=None, budget=None):
+    def diagnostic_dependencies(self, changed, candidate, owners=None, budget=None, base=None):
         if owners is None:
             owners = {}
             for change in changed:
@@ -474,6 +519,8 @@ class Mirror:
                         missing.append(dict(pr=change['pr'], path=path, module=module, provider_path=provider))
             dependencies.update(member_dependencies)
             per_member.append(change | dict(dependency_paths=sorted(member_dependencies)))
+        if base:
+            missing.extend(self.removed_source_imports(changed, candidate, base, owners, missing))
         result = dict(changed_files=per_member, import_edges=[list(e) for e in sorted(edges)],
                       missing_imports=missing, dependency_paths=sorted(dependencies))
         if len(json.dumps(result)) > 192 * 1024:
