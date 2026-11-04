@@ -165,6 +165,9 @@ defmodule BorsNG.Worker.CandidateJournal do
   # this head and no fresh admission has consumed it yet. One read at approval
   # time over this repository's `provisional_repair` events, never on the
   # scheduler path; the consumption check is bounded by that candidate's events.
+  # A head whose repair request is still active inherits nothing: automatic
+  # admission never offers it, and a human `r+` of it is ejected at assembly by
+  # SourceCompatibility.admit, so that admission must not consume the grant.
   defp readmission(batch, patch, link, now) do
     found =
       Repo.one(
@@ -182,6 +185,7 @@ defmodule BorsNG.Worker.CandidateJournal do
       )
 
     with {candidate, event} <- found,
+         false <- BorsNG.Worker.SourceCompatibility.requested?(patch, link.head_sha),
          suspects when is_list(suspects) <- event.details["suspects"],
          %{} = suspect <- Enum.find(suspects, &(is_map(&1) and &1["pr"] == patch.pr_xref)),
          {age, retries} <-

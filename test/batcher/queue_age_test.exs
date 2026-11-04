@@ -305,7 +305,7 @@ defmodule BorsNG.Worker.QueueAgeTest do
     assert QueueAge.next_retry(legacy) == 1
   end
 
-  test "a handed-off suspect inherits its retained age once, only at a different head" do
+  test "a handed-off suspect's record is usable at a repaired or lifted head, when well formed" do
     suspect = %{
       "pr" => 7,
       "head_sha" => "old",
@@ -314,8 +314,10 @@ defmodule BorsNG.Worker.QueueAgeTest do
     }
 
     assert QueueAge.readmission(suspect, "new", 100) == {50, 1}
-    # Same head: existing request rules apply, nothing is inherited.
-    assert QueueAge.readmission(suspect, "old", 100) == nil
+    # The same head is usable too: a conflict request lifted after `main`
+    # moved readmits the unchanged head. Whether the request is still active
+    # is the caller's check, not this record's.
+    assert QueueAge.readmission(suspect, "old", 100) == {50, 1}
     # Legacy record without a counter starts with the full allowance.
     assert QueueAge.readmission(Map.delete(suspect, "queue_age_retries"), "new", 100) == {50, 0}
     # The allowance travels unchanged; an exhausted one has nothing to pass on.

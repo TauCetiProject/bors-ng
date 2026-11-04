@@ -7,8 +7,9 @@ batch: this chooses a group, never rearranges members or changes approvals.
 Withdrawal deletes a live link, so that member no longer supplies age. Retries
 retain original admission and lineage across generations; a changed current head
 cannot inherit the old head's scheduling evidence, with one exception: a suspect
-handed to repair keeps its admission age once, at its next different head (see
-"Readmission after a repair handoff" below).
+handed to repair keeps its admission age once, at its next admission after the
+handoff, whether at a repaired head or at the unchanged head once its conflict
+request has been lifted (see "Readmission after a repair handoff" below).
 
 Every member must have a matching admission for project, branch, batch, link,
 patch, exact admitted/current head and reviewer. Manual approval is mutable at
@@ -87,11 +88,20 @@ report already reads for handoff-to-readmission time. No new table or column.
 **Rule.** When a fresh admission (`source` `bors.admission`, never a retry
 clone) is written for a PR, `CandidateJournal.admit` looks up the latest
 `provisional_repair` event of the same repository and branch naming that PR.
-`QueueAge.readmission/3` accepts its record only if the new head differs from
-the handed-off head, the retained age is a positive integer no later than the
-new observation, and the retained counter is a non-negative integer below the
-saturation value 3. The same head keeps the existing request rules (the request
-blocks it, or `maybe_resolve` lifts it) and inherits nothing. The handoff is
+`QueueAge.readmission/3` accepts its record only if the retained age is a
+positive integer no later than the new observation and the retained counter is
+a non-negative integer below the saturation value 3. The head may be the
+handed-off one: a PR peeled from a batch by a construction conflict was never
+broken, and when `main` moves and the head merges cleanly the ordinary sweep's
+`maybe_resolve` lifts its `local-source-v3` request and re-offers admission at
+the unchanged head; that admission inherits like a repaired one. A head whose
+request is still active inherits nothing: `CandidateJournal.admit` checks
+`SourceCompatibility.requested?` for the admitted head. Automatic admission
+never offers such a head (`MergeEligibility.apply_decision` sees an unchanged
+decision id until `maybe_resolve` clears it), and a human `r+` of it does reach
+`insert_member` but is ejected at assembly by `SourceCompatibility.admit`, which
+deletes the link and withdraws the approval; the `requested?` check keeps that
+ejected admission from consuming the grant. The handoff is
 consumed by a `suspect_readmitted` event (source `bors.admission`) appended to
 the handoff candidate with `pr`, `patch_id`, `head_sha`, `handoff_head_sha`,
 `handoff_event_id`, `admission_id`, `link_id`, `batch_id`,
@@ -150,7 +160,8 @@ counter fields are additive and ignored by older code.
 
 For readmission age, verify in the journal that the next `provisional_repair`
 carries `original_admitted_at` and `queue_age_retries` for each suspect, and
-that the suspect's next fresh admission at a different head has
+that the suspect's next fresh admission after the handoff, at a repaired head
+or at the unchanged head after a lifted conflict request, has
 `inherited_handoff.event_id` naming that event, `original_admitted_at` equal to
 the retained value, and a `suspect_readmitted` event on the handoff candidate.
 Replay the next natural selection with the helper above to confirm the returned

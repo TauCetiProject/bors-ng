@@ -2693,6 +2693,141 @@ defmodule BorsNG.Worker.FailureIsolationTest do
       assert Repo.aggregate(Batch, :count, :id) == 2
     end
 
+    test "a conflict-peeled head readmitted unchanged after its request is lifted keeps its age",
+         c do
+      conn = provisional_mock(c)
+      original = CandidateJournal.admission(Enum.at(c.links, 2).id)
+
+      conflict = %{
+        "kind" => "merge_conflict",
+        "pr" => 3,
+        "head_sha" => "head3",
+        "base_sha" => "base",
+        "merge_head" => "merged12",
+        "paths" => ["TauCeti/File3.lean"]
+      }
+
+      hints = Map.merge(c.hints, %{"ownership_complete" => true, "dependencies_complete" => true})
+
+      CandidateJournal.event(c.candidate, "local_conflict", "bors.local_git", %{
+        pr: 3,
+        head_sha: "head3",
+        base_sha: "base",
+        kind: "merge_conflict",
+        merge_head: "merged12",
+        paths: ["TauCeti/File3.lean"],
+        hints: hints
+      })
+
+      assert :retrying = FailureIsolation.split(c.links, c.batch, conflict, conn)
+      [event] = Repo.all(from(e in CandidateEvent, where: e.kind == "provisional_repair"))
+
+      assert hd(event.details["suspects"])["original_admitted_at"] ==
+               original.snapshot["original_admitted_at"]
+
+      suspect = Repo.get!(Patch, Enum.at(c.links, 2).patch_id)
+      assert BorsNG.Worker.SourceCompatibility.requested?(suspect, "head3")
+
+      # A human r+ of the still-requested head: the admission is ordinary and
+      # the assembly-time source check ejects it without consuming the grant.
+      early = Repo.insert!(Batch.new(c.project.id, "main"))
+
+      early_link =
+        CandidateJournal.insert_member(
+          LinkPatchBatch.changeset(%LinkPatchBatch{}, %{
+            batch_id: early.id,
+            patch_id: suspect.id,
+            head_sha: "head3",
+            reviewer: "r"
+          })
+        )
+
+      refute Map.has_key?(CandidateJournal.admission(early_link.id).snapshot, "inherited_handoff")
+      refute Repo.exists?(from(e in CandidateEvent, where: e.kind == "suspect_readmitted"))
+
+      assert [] =
+               BorsNG.Worker.SourceCompatibility.admit(
+                 c.project,
+                 conn,
+                 early,
+                 stored_links(early.id),
+                 "base"
+               )
+
+      assert Repo.get_by(LinkPatchBatch, id: early_link.id) == nil
+
+      # main moves, the head now merges cleanly and the ordinary sweep lifts the request.
+      new_main = String.duplicate("d", 40)
+
+      GitHub.ServerMock.put_state(
+        put_in(GitHub.ServerMock.get_state(), [conn, :branches], %{"main" => new_main})
+      )
+
+      BorsNG.Worker.SourceCompatibility.apply_results(c.project, conn, new_main, [suspect], [
+        %{
+          "pr" => 3,
+          "head_sha" => "head3",
+          "base_sha" => new_main,
+          "policy" => "local-source-v3",
+          "status" => "pass"
+        }
+      ])
+
+      suspect = Repo.get!(Patch, suspect.id)
+      refute BorsNG.Worker.SourceCompatibility.requested?(suspect, "head3")
+      assert suspect.commit == "head3"
+
+      returned = Repo.insert!(Batch.new(c.project.id, "main"))
+
+      link =
+        CandidateJournal.insert_member(
+          LinkPatchBatch.changeset(%LinkPatchBatch{}, %{
+            batch_id: returned.id,
+            patch_id: suspect.id,
+            head_sha: "head3",
+            reviewer: "r"
+          })
+        )
+
+      admission = CandidateJournal.admission(link.id)
+
+      assert admission.snapshot["original_admitted_at"] ==
+               original.snapshot["original_admitted_at"]
+
+      assert admission.snapshot["inherited_handoff"]["event_id"] == event.id
+      assert admission.snapshot["inherited_handoff"]["head_sha"] == "head3"
+      [readmitted] = Repo.all(from(e in CandidateEvent, where: e.kind == "suspect_readmitted"))
+      assert readmitted.details["head_sha"] == "head3"
+      assert readmitted.details["admission_id"] == admission.id
+
+      [remainder] = Repo.all(from(b in Batch, where: b.sealed))
+      waiting = [returned, remainder]
+
+      keys =
+        CandidateJournal.queue_age_members(waiting)
+        |> then(
+          &BorsNG.Worker.Batcher.QueueAge.keys(waiting, &1, System.system_time(:microsecond))
+        )
+
+      assert keys[returned.id] == {original.snapshot["original_admitted_at"], :original_admission}
+
+      # The grant is spent: a later admission of the same head is ordinary.
+      returned |> Batch.changeset(%{state: :error}) |> Repo.update!()
+      later = Repo.insert!(Batch.new(c.project.id, "main"))
+
+      later_link =
+        CandidateJournal.insert_member(
+          LinkPatchBatch.changeset(%LinkPatchBatch{}, %{
+            batch_id: later.id,
+            patch_id: suspect.id,
+            head_sha: "head3",
+            reviewer: "r"
+          })
+        )
+
+      refute Map.has_key?(CandidateJournal.admission(later_link.id).snapshot, "inherited_handoff")
+    end
+
     test "a bundled conflicting head keeps the conservative retry batches", c do
       conn = provisional_mock(c)
       [a, b | _] = c.links
