@@ -6,7 +6,9 @@ all current members** (microseconds). A bundle or sealed retry stays one atomic
 batch: this chooses a group, never rearranges members or changes approvals.
 Withdrawal deletes a live link, so that member no longer supplies age. Retries
 retain original admission and lineage across generations; a changed current head
-cannot inherit the old head's scheduling evidence.
+cannot inherit the old head's scheduling evidence, with one exception: a suspect
+handed to repair keeps its admission age once, at its next different head (see
+"Readmission after a repair handoff" below).
 
 Every member must have a matching admission for project, branch, batch, link,
 patch, exact admitted/current head and reviewer. Manual approval is mutable at
@@ -57,6 +59,66 @@ ages now follow FIFO within the existing priority, rather than silently treating
 creation order as a new diagnostic priority. Diagnostic partition membership,
 strict narrowing, suspect repair and quarantine authority are unchanged.
 
+## Readmission after a repair handoff
+
+A PR attributed as a culprit, or peeled from a batch by a construction
+conflict, is withdrawn by `SourceCompatibility.provisional_failure` with a
+head-bound repair request (deploy/suspect-handoff.md). It comes back through
+ordinary re-approval at a new head, and until now that new head was a fresh
+admission that re-entered behind everything approved while the author was
+repairing it. The suspect now inherits its withdrawn admission's
+`original_admitted_at` once per handoff, so the repaired head takes the place
+the PR already held. Approvals, authorization, dispatch and promotion are
+unchanged; this is only an age input.
+
+**Record.** The handoff's `provisional_repair` event
+(source `bors.failure_isolation`) carries, for each entry of `suspects`, the
+suspect's `patch_id`, `link_id`, `admission_id`, `original_admitted_at` (the
+age the withdrawn admission carried, itself possibly inherited through retry
+generations) and `queue_age_retries`, beside the existing `pr` and `head_sha`.
+A missing or mismatched parent admission records `nil` and passes nothing on.
+The event was chosen over the persisted request on the patch
+(`patch.source_compatibility`) because the request is rewritten by the source
+sweep as soon as the new head is checked, which may happen before or after the
+re-approval, while the journal is append-only and survives head changes,
+withdrawals and batch deletion. It is also the record the TauCetiWorker journal
+report already reads for handoff-to-readmission time. No new table or column.
+
+**Rule.** When a fresh admission (`source` `bors.admission`, never a retry
+clone) is written for a PR, `CandidateJournal.admit` looks up the latest
+`provisional_repair` event of the same repository and branch naming that PR.
+`QueueAge.readmission/3` accepts its record only if the new head differs from
+the handed-off head, the retained age is a positive integer no later than the
+new observation, and the retained counter is a non-negative integer below the
+saturation value 3. The same head keeps the existing request rules (the request
+blocks it, or `maybe_resolve` lifts it) and inherits nothing. The handoff is
+consumed by a `suspect_readmitted` event (source `bors.admission`) appended to
+the handoff candidate with `pr`, `patch_id`, `head_sha`, `handoff_head_sha`,
+`handoff_event_id`, `admission_id`, `link_id`, `batch_id`,
+`original_admitted_at`, `queue_age_retries` and `readmitted_at`; a later fresh
+admission of the same PR finds that marker and is ordinary. A later handoff of
+the readmitted head records the inherited age again, so each handoff grants
+one readmission. The lookup is one read at approval time over the repository's
+`provisional_repair` events plus the handoff candidate's own events; the
+scheduler path is untouched and still validates the inherited value against
+the current admission record (exact head, reviewer, patch, branch, batch and
+observation) like any other age.
+
+**Allowance.** The readmitted admission carries `queue_age_retries` unchanged
+from the admission it inherits from; it does not start at 0. The counter bounds
+how often one age can overtake peers through clone generations, and it belongs
+with that age. The handoff spends none of it, so a repaired suspect is not
+punished, and renews none of it, so a handoff cannot refresh an allowance the
+way the policy forbids neutral clones from doing. A record whose counter is
+already saturated has no preference left to pass on and gives an ordinary
+admission with a fresh age and counter 0.
+
+**Journal.** The inheriting admission snapshot gains `inherited_handoff` with
+`candidate_id`, `event_id`, `head_sha` (the handed-off head), `admission_id`
+and `handed_off_at`. Ordinary admissions keep their exact previous shape.
+Candidates freeze the field with the rest of the member snapshot. Older code
+ignores all of these fields.
+
 ## Replay and rollout
 
 Run without Mix, Ecto, application or database startup:
@@ -85,3 +147,15 @@ Do not cancel work or dispatch synthetic production CI to obtain evidence.
 Production verification and unobserved performance benefits remain pending until
 actual receipts exist. Rollback is the normal reviewed code revert; journal
 counter fields are additive and ignored by older code.
+
+For readmission age, verify in the journal that the next `provisional_repair`
+carries `original_admitted_at` and `queue_age_retries` for each suspect, and
+that the suspect's next fresh admission at a different head has
+`inherited_handoff.event_id` naming that event, `original_admitted_at` equal to
+the retained value, and a `suspect_readmitted` event on the handoff candidate.
+Replay the next natural selection with the helper above to confirm the returned
+batch is ordered by the inherited age ahead of work approved during the repair.
+Rollback is the same ordinary revert; `inherited_handoff`, the extended
+`suspects` entries and `suspect_readmitted` are additive and ignored by older
+code, and admissions already written keep their inherited age as a plain
+`original_admitted_at`.

@@ -305,6 +305,77 @@ defmodule BorsNG.Worker.QueueAgeTest do
     assert QueueAge.next_retry(legacy) == 1
   end
 
+  test "a handed-off suspect inherits its retained age once, only at a different head" do
+    suspect = %{
+      "pr" => 7,
+      "head_sha" => "old",
+      "original_admitted_at" => 50,
+      "queue_age_retries" => 1
+    }
+
+    assert QueueAge.readmission(suspect, "new", 100) == {50, 1}
+    # Same head: existing request rules apply, nothing is inherited.
+    assert QueueAge.readmission(suspect, "old", 100) == nil
+    # Legacy record without a counter starts with the full allowance.
+    assert QueueAge.readmission(Map.delete(suspect, "queue_age_retries"), "new", 100) == {50, 0}
+    # The allowance travels unchanged; an exhausted one has nothing to pass on.
+    assert QueueAge.readmission(%{suspect | "queue_age_retries" => 2}, "new", 100) == {50, 2}
+    assert QueueAge.readmission(%{suspect | "queue_age_retries" => 3}, "new", 100) == nil
+
+    for bad <- [
+          %{suspect | "original_admitted_at" => nil},
+          %{suspect | "original_admitted_at" => 0},
+          %{suspect | "original_admitted_at" => -5},
+          %{suspect | "original_admitted_at" => "50"},
+          %{suspect | "original_admitted_at" => 101},
+          %{suspect | "head_sha" => nil},
+          %{suspect | "queue_age_retries" => -1},
+          %{suspect | "queue_age_retries" => "0"},
+          Map.delete(suspect, "head_sha"),
+          Map.delete(suspect, "original_admitted_at"),
+          nil,
+          []
+        ] do
+      assert QueueAge.readmission(bad, "new", 100) == nil
+    end
+
+    assert QueueAge.readmission(suspect, nil, 100) == nil
+    assert QueueAge.readmission(suspect, "new", nil) == nil
+    # The age at the observation instant is still valid; a later one is not.
+    assert QueueAge.readmission(suspect, "new", 50) == {50, 1}
+    assert QueueAge.readmission(suspect, "new", 49) == nil
+  end
+
+  test "a readmitted admission is ordered by its inherited age and validated like any other" do
+    peer = batch(1, 10)
+    readmitted = batch(2, 20)
+    {l, h, a} = member(readmitted, 2, 1, 1)
+
+    inherited =
+      Map.put(a.snapshot, "inherited_handoff", %{
+        "candidate_id" => 99,
+        "event_id" => 500,
+        "head_sha" => "handed-off",
+        "admission_id" => 400,
+        "handed_off_at" => 40
+      })
+
+    row = {l, h, %{a | snapshot: inherited}}
+    assert ordered([peer, readmitted], [member(peer, 1, 5), row]) == [readmitted, peer]
+    assert QueueAge.key(readmitted, [row], 100) == {1, :original_admission}
+
+    # The additive field grants nothing on its own: the current admission
+    # record still has to pass every exact-head and age check.
+    assert QueueAge.key(readmitted, [{l, "moved", %{a | snapshot: inherited}}], 100) ==
+             {20_000_000, :poll_fallback}
+
+    assert QueueAge.key(readmitted, [{l, h, %{a | snapshot: inherited, observed_at: 0}}], 100) ==
+             {20_000_000, :poll_fallback}
+
+    exhausted = {l, h, %{a | snapshot: Map.put(inherited, "queue_age_retries", 3)}}
+    assert QueueAge.key(readmitted, [exhausted], 100) == {20_000_000, :retry_fairness}
+  end
+
   test "poll delay, recovery and promotion deadlines remain independent eligibility gates" do
     b = batch(1, 20)
     assert QueueAge.eligible?(b, 30, true)

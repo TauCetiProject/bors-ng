@@ -233,6 +233,253 @@ defmodule BorsNG.Worker.CandidateJournalTest do
     end)
   end
 
+  # A repair handoff as SourceCompatibility.provisional_failure records it,
+  # with the suspect's retained age copied from its withdrawn admission.
+  defp handoff(ctx, link, extra \\ %{}) do
+    candidate = begin(ctx.batch)
+    ctx.batch |> Batch.changeset(%{state: :error}) |> Repo.update!()
+    record = Map.merge(Journal.handoff_record(link), extra)
+
+    Journal.event(candidate, "provisional_repair", "bors.failure_isolation", %{
+      pr: record["pr"],
+      prs: [record["pr"]],
+      suspects: [record],
+      head_sha: link.head_sha,
+      remainder: [],
+      authority: "provisional_suspect"
+    })
+
+    {candidate,
+     Repo.one!(
+       from(e in CandidateEvent,
+         where: e.candidate_id == ^candidate.id and e.kind == "provisional_repair"
+       )
+     )}
+  end
+
+  defp readmit(ctx, head) do
+    patch = Repo.get!(Patch, ctx.patch.id) |> Patch.changeset(%{commit: head}) |> Repo.update!()
+    batch = Repo.insert!(Batch.new(ctx.project.id, "main"))
+    link = member(batch, %{patch | manual_approval: nil})
+    {batch, link, Journal.admission(link.id)}
+  end
+
+  test "a handed-off suspect keeps its admission age once, at its next different head", ctx do
+    link = member(ctx.batch, ctx.patch)
+    original = Journal.admission(link.id)
+    {candidate, event} = handoff(ctx, link)
+
+    [suspect] = event.details["suspects"]
+    assert suspect["pr"] == ctx.patch.pr_xref
+    assert suspect["head_sha"] == "head"
+    assert suspect["admission_id"] == original.id
+    assert suspect["original_admitted_at"] == original.snapshot["original_admitted_at"]
+    assert suspect["queue_age_retries"] == 0
+
+    # A peer approved while the suspect is away would otherwise precede it.
+    peer_patch =
+      Repo.insert!(%Patch{
+        project_id: ctx.project.id,
+        pr_xref: 43,
+        commit: "peer",
+        into_branch: "main"
+      })
+
+    peer = Repo.insert!(Batch.new(ctx.project.id, "main"))
+    member(peer, peer_patch)
+
+    {batch, new_link, admission} = readmit(ctx, "repaired")
+    assert admission.snapshot["source"] == "bors.admission"
+    assert admission.snapshot["head_sha"] == "repaired"
+    assert admission.snapshot["original_admitted_at"] == original.snapshot["original_admitted_at"]
+    assert admission.snapshot["queue_age_retries"] == 0
+    assert admission.snapshot["parent_admission_id"] == nil
+
+    assert admission.snapshot["inherited_handoff"] == %{
+             "candidate_id" => candidate.id,
+             "event_id" => event.id,
+             "head_sha" => "head",
+             "admission_id" => original.id,
+             "handed_off_at" => event.observed_at
+           }
+
+    [readmitted] =
+      Repo.all(from(e in CandidateEvent, where: e.kind == "suspect_readmitted", order_by: e.id))
+
+    assert readmitted.candidate_id == candidate.id
+    assert readmitted.source == "bors.admission"
+    assert readmitted.details["handoff_event_id"] == event.id
+    assert readmitted.details["admission_id"] == admission.id
+    assert readmitted.details["link_id"] == new_link.id
+    assert readmitted.details["batch_id"] == batch.id
+    assert readmitted.details["head_sha"] == "repaired"
+    assert readmitted.details["handoff_head_sha"] == "head"
+
+    assert readmitted.details["original_admitted_at"] ==
+             admission.snapshot["original_admitted_at"]
+
+    assert readmitted.details["readmitted_at"] == admission.observed_at
+
+    now = System.system_time(:microsecond)
+    rows = Journal.queue_age_members([peer, batch])
+    keys = BorsNG.Worker.Batcher.QueueAge.keys([peer, batch], rows, now)
+    assert keys[batch.id] == {original.snapshot["original_admitted_at"], :original_admission}
+    assert elem(keys[peer.id], 1) == :original_admission
+
+    assert Enum.sort_by([peer, batch], &BorsNG.Worker.Batcher.QueueAge.order_key(&1, keys)) == [
+             batch,
+             peer
+           ]
+
+    # The candidate freezes the inherited provenance like any other admission.
+    frozen = Journal.begin(batch, Repo.all(LinkPatchBatch.from_batch(batch.id)), "base")
+    assert hd(frozen.snapshot["members"])["inherited_handoff"]["event_id"] == event.id
+
+    # A second fresh admission without a new handoff is ordinary.
+    batch |> Batch.changeset(%{state: :error}) |> Repo.update!()
+    {_, _, second} = readmit(ctx, "repaired-again")
+    assert second.snapshot["original_admitted_at"] >= admission.observed_at
+    refute Map.has_key?(second.snapshot, "inherited_handoff")
+
+    assert Repo.aggregate(
+             from(e in CandidateEvent, where: e.kind == "suspect_readmitted"),
+             :count,
+             :id
+           ) == 1
+
+    # A later handoff of the readmitted head passes the inherited age on again.
+    second_link = Repo.get_by!(LinkPatchBatch, head_sha: "repaired-again")
+    second_batch = Repo.get!(Batch, second_link.batch_id)
+    ctx = %{ctx | batch: second_batch}
+    {later_candidate, later_event} = handoff(ctx, second_link)
+
+    assert hd(later_event.details["suspects"])["original_admitted_at"] ==
+             second.snapshot["original_admitted_at"]
+
+    {_, _, third} = readmit(ctx, "repaired-thrice")
+    assert third.snapshot["original_admitted_at"] == second.snapshot["original_admitted_at"]
+    assert third.snapshot["inherited_handoff"]["candidate_id"] == later_candidate.id
+    assert third.snapshot["inherited_handoff"]["event_id"] == later_event.id
+  end
+
+  test "the same head, other PRs, retry clones and unusable records inherit nothing", ctx do
+    link = member(ctx.batch, ctx.patch)
+    original = Journal.admission(link.id)
+    {candidate, event} = handoff(ctx, link)
+
+    # Same head: the request rules decide; the handoff stays unconsumed.
+    {same_batch, _, same} = readmit(ctx, "head")
+    refute Map.has_key?(same.snapshot, "inherited_handoff")
+    assert same.snapshot["original_admitted_at"] == same.observed_at
+    assert same.snapshot["original_admitted_at"] > original.snapshot["original_admitted_at"]
+    refute Repo.exists?(from(e in CandidateEvent, where: e.kind == "suspect_readmitted"))
+
+    # Another PR of the same repository is untouched.
+    other =
+      Repo.insert!(%Patch{
+        project_id: ctx.project.id,
+        pr_xref: 44,
+        commit: "other",
+        into_branch: "main"
+      })
+
+    other_batch = Repo.insert!(Batch.new(ctx.project.id, "main"))
+    other_admission = Journal.admission(member(other_batch, other).id)
+    refute Map.has_key?(other_admission.snapshot, "inherited_handoff")
+
+    # A retry clone of the same-head admission keeps the retry lineage rules.
+    same_batch |> Batch.changeset(%{state: :error}) |> Repo.update!()
+
+    clone =
+      Divider.clone_batch(
+        Repo.all(LinkPatchBatch.from_batch(same_batch.id)),
+        ctx.project.id,
+        "main"
+      )
+
+    cloned = Journal.admission(Repo.one!(LinkPatchBatch.from_batch(clone.id)).id)
+    assert cloned.snapshot["source"] == "bors.retry"
+    assert cloned.snapshot["original_admitted_at"] == same.snapshot["original_admitted_at"]
+    refute Map.has_key?(cloned.snapshot, "inherited_handoff")
+
+    # The handoff is still unconsumed, so the next different head inherits.
+    clone |> Batch.changeset(%{state: :error}) |> Repo.update!()
+    {_, _, inherited} = readmit(ctx, "repaired")
+    assert inherited.snapshot["original_admitted_at"] == original.snapshot["original_admitted_at"]
+    assert inherited.snapshot["inherited_handoff"]["event_id"] == event.id
+    assert candidate.id == inherited.snapshot["inherited_handoff"]["candidate_id"]
+  end
+
+  for {field, value} <- [
+        {"original_admitted_at", nil},
+        {"original_admitted_at", "1"},
+        {"original_admitted_at", -1},
+        {"original_admitted_at", 4_000_000_000_000_000},
+        {"queue_age_retries", 3},
+        {"queue_age_retries", "0"},
+        {"head_sha", nil}
+      ] do
+    @field field
+    @value value
+    test "a handoff record with #{field}=#{inspect(value)} gives an ordinary admission", ctx do
+      link = member(ctx.batch, ctx.patch)
+      {_, _} = handoff(ctx, link, %{@field => @value})
+      {_, _, admission} = readmit(ctx, "repaired")
+      refute Map.has_key?(admission.snapshot, "inherited_handoff")
+      assert admission.snapshot["original_admitted_at"] == admission.observed_at
+      assert admission.snapshot["queue_age_retries"] == 0
+      refute Repo.exists?(from(e in CandidateEvent, where: e.kind == "suspect_readmitted"))
+    end
+  end
+
+  test "a handoff without an admission records no age and a retry lineage carries its allowance",
+       ctx do
+    legacy =
+      Repo.insert!(%LinkPatchBatch{
+        batch_id: ctx.batch.id,
+        patch_id: ctx.patch.id,
+        head_sha: "head",
+        reviewer: "reviewer"
+      })
+
+    assert Journal.handoff_record(legacy) == %{
+             "pr" => nil,
+             "head_sha" => "head",
+             "patch_id" => ctx.patch.id,
+             "link_id" => legacy.id,
+             "admission_id" => nil,
+             "original_admitted_at" => nil,
+             "queue_age_retries" => nil
+           }
+
+    Repo.delete!(legacy)
+    link = member(ctx.batch, ctx.patch)
+    original = Journal.admission(link.id)
+
+    # Two failed clones spend two of three; the handoff passes the rest on.
+    {clone_link, _} =
+      Enum.reduce(1..2, {link, ctx.batch}, fn _, {_, parent} ->
+        parent |> Batch.changeset(%{state: :error}) |> Repo.update!()
+
+        child =
+          Divider.clone_batch(
+            Repo.all(LinkPatchBatch.from_batch(parent.id)),
+            ctx.project.id,
+            "main"
+          )
+
+        {Repo.one!(LinkPatchBatch.from_batch(child.id)), child}
+      end)
+
+    assert Journal.admission(clone_link.id).snapshot["queue_age_retries"] == 2
+    ctx = %{ctx | batch: Repo.get!(Batch, clone_link.batch_id)}
+    {_, event} = handoff(ctx, clone_link)
+    assert hd(event.details["suspects"])["queue_age_retries"] == 2
+    {_, _, admission} = readmit(ctx, "repaired")
+    assert admission.snapshot["original_admitted_at"] == original.snapshot["original_admitted_at"]
+    assert admission.snapshot["queue_age_retries"] == 2
+  end
+
   test "scheduling evidence is expendable and never changes approval identity", ctx do
     BorsNG.Worker.Batcher.Diversity.remember(ctx.patch, ["roadmap/A"])
     link = member(ctx.batch, ctx.patch)

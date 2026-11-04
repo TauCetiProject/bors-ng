@@ -36,6 +36,25 @@ defmodule BorsNG.Worker.Batcher.QueueAge do
     end
   end
 
+  # A suspect handed to repair re-enters at a different head with the age its
+  # withdrawn admission carried, once per handoff. The retry allowance travels
+  # with the age it bounds: the handoff spends none of it and renews none of
+  # it. An exhausted or malformed record passes nothing on, and the same head
+  # keeps the existing request rules. Consumption is a journal fact checked by
+  # the caller; this decides only whether the record is usable now.
+  def readmission(suspect, head_sha, now)
+
+  def readmission(%{"head_sha" => old, "original_admitted_at" => age} = suspect, head, now)
+      when is_binary(old) and is_binary(head) and old != head and is_integer(age) and age > 0 and
+             is_integer(now) and age <= now do
+    case Map.get(suspect, "queue_age_retries", 0) do
+      count when is_integer(count) and count >= 0 and count < @inherited_retries -> {age, count}
+      _ -> nil
+    end
+  end
+
+  def readmission(_, _, _), do: nil
+
   def keys(batches, rows, now) do
     members = Enum.group_by(rows, fn {link, _, _} -> link.batch_id end)
 
