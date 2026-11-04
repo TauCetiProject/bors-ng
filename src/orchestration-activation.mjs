@@ -1,7 +1,7 @@
 // Container image rollout may retain an instance's old startup environment.
 // Apply reviewed startup settings once, through the owning Durable Object lifecycle.
 const KEY = 'bors-async-orchestration-activation';
-const VERSION = 'outbox-v3-declaration-names-record-1';
+const VERSION = 'outbox-v3-declaration-collisions-on-1';
 
 export async function activateOrchestration(storage, container, wait = ms => new Promise(resolve => setTimeout(resolve, ms))) {
   if (await storage.get(KEY) === VERSION) return;
