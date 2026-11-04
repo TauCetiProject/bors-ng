@@ -213,6 +213,16 @@ defmodule BorsNG.Worker.DeclarationNamesFetchTest do
        c do
     alias BorsNG.Database.OrchestrationJob
 
+    # Other outbox work (polls, pings) can be queued concurrently by the
+    # dispatcher; only the keyed fetch jobs are this test's subject.
+    fetch_jobs = fn ->
+      Repo.aggregate(
+        from(j in OrchestrationJob, where: like(j.dedup_key, "declaration_names:%")),
+        :count,
+        :id
+      )
+    end
+
     old =
       {System.get_env("BORS_ASYNC_ORCHESTRATION"), System.get_env("BORS_DECLARATION_COLLISIONS")}
 
@@ -230,13 +240,13 @@ defmodule BorsNG.Worker.DeclarationNamesFetchTest do
 
     System.delete_env("BORS_DECLARATION_COLLISIONS")
     assert :ok = DeclarationNames.schedule(c.project.id, [c.link])
-    assert Repo.aggregate(OrchestrationJob, :count, :id) == 0
+    assert fetch_jobs.() == 0
 
     System.put_env("BORS_DECLARATION_COLLISIONS", "record")
     assert DeclarationNames.recording?() and not DeclarationNames.enabled?()
     assert :ok = DeclarationNames.schedule(c.project.id, [c.link])
     assert :ok = DeclarationNames.schedule(c.project.id, [c.link])
-    assert Repo.aggregate(OrchestrationJob, :count, :id) == 1
+    assert fetch_jobs.() == 1
 
     # a stored record means nothing more to queue
     admission = CandidateJournal.admission(c.link.id)
@@ -249,7 +259,7 @@ defmodule BorsNG.Worker.DeclarationNamesFetchTest do
 
     Repo.delete_all(OrchestrationJob)
     assert :ok = DeclarationNames.schedule(c.project.id, [c.link])
-    assert Repo.aggregate(OrchestrationJob, :count, :id) == 0
+    assert fetch_jobs.() == 0
   end
 
   test "a retry copies the record of the same head and a stored record reaches later retries",
