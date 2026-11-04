@@ -23,6 +23,13 @@ from pathlib import Path
 
 PARSER_VERSION = "streaming-v2"
 RECORD_BUFFER = 1024 * 1024
+# One DECLARATION-NAMES record per PR build: the names a PR adds, read from
+# compiled module headers. Bounds follow docs/redesign/specs/declaration-collisions.md.
+DECLARATION_NAMES = 'DECLARATION-NAMES '
+DECLARATION_MAX_MODULES = 4096
+DECLARATION_MAX_NAMES = 16384
+SHA = re.compile(r'[0-9a-f]{40}')
+DECLARATION_MODULE = re.compile(r"TauCeti(?:\.[A-Za-z_][A-Za-z0-9_']*)+")
 ANSI = re.compile(r'\x1b\[[0-?]*[ -/]*[@-~]')
 STAMP = re.compile(r'^\d{4}-\d\d-\d\dT[0-9:.]+Z ')
 PATH = r'TauCeti(?:/[A-Za-z0-9_\-]+)+\.lean'
@@ -246,7 +253,58 @@ def signed_url(url):
                 '.blob.core.windows.net', '.actions.githubusercontent.com')))
 
 
-def read_log(repo, job, token, deadline=None, sample=None):
+def declaration_lines(lines):
+    """Collect every DECLARATION-NAMES payload; the caller requires exactly one."""
+    records = []
+    for raw in lines:
+        line = STAMP.sub('', ANSI.sub('', raw.rstrip('\r\n').lstrip('\ufeff')))
+        if line.startswith(DECLARATION_NAMES) and len(records) < 2:
+            records.append(line[len(DECLARATION_NAMES):])
+    return records
+
+
+def declaration_record(records, head):
+    """Validate one record strictly; anything doubtful is unknown, never a partial map."""
+    if len(records) != 1:
+        return dict(state='unknown', reason='records=%d' % len(records))
+    try:
+        data = json.loads(records[0], object_pairs_hook=unique_object)
+    except ValueError:
+        return dict(state='unknown', reason='invalid_json')
+    if (not isinstance(data, dict)
+            or set(data) != {'version', 'head', 'base', 'tested', 'complete', 'added'}
+            or type(data['version']) is not int or data['version'] != 1
+            or any(not isinstance(data[k], str) or not SHA.fullmatch(data[k])
+                   for k in ('head', 'base', 'tested'))
+            or type(data['complete']) is not bool or not isinstance(data['added'], dict)):
+        return dict(state='unknown', reason='invalid_record')
+    if data['head'] != head:
+        return dict(state='unknown', reason='head_mismatch')
+    if not data['complete']:
+        return dict(state='incomplete', reason='producer_incomplete') if data['added'] == {} \
+            else dict(state='unknown', reason='invalid_record')
+    added = {}
+    total = 0
+    for module, names in data['added'].items():
+        if (not isinstance(module, str) or not DECLARATION_MODULE.fullmatch(module) or len(module) > 512
+                or not isinstance(names, list)):
+            return dict(state='unknown', reason='invalid_record')
+        clean = []
+        for name in names:
+            if (not isinstance(name, str) or not 1 <= len(name) <= 1024
+                    or any(ord(c) < 33 or ord(c) == 127 for c in name)):
+                return dict(state='unknown', reason='invalid_record')
+            clean.append(name)
+        clean = sorted(set(clean))
+        total += len(clean)
+        if clean:
+            added[module] = clean
+    if len(data['added']) > DECLARATION_MAX_MODULES or total > DECLARATION_MAX_NAMES:
+        return dict(state='unknown', reason='record_limit')
+    return dict(state='known' if added else 'empty', added=added)
+
+
+def read_log(repo, job, token, deadline=None, sample=None, reader=None):
     opener = urllib.request.build_opener(NoRedirect)
     request = urllib.request.Request(
         f'https://api.github.com/repositories/{repo}/actions/jobs/{job}/logs',
@@ -270,7 +328,8 @@ def read_log(repo, job, token, deadline=None, sample=None):
         with response:
             if response.status != 200:
                 raise CollectionError('http_failure', http_status=response.status)
-            observations = parse_lines(streamed_lines(response, progress, deadline), sample)
+            lines = streamed_lines(response, progress, deadline)
+            observations = reader(lines) if reader else parse_lines(lines, sample)
         if progress.get('oversized_records'):
             raise CollectionError('unsupported_diagnostic_record', bytes_read=progress['bytes'])
         return observations, progress['bytes']
@@ -378,7 +437,25 @@ def read_raw_artifact(repo, request, token, deadline):
         raise CollectionError('transport_failure') from None
 
 
+def collect_declaration_names(request):
+    """The PR build's one record, or an explicit unknown. No failure observations."""
+    repo, jobs, head = request['repository_id'], request['job_ids'], request.get('head')
+    if (type(repo) is not int or repo <= 0 or len(jobs) != 1 or type(jobs[0]) is not int
+            or jobs[0] <= 0 or not isinstance(head, str) or not SHA.fullmatch(head)):
+        raise ValueError('invalid_identity')
+    deadline = time.monotonic() + request.get('time_budget', 60)
+    try:
+        records, size = read_log(repo, jobs[0], os.environ['BORS_DIAGNOSTICS_TOKEN'], deadline,
+                                 reader=declaration_lines)
+    except CollectionError as error:
+        return dict(complete=True, job_id=jobs[0], bytes=error.bytes_read,
+                    record=dict(state='unknown', reason=error.reason))
+    return dict(complete=True, job_id=jobs[0], bytes=size, record=declaration_record(records, head))
+
+
 def collect(request):
+    if request.get('mode') == 'declaration_names':
+        return collect_declaration_names(request)
     repo, jobs = request['repository_id'], request['job_ids']
     if type(repo) is not int or repo <= 0 or not 1 <= len(jobs) <= 2 or any(
             type(j) is not int or j <= 0 for j in jobs):

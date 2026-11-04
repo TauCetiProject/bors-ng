@@ -896,6 +896,10 @@ defmodule BorsNG.GitHub.ServerMock do
     {{:ok, outcome}, state}
   end
 
+  def do_handle_call(:pr_build_job, repo_conn, {head}, state) do
+    {{:ok, get_in(state, [repo_conn, :pr_build_jobs, head]) || :unavailable}, state}
+  end
+
   def do_handle_call(:get_commit_status, repo_conn, {sha}, state) do
     with(
       {:ok, repo} <- Map.fetch(state, repo_conn),
