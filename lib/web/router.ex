@@ -29,6 +29,13 @@ defmodule BorsNG.Router do
     plug(:force_current_user)
   end
 
+  # Read-only pages a PR author follows from a bors status link. Anyone may
+  # view them while bors only serves public repositories; a deployment that
+  # allows private repositories keeps requiring a login.
+  pipeline :browser_public do
+    plug(:force_current_user_for_private_repos)
+  end
+
   pipeline :browser_admin do
     plug(:force_current_user_admin)
   end
@@ -56,7 +63,7 @@ defmodule BorsNG.Router do
   scope "/batches", BorsNG do
     pipe_through(:browser_page)
     pipe_through(:browser_session)
-    pipe_through(:browser_login)
+    pipe_through(:browser_public)
 
     get("/:id", BatchController, :show)
   end
@@ -64,9 +71,17 @@ defmodule BorsNG.Router do
   scope "/bundles", BorsNG do
     pipe_through(:browser_page)
     pipe_through(:browser_session)
-    pipe_through(:browser_login)
+    pipe_through(:browser_public)
 
     get("/:id", BundleController, :show)
+  end
+
+  scope "/repositories", BorsNG do
+    pipe_through(:browser_page)
+    pipe_through(:browser_session)
+    pipe_through(:browser_public)
+
+    get("/:id", ProjectController, :show)
   end
 
   scope "/repositories", BorsNG do
@@ -75,7 +90,6 @@ defmodule BorsNG.Router do
     pipe_through(:browser_login)
 
     get("/", ProjectController, :index)
-    get("/:id", ProjectController, :show)
     get("/:id/settings", ProjectController, :settings)
     post("/:id/settings/undelegate", ProjectController, :undelegate_user)
     put("/:id/settings/branches", ProjectController, :update_branches)
@@ -164,6 +178,14 @@ defmodule BorsNG.Router do
       |> Plug.Conn.put_session(:auth_redirect_to, conn.request_path)
       |> Phoenix.Controller.redirect(to: "/auth/github")
       |> halt
+    else
+      conn
+    end
+  end
+
+  defp force_current_user_for_private_repos(conn, opts) do
+    if Confex.fetch_env!(:bors, BorsNG)[:allow_private_repos] do
+      force_current_user(conn, opts)
     else
       conn
     end

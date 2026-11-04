@@ -46,10 +46,14 @@ defmodule BorsNG.ProjectController do
       |> from(preload: [:installation])
       |> Repo.get!(id)
 
-    admin? = conn.assigns.user.is_admin
+    user = conn.assigns[:user]
+    admin? = not is_nil(user) and user.is_admin
 
+    # A signed-out visitor only reaches here through the public read-only
+    # routes; `get_permission(nil, _)` is nil, so they get the same `:ro`
+    # view as any signed-in user without a project role.
     mode =
-      conn.assigns.user
+      user
       |> Permission.get_permission(project)
       |> case do
         _ when admin? -> :rw

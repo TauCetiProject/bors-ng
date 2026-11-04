@@ -41,6 +41,43 @@ defmodule BorsNG.ProjectControllerTest do
     assert html_response(conn, 302) =~ "auth"
   end
 
+  test "show the queue read-only without logging in", %{conn: conn, project: project} do
+    Repo.insert!(%Patch{project_id: project.id, pr_xref: 77})
+    conn = get(conn, project_path(conn, :show, project))
+    html = html_response(conn, 200)
+    assert html =~ "example/project"
+    assert html =~ "Awaiting review"
+    refute html =~ "Settings"
+  end
+
+  test "need to log in for settings and the log", %{conn: conn, project: project} do
+    assert html_response(get(conn, project_path(conn, :settings, project)), 302) =~ "auth"
+    assert html_response(get(conn, project_path(conn, :log, project)), 302) =~ "auth"
+  end
+
+  test "need to log in to see the queue when private repositories are allowed", %{
+    conn: conn,
+    project: project
+  } do
+    with_private_repos(fn ->
+      conn = get(conn, project_path(conn, :show, project))
+      assert html_response(conn, 302) =~ "auth"
+    end)
+  end
+
+  defp with_private_repos(fun) do
+    previous = System.get_env("ALLOW_PRIVATE_REPOS")
+    System.put_env("ALLOW_PRIVATE_REPOS", "true")
+
+    try do
+      fun.()
+    after
+      if previous,
+        do: System.put_env("ALLOW_PRIVATE_REPOS", previous),
+        else: System.delete_env("ALLOW_PRIVATE_REPOS")
+    end
+  end
+
   def login(conn) do
     conn = get(conn, auth_path(conn, :index, "github"))
     assert html_response(conn, 302) =~ "MOCK_GITHUB_AUTHORIZE_URL"

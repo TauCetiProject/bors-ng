@@ -5,9 +5,15 @@
     <%= @project.name %>
   </a>
   ›
+  <%= if @conn.assigns[:user] do %>
   <a href="<%= project_path(@conn, :log, @project) %>">
     History
   </a>
+  <% else %>
+  <a href="<%= project_path(@conn, :show, @project) %>">
+    Queue
+  </a>
+  <% end %>
   <h1>
   Batch Details
   </h1>

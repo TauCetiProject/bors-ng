@@ -52,9 +52,31 @@ defmodule BorsNG.BundleControllerTest do
     {:ok, project: project, user: user, bundle: bundle, base: base, stacked: stacked}
   end
 
-  test "need to log in to see this", %{conn: conn, bundle: bundle} do
+  test "shows the bundle without logging in", %{conn: conn, bundle: bundle} do
     conn = get(conn, "/bundles/#{bundle.id}")
-    assert html_response(conn, 302) =~ "auth"
+    html = html_response(conn, 200)
+    assert html =~ "Bundle Details"
+    assert html =~ "#44"
+  end
+
+  test "needs a login when private repositories are allowed", %{conn: conn, bundle: bundle} do
+    with_private_repos(fn ->
+      conn = get(conn, "/bundles/#{bundle.id}")
+      assert html_response(conn, 302) =~ "auth"
+    end)
+  end
+
+  defp with_private_repos(fun) do
+    previous = System.get_env("ALLOW_PRIVATE_REPOS")
+    System.put_env("ALLOW_PRIVATE_REPOS", "true")
+
+    try do
+      fun.()
+    after
+      if previous,
+        do: System.put_env("ALLOW_PRIVATE_REPOS", previous),
+        else: System.delete_env("ALLOW_PRIVATE_REPOS")
+    end
   end
 
   def login(conn) do

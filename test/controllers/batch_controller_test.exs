@@ -65,9 +65,35 @@ defmodule BorsNG.BatchControllerTest do
     {:ok, installation: installation, project: project, user: user, batch: batch, user: user}
   end
 
-  test "need to log in to see this", %{conn: conn, batch: batch} do
+  test "shows batch details without logging in", %{conn: conn, batch: batch} do
     conn = get(conn, "/batches/#{batch.id}")
-    assert html_response(conn, 302) =~ "auth"
+    html = html_response(conn, 200)
+    assert html =~ "Batch Details"
+    assert html =~ "/pull/43"
+    assert html =~ "Log in with GitHub"
+    # The history page needs a login; signed-out visitors get the public queue.
+    assert html =~ ~s(href="/repositories/#{batch.project_id}")
+    refute html =~ "/log"
+  end
+
+  test "needs a login when private repositories are allowed", %{conn: conn, batch: batch} do
+    with_private_repos(fn ->
+      conn = get(conn, "/batches/#{batch.id}")
+      assert html_response(conn, 302) =~ "auth"
+    end)
+  end
+
+  defp with_private_repos(fun) do
+    previous = System.get_env("ALLOW_PRIVATE_REPOS")
+    System.put_env("ALLOW_PRIVATE_REPOS", "true")
+
+    try do
+      fun.()
+    after
+      if previous,
+        do: System.put_env("ALLOW_PRIVATE_REPOS", previous),
+        else: System.delete_env("ALLOW_PRIVATE_REPOS")
+    end
   end
 
   def login(conn) do
