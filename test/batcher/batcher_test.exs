@@ -38,6 +38,75 @@ defmodule BorsNG.Worker.BatcherTest do
     |> get_in([{{:installation, 91}, 14}, :labels, pr]) || []
   end
 
+  test "cancel all reports the members and tested commit of a deleted paused batch", %{
+    proj: proj
+  } do
+    GitHub.ServerMock.put_state(%{
+      {{:installation, 91}, 14} => %{
+        branches: %{},
+        commits: %{},
+        comments: %{1 => []},
+        statuses: %{},
+        files: %{}
+      }
+    })
+
+    patch =
+      Repo.insert!(%Patch{project_id: proj.id, pr_xref: 1, commit: "N", into_branch: "master"})
+
+    # A preempted batch waits again but keeps its tested commit.
+    batch =
+      Repo.insert!(%Batch{
+        project_id: proj.id,
+        state: :waiting,
+        into_branch: "master",
+        commit: "iniN"
+      })
+
+    Repo.insert!(%LinkPatchBatch{patch_id: patch.id, batch_id: batch.id, head_sha: "N"})
+
+    Batcher.handle_cast({:cancel_all}, proj.id)
+
+    statuses = GitHub.ServerMock.get_state()[{{:installation, 91}, 14}].statuses
+    assert statuses["N"]["bors"] == :error
+    assert statuses["iniN"]["bors"] == :error
+  end
+
+  test "a successful batch drops late member failures but not an ejected PR's cancellation", %{
+    proj: proj
+  } do
+    GitHub.ServerMock.put_state(%{
+      {{:installation, 91}, 14} => %{
+        branches: %{},
+        commits: %{},
+        comments: %{},
+        statuses: %{},
+        files: %{}
+      }
+    })
+
+    member =
+      Repo.insert!(%Patch{project_id: proj.id, pr_xref: 1, commit: "N", into_branch: "master"})
+
+    batch = Repo.insert!(%Batch{project_id: proj.id, state: :ok, into_branch: "master"})
+    Repo.insert!(%LinkPatchBatch{patch_id: member.id, batch_id: batch.id, head_sha: "N"})
+
+    Process.put(:orchestration_job, %{project_id: proj.id})
+    conn = {{:installation, 91}, 14}
+
+    for sha <- ["N", "E"] do
+      BorsNG.Worker.Orchestration.Projections.deliver(
+        {:status, conn, {sha, :error, "Canceled", "u"}, batch.id}
+      )
+    end
+
+    statuses = GitHub.ServerMock.get_state()[conn].statuses
+    refute Map.has_key?(statuses, "N")
+    assert statuses["E"]["bors"] == :error
+  after
+    Process.delete(:orchestration_job)
+  end
+
   test "cancel all", %{proj: proj} do
     patch =
       %Patch{

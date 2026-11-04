@@ -580,7 +580,7 @@ defmodule BorsNG.Worker.Batcher do
       end)
 
     waiting_members =
-      Enum.map(waiting, fn b -> {b.id, b.id |> Patch.all_for_batch() |> Repo.all()} end)
+      Enum.map(waiting, fn b -> {b, b.id |> Patch.all_for_batch() |> Repo.all()} end)
 
     # An emptied queue needs fresh review everywhere. A solo patch's approval
     # dies with its batch links; a bundle member's held approval must die
@@ -604,8 +604,8 @@ defmodule BorsNG.Worker.Batcher do
     Enum.each(running, &send_status(repo_conn, &1, :canceled))
     # The waiting batches and their links are deleted, so report the members
     # captured above; otherwise a PR keeps a pending retry status forever.
-    Enum.each(waiting_members, fn {id, patches} ->
-      send_status(repo_conn, id, patches, :canceled)
+    Enum.each(waiting_members, fn {batch, patches} ->
+      send_batch_status(repo_conn, batch, patches, :canceled)
     end)
 
     Enum.each(affected, fn {branch, patches} ->
@@ -5293,16 +5293,17 @@ defmodule BorsNG.Worker.Batcher do
 
   defp bundle_page_url(_), do: nil
 
-  defp send_status(
-         repo_conn,
-         %Batch{id: id, commit: commit},
-         message
-       ) do
+  defp send_status(repo_conn, %Batch{id: id} = batch, message) do
     patches =
       id
       |> Patch.all_for_batch()
       |> Repo.all()
 
+    send_batch_status(repo_conn, batch, patches, message)
+  end
+
+  # Members are passed in for a batch whose links are already deleted.
+  defp send_batch_status(repo_conn, %Batch{id: id, commit: commit}, patches, message) do
     send_status(repo_conn, id, patches, message)
 
     unless is_nil(commit) do
