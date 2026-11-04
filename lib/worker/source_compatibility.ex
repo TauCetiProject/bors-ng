@@ -910,8 +910,13 @@ defmodule BorsNG.Worker.SourceCompatibility do
            "Update the branch from `main`, resolve the conflicts, and run the build and axiom checks before pushing."}
 
         "missing_source" ->
-          {"this PR imports modules that are missing from `main`.",
-           "Update the branch from `main`, fix the imports, and run the build and axiom checks before pushing."}
+          if Enum.any?(result["missing_imports"] || [], & &1["removed"]) do
+            {"this PR removes or renames a module that other sources still import.",
+             "Update the branch from `main`, keep the module or update every importer, and run the build and axiom checks before pushing."}
+          else
+            {"this PR imports modules that are missing from `main`.",
+             "Update the branch from `main`, fix the imports, and run the build and axiom checks before pushing."}
+          end
 
         "integrated_failure" ->
           {"this PR failed to build with `main`.",
@@ -922,7 +927,11 @@ defmodule BorsNG.Worker.SourceCompatibility do
       case result["status"] do
         "missing_source" ->
           Enum.map_join(Enum.take(result["missing_imports"], 8), "\n", fn finding ->
-            "- `#{finding["path"]}` imports missing `#{finding["module"]}` (`#{finding["provider_path"]}`)."
+            if finding["removed"],
+              do:
+                "- `#{finding["path"]}` imports `#{finding["module"]}` (`#{finding["provider_path"]}`), which this PR removes.",
+              else:
+                "- `#{finding["path"]}` imports missing `#{finding["module"]}` (`#{finding["provider_path"]}`)."
           end)
 
         "conflict" ->
