@@ -2494,6 +2494,110 @@ defmodule BorsNG.Worker.FailureIsolationTest do
       assert Repo.aggregate(BorsNG.Database.OrchestrationJob, :count, :id) == 2
     end
 
+    test "a handed-off suspect re-approved at a new head keeps its admission age once", c do
+      {batch, conn} = provisional_candidate(c, ["TauCeti/File2.lean", "TauCeti/File3.lean"])
+      before = Map.new(c.links, &{&1.patch.pr_xref, CandidateJournal.admission(&1.id)})
+      assert :retrying = FailureIsolation.split(c.links, batch, nil, conn)
+      [event] = Repo.all(from(e in CandidateEvent, where: e.kind == "provisional_repair"))
+
+      assert Enum.map(event.details["suspects"], &Map.take(&1, ["pr", "head_sha"])) == [
+               %{"pr" => 2, "head_sha" => "head2"},
+               %{"pr" => 3, "head_sha" => "head3"}
+             ]
+
+      for suspect <- event.details["suspects"] do
+        original = before[suspect["pr"]]
+        assert suspect["admission_id"] == original.id
+        assert suspect["patch_id"] == original.snapshot["patch_id"]
+        assert suspect["link_id"] == original.link_id
+        assert suspect["original_admitted_at"] == original.snapshot["original_admitted_at"]
+        assert suspect["queue_age_retries"] == 0
+      end
+
+      # A fresh PR approved while the suspects are away.
+      newcomer =
+        Repo.insert!(%Patch{
+          project_id: c.project.id,
+          pr_xref: 9,
+          commit: "head9",
+          into_branch: "main",
+          open: true
+        })
+
+      [remainder] = Repo.all(from(b in Batch, where: b.id != ^batch.id))
+      peer = Repo.insert!(Batch.new(c.project.id, "main"))
+
+      CandidateJournal.insert_member(
+        LinkPatchBatch.changeset(%LinkPatchBatch{}, %{
+          batch_id: peer.id,
+          patch_id: newcomer.id,
+          head_sha: "head9",
+          reviewer: "r"
+        })
+      )
+
+      # Suspect 3 comes back at a repaired head through an ordinary admission.
+      suspect = Repo.get!(Patch, Enum.find(c.links, &(&1.patch.pr_xref == 3)).patch_id)
+      suspect = suspect |> Patch.changeset(%{commit: "head3-repaired"}) |> Repo.update!()
+      refute BorsNG.Worker.SourceCompatibility.requested?(suspect, suspect.commit)
+      returned = Repo.insert!(Batch.new(c.project.id, "main"))
+
+      link =
+        CandidateJournal.insert_member(
+          LinkPatchBatch.changeset(%LinkPatchBatch{}, %{
+            batch_id: returned.id,
+            patch_id: suspect.id,
+            head_sha: "head3-repaired",
+            reviewer: "r"
+          })
+        )
+
+      admission = CandidateJournal.admission(link.id)
+
+      assert admission.snapshot["original_admitted_at"] ==
+               before[3].snapshot["original_admitted_at"]
+
+      assert admission.snapshot["queue_age_retries"] == 0
+      assert admission.snapshot["source"] == "bors.admission"
+
+      assert admission.snapshot["inherited_handoff"] == %{
+               "candidate_id" => c.candidate.id,
+               "event_id" => event.id,
+               "head_sha" => "head3",
+               "admission_id" => before[3].id,
+               "handed_off_at" => event.observed_at
+             }
+
+      [readmitted] = Repo.all(from(e in CandidateEvent, where: e.kind == "suspect_readmitted"))
+      assert readmitted.candidate_id == c.candidate.id
+      assert readmitted.details["pr"] == 3
+      assert readmitted.details["handoff_event_id"] == event.id
+      assert readmitted.details["admission_id"] == admission.id
+
+      # The remainder keeps its oldest member's age, the returned suspect its
+      # own, and both precede the newcomer.
+      waiting = [peer, returned, remainder]
+      now = System.system_time(:microsecond)
+      rows = CandidateJournal.queue_age_members(waiting)
+      keys = BorsNG.Worker.Batcher.QueueAge.keys(waiting, rows, now)
+
+      assert keys[returned.id] ==
+               {before[3].snapshot["original_admitted_at"], :original_admission}
+
+      assert elem(keys[remainder.id], 0) == before[1].snapshot["original_admitted_at"]
+      assert elem(keys[peer.id], 1) == :original_admission
+
+      assert Enum.sort_by(waiting, &BorsNG.Worker.Batcher.QueueAge.order_key(&1, keys)) == [
+               remainder,
+               returned,
+               peer
+             ]
+
+      # Suspect 2 is still away: its handoff is untouched by suspect 3's return.
+      assert Repo.get!(Patch, before[2].snapshot["patch_id"]).queue_approval["state"] ==
+               "withdrawn"
+    end
+
     test "shared-path and import neighbours are retried, never handed off", c do
       {batch, conn} = provisional_candidate(c)
 

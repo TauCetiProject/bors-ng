@@ -22,67 +22,186 @@ defmodule BorsNG.Worker.CandidateJournal do
     parent = if source_link, do: latest(source_link.batch_id)
     original = if source_link, do: admission(source_link.id)
     observed_at = now()
+    handoff = if source_link, do: nil, else: readmission(batch, patch, link, observed_at)
 
-    Repo.insert!(%CandidateAdmission{
-      project_id: batch.project_id,
-      into_branch: batch.into_branch,
-      batch_id: batch.id,
-      link_id: link.id,
-      observed_at: observed_at,
-      snapshot: %{
-        "pr" => patch.pr_xref,
-        "base" => batch.into_branch,
-        "patch_id" => patch.id,
-        "head_sha" => link.head_sha,
-        "reviewer" => link.reviewer,
-        "manual_approval" => link.manual_approval,
-        "bundle_id" => patch.bundle_id,
-        "source" => if(source_link, do: "bors.retry", else: "bors.admission"),
-        "retry_reason" => if(source_link, do: retry_reason),
-        "parent_batch_id" => if(source_link, do: source_link.batch_id),
-        "parent_candidate_id" => if(parent, do: parent.id),
-        "parent_admission_id" => if(original, do: original.id),
-        "remainder_retries" =>
-          if(source_link,
-            do:
-              BorsNG.Worker.Batcher.QueueAge.next_remainder(
-                if(original, do: original.snapshot),
-                retry_reason
+    snapshot = %{
+      "pr" => patch.pr_xref,
+      "base" => batch.into_branch,
+      "patch_id" => patch.id,
+      "head_sha" => link.head_sha,
+      "reviewer" => link.reviewer,
+      "manual_approval" => link.manual_approval,
+      "bundle_id" => patch.bundle_id,
+      "source" => if(source_link, do: "bors.retry", else: "bors.admission"),
+      "retry_reason" => if(source_link, do: retry_reason),
+      "parent_batch_id" => if(source_link, do: source_link.batch_id),
+      "parent_candidate_id" => if(parent, do: parent.id),
+      "parent_admission_id" => if(original, do: original.id),
+      "remainder_retries" =>
+        if(source_link,
+          do:
+            BorsNG.Worker.Batcher.QueueAge.next_remainder(
+              if(original, do: original.snapshot),
+              retry_reason
+            ),
+          else: 0
+        ),
+      "queue_age_retries" =>
+        cond do
+          source_link ->
+            BorsNG.Worker.Batcher.QueueAge.next_retry(
+              if(original, do: original.snapshot),
+              retry_reason
+            )
+
+          handoff ->
+            handoff.retries
+
+          true ->
+            0
+        end,
+      "original_admitted_at" =>
+        cond do
+          original -> original.snapshot["original_admitted_at"]
+          source_link -> nil
+          handoff -> handoff.age
+          true -> observed_at
+        end,
+      "scheduling" =>
+        if(source_link,
+          do: if(original, do: original.snapshot["scheduling"]),
+          else: %{
+            "priority" => patch.priority,
+            "singleton" => patch.is_single,
+            "label_hint" =>
+              if(patch.commit == link.head_sha,
+                do: BorsNG.Worker.Batcher.Diversity.cached(patch)
               ),
-            else: 0
-          ),
-        "queue_age_retries" =>
-          if(source_link,
-            do:
-              BorsNG.Worker.Batcher.QueueAge.next_retry(
-                if(original, do: original.snapshot),
-                retry_reason
-              ),
-            else: 0
-          ),
-        "original_admitted_at" =>
-          cond do
-            original -> original.snapshot["original_admitted_at"]
-            source_link -> nil
-            true -> observed_at
-          end,
-        "scheduling" =>
-          if(source_link,
-            do: if(original, do: original.snapshot["scheduling"]),
-            else: %{
-              "priority" => patch.priority,
-              "singleton" => patch.is_single,
-              "label_hint" =>
-                if(patch.commit == link.head_sha,
-                  do: BorsNG.Worker.Batcher.Diversity.cached(patch)
-                ),
-              "policy" => "existing_admission; diversity_disabled"
-            }
-          )
-      }
-    })
+            "policy" => "existing_admission; diversity_disabled"
+          }
+        )
+    }
+
+    # Additive: ordinary admissions keep their exact previous shape.
+    snapshot =
+      if handoff,
+        do:
+          Map.put(snapshot, "inherited_handoff", %{
+            "candidate_id" => handoff.candidate.id,
+            "event_id" => handoff.event.id,
+            "head_sha" => handoff.suspect["head_sha"],
+            "admission_id" => handoff.suspect["admission_id"],
+            "handed_off_at" => handoff.event.observed_at
+          }),
+        else: snapshot
+
+    admission =
+      Repo.insert!(%CandidateAdmission{
+        project_id: batch.project_id,
+        into_branch: batch.into_branch,
+        batch_id: batch.id,
+        link_id: link.id,
+        observed_at: observed_at,
+        snapshot: snapshot
+      })
+
+    # The consumption marker lives beside the handoff it consumes, so the next
+    # fresh admission of this PR finds it in one indexed read and starts fresh.
+    if handoff,
+      do:
+        event(handoff.candidate, "suspect_readmitted", "bors.admission", %{
+          pr: patch.pr_xref,
+          patch_id: patch.id,
+          head_sha: link.head_sha,
+          handoff_head_sha: handoff.suspect["head_sha"],
+          handoff_event_id: handoff.event.id,
+          admission_id: admission.id,
+          link_id: link.id,
+          batch_id: batch.id,
+          original_admitted_at: handoff.age,
+          queue_age_retries: handoff.retries,
+          readmitted_at: observed_at
+        })
 
     link
+  end
+
+  # The handoff's own record of each withdrawn suspect: the age its admission
+  # carried (possibly already inherited through retries) and the allowance
+  # left on it. Nothing is recorded for a missing or mismatched admission.
+  def handoff_record(link) do
+    case admission(link.id) do
+      %{snapshot: snapshot} = a when is_map(snapshot) ->
+        if snapshot["head_sha"] == link.head_sha and snapshot["patch_id"] == link.patch_id,
+          do: %{
+            "pr" => snapshot["pr"],
+            "head_sha" => link.head_sha,
+            "patch_id" => link.patch_id,
+            "link_id" => link.id,
+            "admission_id" => a.id,
+            "original_admitted_at" => snapshot["original_admitted_at"],
+            "queue_age_retries" => Map.get(snapshot, "queue_age_retries", 0)
+          },
+          else: unrecorded(link)
+
+      _ ->
+        unrecorded(link)
+    end
+  end
+
+  defp unrecorded(link) do
+    %{
+      "pr" => nil,
+      "head_sha" => link.head_sha,
+      "patch_id" => link.patch_id,
+      "link_id" => link.id,
+      "admission_id" => nil,
+      "original_admitted_at" => nil,
+      "queue_age_retries" => nil
+    }
+  end
+
+  # The latest repair handoff naming this PR, if its retained age is usable at
+  # this head and no fresh admission has consumed it yet. One read at approval
+  # time over this repository's `provisional_repair` events, never on the
+  # scheduler path; the consumption check is bounded by that candidate's events.
+  defp readmission(batch, patch, link, now) do
+    found =
+      Repo.one(
+        from(e in CandidateEvent,
+          join: c in Candidate,
+          on: c.id == e.candidate_id,
+          where:
+            c.project_id == ^batch.project_id and c.into_branch == ^batch.into_branch and
+              e.kind == "provisional_repair" and e.source == "bors.failure_isolation" and
+              fragment("? @> ?::jsonb", e.details, ^%{"prs" => [patch.pr_xref]}),
+          order_by: [desc: e.id],
+          limit: 1,
+          select: {c, e}
+        )
+      )
+
+    with {candidate, event} <- found,
+         suspects when is_list(suspects) <- event.details["suspects"],
+         %{} = suspect <- Enum.find(suspects, &(is_map(&1) and &1["pr"] == patch.pr_xref)),
+         {age, retries} <-
+           BorsNG.Worker.Batcher.QueueAge.readmission(suspect, link.head_sha, now),
+         false <- consumed?(candidate, event, patch) do
+      %{candidate: candidate, event: event, suspect: suspect, age: age, retries: retries}
+    else
+      _ -> nil
+    end
+  end
+
+  defp consumed?(candidate, event, patch) do
+    Repo.exists?(
+      from(e in CandidateEvent,
+        where:
+          e.candidate_id == ^candidate.id and e.id > ^event.id and
+            e.kind == "suspect_readmitted" and
+            fragment("? @> ?::jsonb", e.details, ^%{"pr" => patch.pr_xref})
+      )
+    )
   end
 
   def admission(link_id), do: Repo.get_by(CandidateAdmission, link_id: link_id)

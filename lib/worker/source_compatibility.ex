@@ -605,7 +605,15 @@ defmodule BorsNG.Worker.SourceCompatibility do
                %{
                  pr: hd(prs),
                  prs: prs,
-                 suspects: Enum.map(suspects, &%{pr: &1.patch.pr_xref, head_sha: &1.head_sha}),
+                 # Each suspect's retained age lets its next different head
+                 # keep this position once; see deploy/queue-age.md.
+                 suspects:
+                   Enum.map(suspects, fn link ->
+                     Map.merge(
+                       BorsNG.Worker.CandidateJournal.handoff_record(link),
+                       %{"pr" => link.patch.pr_xref, "head_sha" => link.head_sha}
+                     )
+                   end),
                  head_sha: hd(suspects).head_sha,
                  base_sha: base,
                  binding: evidence["binding"],
