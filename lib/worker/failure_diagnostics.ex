@@ -4,7 +4,7 @@ defmodule BorsNG.Worker.FailureDiagnostics do
   alias BorsNG.Database.{CandidateEvent, Repo}
   alias BorsNG.Worker.{CandidateAssembler, CandidateJournal, FailureIsolation, LocalGit}
   alias BorsNG.Worker.DiagnosticReporting
-  alias BorsNG.Worker.PrivateOrigins
+  alias BorsNG.Worker.{ImporterOrigins, PrivateOrigins}
   alias BorsNG.Worker.Orchestration.Outbox
   @parser_version "streaming-v2"
 
@@ -23,7 +23,8 @@ defmodule BorsNG.Worker.FailureDiagnostics do
         collector \\ nil,
         providers \\ nil,
         sources \\ &LocalGit.collision_sources/4,
-        origins \\ &LocalGit.private_origin_sources/4
+        origins \\ &LocalGit.private_origin_sources/4,
+        importers \\ &LocalGit.import_providers/4
       ) do
     candidate = CandidateJournal.current(batch)
     hints = FailureIsolation.hints(candidate)
@@ -53,6 +54,13 @@ defmodule BorsNG.Worker.FailureDiagnostics do
         raw_result = result
         result = PrivateOrigins.resolve(hints, result, binding, private_sources)
 
+        # A finding left in an unchanged module takes one import hop. Reads
+        # the exact candidate tree offline; nothing here is proof authority.
+        importer_sources =
+          importer_lookup(candidate, batch, evidence, hints, result, conn, importers)
+
+        result = ImporterOrigins.resolve(hints, result, binding, importer_sources)
+
         collision_sources =
           collision_lookup(candidate, batch, evidence, hints, result, conn, sources)
 
@@ -65,6 +73,8 @@ defmodule BorsNG.Worker.FailureDiagnostics do
           raw_result: if(result != raw_result, do: raw_result),
           private_origin_policy: PrivateOrigins.policy(),
           private_origin_sources: private_sources,
+          importer_origin_policy: ImporterOrigins.policy(),
+          importer_origin_sources: importer_sources,
           collision_sources: collision_sources,
           provider_lookup: provider_sources,
           authority: "retry_only",
@@ -484,6 +494,23 @@ defmodule BorsNG.Worker.FailureDiagnostics do
   defp origin_recovery?(details, hints) do
     details["private_origin_policy"] != PrivateOrigins.policy() and
       match?({:ok, _}, PrivateOrigins.paths(hints, details["result"]))
+  end
+
+  defp importer_lookup(candidate, batch, evidence, hints, result, conn, importers) do
+    with {:ok, paths} <- ImporterOrigins.paths(hints, result),
+         true <- current_collision_context?(candidate, hints),
+         true <- batch.base_sha == candidate.snapshot["base_sha"],
+         true <- Enum.map(result["jobs"], & &1["job_id"]) == job_ids(evidence) do
+      lookup = importers.(batch.project, conn, binding(candidate, batch.commit, evidence), paths)
+
+      if is_map(lookup) and byte_size(Jason.encode!(lookup)) <= 64 * 1024,
+        do: lookup,
+        else: %{"complete" => false, "reason" => "importer_output_limit"}
+    else
+      _ -> %{"complete" => false, "reason" => "ineligible_importer_origin"}
+    end
+  rescue
+    _ -> %{"complete" => false, "reason" => "importer_unavailable"}
   end
 
   defp private_lookup(candidate, batch, evidence, hints, result, conn, sources) do

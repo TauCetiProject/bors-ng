@@ -1278,6 +1278,19 @@ class LocalGitTest(unittest.TestCase):
         self.assertIn('GH013: main requires approved workflow changes', details['stderr'])
         self.assertEqual(git(self.upstream, 'rev-parse', 'main'), self.base)
 
+    def test_import_header_parser_accepts_public_meta_imports_comments_and_module_preamble(self):
+        # The importer hop reads an unchanged module's direct project imports with this parser.
+        header = ('/- Copyright -/\n-- header comment\nmodule\n\npublic import Mathlib.Order.Basic\n'
+                  'public import TauCeti.Algebra.Module.Primitive -- trailing\n'
+                  'meta import TauCeti.Tactic.Helper\nimport TauCeti.Other\n\n/-! doc -/\ndef value := 1\n')
+        self.assertEqual(local.compatibility_imports(header),
+                         ['TauCeti.Algebra.Module.Primitive', 'TauCeti.Tactic.Helper', 'TauCeti.Other'])
+        self.assertEqual(local.compatibility_imports('import TauCeti.A\nimport TauCeti.B\ntheorem t := trivial'),
+                         ['TauCeti.A', 'TauCeti.B'])
+        for hostile in ['private import TauCeti.Hidden', 'import «TauCeti.A»', '/- unterminated\nimport TauCeti.A']:
+            with self.assertRaises(local.Failure):
+                local.compatibility_imports(hostile)
+
 
 if __name__ == '__main__':
     unittest.main()
