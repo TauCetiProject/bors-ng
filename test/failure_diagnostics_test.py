@@ -207,6 +207,30 @@ class DiagnosticsTest(unittest.TestCase):
                      'duplicate-declarations: Foo.bar is declared in both TauCeti.' + 'A' * 600 + ' and TauCeti.B']:
             self.assertEqual(diagnostics.parse(text), [], text[:80])
 
+    def test_check_imports_missing_project_import_names_expected_source_then_importer(self):
+        importer = 'TauCeti/Algebra/Lie/SpecialLinear/GraphAutomorphism/A3.lean'
+        expected = 'TauCeti/Algebra/Lie/Subalgebra/Fixed.lean'
+        text = ('2026-11-04T20:40:47.5478568Z ' + importer + ': missing project import '
+                'TauCeti.Algebra.Lie.Subalgebra.Fixed: expected ' + expected +
+                ' in the exact candidate source tree (add the source or fix the import)\n'
+                '2026-11-04T20:40:47.5479469Z check-imports: 1 problem(s); compilation refused\n'
+                '2026-11-04T20:40:47.5547960Z ##[error]Process completed with exit code 1.\n')
+        self.assertEqual(diagnostics.parse(text), [dict(
+            kind='missing_import', module='TauCeti.Algebra.Lie.Subalgebra.Fixed',
+            paths=[expected, importer])])
+        # Other header problems name no source a batch-mate can own.
+        self.assertEqual(diagnostics.parse(
+            'TauCeti/A.lean: ambiguous project imports: Lean and Lake disagree; separate '
+            'import keywords and module names with whitespace\n'
+            'TauCeti/B.lean: `meta import Lean` is not allowed: TauCeti/ stays mathematical\n'
+            'check-imports: 2 problem(s); compilation refused\n'), [])
+        # Paths keep the project shape on both sides; a forged side drops the line.
+        for bad in ['../x.lean: missing project import TauCeti.X: expected TauCeti/X.lean',
+                    'TauCeti/A.lean: missing project import TauCeti.X: expected ../X.lean',
+                    'TauCeti/A.lean: missing project import Mathlib.X: expected Mathlib/X.lean']:
+            self.assertEqual(diagnostics.parse(
+                bad + ' in the exact candidate source tree (add the source or fix the import)\n'), [])
+
     def test_unmatched_failure_lines_are_sampled_only_when_nothing_is_attributed(self):
         lines = ['2026-11-03T21:46:00.1Z error: something the parser does not know\n',
                  '2026-11-03T21:46:00.2Z error: build failed\n',
