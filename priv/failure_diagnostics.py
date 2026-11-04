@@ -31,6 +31,13 @@ SOURCE = re.compile(r'^(?:error: )?(' + PATH + r'):\d+:\d+:\s*(?:error:|error\b)
 LAKE = re.compile(r'^error: (' + PATH + r'):\d+:\d+:')
 AUDIT = re.compile(r"^audit-driver: import (" + MODULE +
                    r") failed, environment already contains '[^'\r\n]{1,512}' from (" + MODULE + r')$')
+# scripts/Axioms.lean prints one line per colliding declaration; at least one
+# module is a project module, the other may belong to a dependency.
+ANY_MODULE = r"[A-Za-z_][A-Za-z0-9_']*(?:\.[A-Za-z_][A-Za-z0-9_']*)*"
+DUPLICATE = re.compile(r'^duplicate-declarations: (\S{1,1024}) is declared in both ('
+                       + ANY_MODULE + r') and (' + ANY_MODULE + r')$')
+UNMATCHED_SAMPLE = 8
+UNMATCHED_BYTES = 512
 ENV_LOCATIONS = 'LINT-ENV-LOCATIONS '
 ENV_PATH = re.compile(r"TauCeti(?:/[A-Za-z_][A-Za-z0-9_']*)+\.lean")
 FAILED_TARGET = re.compile(r"- (TauCeti(?:\.[A-Za-z_][A-Za-z0-9_']*)+)")
@@ -76,13 +83,18 @@ def environment_locations(payload):
                 raise ValueError('invalid_environment_unknown')
             observation.update(paths=[], unknown=finding['unknown'])
         else:
+            # A module-only location (no range) still names the defining file.
             path = finding.get('path')
-            if (set(finding) != {'linter', 'declaration', 'path', 'line', 'column'}
+            ranged = set(finding) == {'linter', 'declaration', 'path', 'line', 'column'}
+            if (not (ranged or set(finding) == {'linter', 'declaration', 'path'})
                     or not isinstance(path, str) or len(path) > 512 or not ENV_PATH.fullmatch(path)
-                    or any(type(finding.get(k)) is not int or not 1 <= finding[k] <= 10_000_000
-                           for k in ('line', 'column'))):
+                    or (ranged and any(type(finding.get(k)) is not int
+                                       or not 1 <= finding[k] <= 10_000_000
+                                       for k in ('line', 'column')))):
                 raise ValueError('invalid_environment_path_or_range')
-            observation.update(paths=[path], line=finding['line'], column=finding['column'])
+            observation.update(paths=[path])
+            if ranged:
+                observation.update(line=finding['line'], column=finding['column'])
         observations.append(observation)
     return observations
 
@@ -105,8 +117,20 @@ def http_reason(status, headers, missing='log_not_available'):
     return 'http_failure'
 
 
-def parse_lines(lines):
-    """Read every record; spill deduplicated observations instead of retaining logs."""
+def unmatched_failure_line(line):
+    """A failure-looking line no pattern consumed; cancelled-job fallout is not one."""
+    if line == 'error: build failed' or " bad import '" in line or line.endswith('(cancelled)'):
+        return False
+    return line.startswith(('error:', 'duplicate-declarations:', 'audit-driver:', 'lint-env:')) \
+        or '\u2716' in line
+
+
+def parse_lines(lines, sample=None):
+    """Read every record; spill deduplicated observations instead of retaining logs.
+
+    `sample`, when a list, receives at most UNMATCHED_SAMPLE unmatched failure
+    lines so an unattributed failure leaves evidence of what the parser missed.
+    """
     with tempfile.TemporaryDirectory(prefix='bors-diagnostic-') as directory:
         with closing(sqlite3.connect(str(Path(directory) / 'observations.sqlite'))) as db:
             db.execute('CREATE TABLE observations (kind TEXT, value TEXT, UNIQUE(kind,value))')
@@ -129,12 +153,19 @@ def parse_lines(lines):
                         add('primary', observation)
                     continue
                 audit = AUDIT.fullmatch(line)
+                duplicate = DUPLICATE.fullmatch(line)
                 source = SOURCE.match(line) or LAKE.match(line)
                 if audit and all(len(module) <= 512 for module in audit.groups()):
                     add('primary', dict(kind='duplicate_declaration', paths=[
                         module.replace('.', '/') + '.lean' for module in audit.groups()]))
+                elif (duplicate and any(module.startswith('TauCeti.') for module in duplicate.groups()[1:])
+                        and all(len(module) <= 508 for module in duplicate.groups()[1:])):
+                    add('primary', dict(kind='duplicate_declaration', paths=[
+                        module.replace('.', '/') + '.lean' for module in duplicate.groups()[1:]]))
                 elif source and len(source[1]) <= 512:
                     add('primary', dict(kind='compiler_error', paths=[source[1]]))
+                elif sample is not None and len(sample) < UNMATCHED_SAMPLE and unmatched_failure_line(line):
+                    sample.append(line[:UNMATCHED_BYTES])
                 if line.startswith('TAUCETI-DIAGNOSTICS-SAMPLED '):
                     sampled = True
                 if line == FAILED_TARGETS_HEADER:
@@ -215,7 +246,7 @@ def signed_url(url):
                 '.blob.core.windows.net', '.actions.githubusercontent.com')))
 
 
-def read_log(repo, job, token, deadline=None):
+def read_log(repo, job, token, deadline=None, sample=None):
     opener = urllib.request.build_opener(NoRedirect)
     request = urllib.request.Request(
         f'https://api.github.com/repositories/{repo}/actions/jobs/{job}/logs',
@@ -239,7 +270,7 @@ def read_log(repo, job, token, deadline=None):
         with response:
             if response.status != 200:
                 raise CollectionError('http_failure', http_status=response.status)
-            observations = parse_lines(streamed_lines(response, progress, deadline))
+            observations = parse_lines(streamed_lines(response, progress, deadline), sample)
         if progress.get('oversized_records'):
             raise CollectionError('unsupported_diagnostic_record', bytes_read=progress['bytes'])
         return observations, progress['bytes']
@@ -356,8 +387,9 @@ def collect(request):
     result = []
     for job in jobs:
         source = 'job_log'
+        sample = []
         try:
-            observations, size = read_log(repo, job, os.environ['BORS_DIAGNOSTICS_TOKEN'], deadline)
+            observations, size = read_log(repo, job, os.environ['BORS_DIAGNOSTICS_TOKEN'], deadline, sample)
         except CollectionError as error:
             if error.reason != 'sampled_diagnostics':
                 raise
@@ -365,7 +397,10 @@ def collect(request):
             source = 'raw_artifact'
         if isinstance(observations, str):  # compatibility with recorded replay fixtures
             observations = parse(observations)
-        result.append(dict(job_id=job, bytes=size, observations=observations, source=source))
+        record = dict(job_id=job, bytes=size, observations=observations, source=source)
+        if not observations and sample:
+            record['unmatched_sample'] = sample
+        result.append(record)
     return dict(complete=True, jobs=result, parser_version=PARSER_VERSION)
 
 

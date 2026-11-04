@@ -94,7 +94,9 @@ There is no migration, backfill, continuous PR revalidation or moving-main rebas
 Refs TauCetiProject/TauCeti#17037. The TauCeti reporter can now emit one
 `LINT-ENV-LOCATIONS` version-1 JSON envelope after its existing report, nonce and
 NEW-versus-baseline validation. Findings contain `linter`, `declaration`, a
-project-local `path` and positive `line`/`column`, or an explicit `unknown` reason.
+project-local `path` with positive `line`/`column`, a project-local `path` alone
+when the reporter knows the defining module but no selection range (private and
+generated declarations), or an explicit `unknown` reason.
 The reporter obtains locations from declaration origin/range metadata in the
 existing exact candidate linter environment. It never infers an owner from the
 declaration's name. The raw `LINT-ENV-ORIGINS` driver output is not consumed here.
@@ -105,6 +107,24 @@ malformed/incomplete/truncated records, unsupported fields/versions, unsafe path
 and invalid ranges make log evidence unavailable. Unknown findings retain empty
 paths, forcing the existing mapper to retain deterministic fallback rather than
 drop a potentially global interaction. Older logs remain supported.
+
+## Audit duplicate declarations and unmatched failures
+
+The TauCeti audit driver (`scripts/Axioms.lean`) reports a collision as one line,
+`duplicate-declarations: <declaration> is declared in both <module> and <module>`,
+followed by `Keep one canonical declaration and import its module from the other
+files.` The parser maps both modules to paths as a `duplicate_declaration`
+observation, exactly like the import-collision form. At least one module is a
+project module; a dependency module keeps its non-project path and has no changed
+owner, so every changed side is the suspect. Candidate 1930 (2026-11-03) failed
+only on this line and was bisected because the earlier parser matched neither form.
+
+When a job log yields no observation at all, the collector retains up to eight
+unmatched failure-looking lines, 512 bytes each, as `unmatched_sample` on that
+job record in the `failure_diagnostics` event. Cancelled-job fallout (`bad import`,
+`(cancelled)`, `error: build failed`) is excluded. The existing
+`diagnostic_degraded` event with reason `unlocated_failure` counts these cases;
+the sample shows what the parser missed. It grants no authority.
 
 These remain candidate-generated, untrusted scheduling observations, including
 when a well-formed record is forged. No identity or authority is accepted from the
