@@ -423,7 +423,7 @@ defmodule BorsNG.Worker.SpeculativeTrain do
     # Retain exact-head approvals by cloning only this batch's own members.
     # Old generation/statuses remain terminal history. Replayed invalidation
     # finds the already committed retry through Divider's durable ancestry.
-    {:ok, _} =
+    {:ok, invalidated} =
       Repo.transaction(fn ->
         current = Repo.one!(from(b in Batch, where: b.id == ^batch.id, lock: "FOR UPDATE"))
 
@@ -442,8 +442,13 @@ defmodule BorsNG.Worker.SpeculativeTrain do
           if links != [] and is_nil(retry), do: Repo.rollback(:retry_membership_unavailable)
           CandidateJournal.event(candidate, "train_invalidated", "bors.train", %{reason: reason})
           current |> Batch.changeset(%{state: :canceled, commit: nil}) |> Repo.update!()
+          true
         end
       end)
+
+    # The members are queued again; without this their PRs keep showing the
+    # canceled candidate as "Running".
+    if invalidated, do: BorsNG.Worker.Batcher.send_requeued_status(batch.id)
 
     invalidate_descendants(batch)
     :canceled

@@ -37,9 +37,23 @@ defmodule BorsNG.Worker.Batcher.Message do
     {"Synchronization error: PR head changed", :error}
   end
 
+  # The PR's old batch ended but the PR is queued again: a pending status, so
+  # GitHub does not report a failed check while bors retries it.
+  def generate_status({:retrying, outcome, batch_id}) do
+    {"#{retry_cause(outcome)}; retrying in batch #{batch_id}, no action needed", :running}
+  end
+
   def generate_status(:delayed) do
     {"Delayed for higher-priority pull requests", :running}
   end
+
+  defp retry_cause(:error), do: "Batch failed"
+  defp retry_cause(:timeout), do: "Batch timed out"
+  defp retry_cause(:canceled), do: "Batch canceled"
+  defp retry_cause(:conflict), do: "Batch hit a merge conflict"
+  defp retry_cause(:race), do: "Another PR in the batch changed"
+  defp retry_cause(:waiting), do: "Batch CI was inconclusive"
+  defp retry_cause(_), do: "Requeued"
 
   def generate_message(:race) do
     "Synchronization error: the pull request's head commit changed after it was approved (most likely a new push), so the built batch no longer matches the current code and bors did not merge it. Re-run `bors r+` once the PR is ready."

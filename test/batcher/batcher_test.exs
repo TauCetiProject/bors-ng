@@ -262,7 +262,7 @@ defmodule BorsNG.Worker.BatcherTest do
                },
                statuses: %{
                  "N" => %{"bors" => :error},
-                 "P" => %{"bors" => :error}
+                 "P" => %{"bors" => :running}
                },
                files: %{}
              }
@@ -5769,8 +5769,8 @@ defmodule BorsNG.Worker.BatcherTest do
                },
                statuses: %{
                  "iniNO" => %{"bors" => :error},
-                 "N" => %{"bors" => :error},
-                 "O" => %{"bors" => :error}
+                 "N" => %{"bors" => :running},
+                 "O" => %{"bors" => :running}
                },
                files: %{"staging.tmp" => %{"bors.toml" => ~s/status = [ "ci" ]/}},
                pulls: %{
@@ -5850,7 +5850,7 @@ defmodule BorsNG.Worker.BatcherTest do
                statuses: %{
                  "iniNO" => %{"bors" => :error},
                  "N" => %{"bors" => :running},
-                 "O" => %{"bors" => :error}
+                 "O" => %{"bors" => :running}
                },
                files: %{"staging.tmp" => %{"bors.toml" => ~s/status = [ "ci" ]/}},
                pulls: %{
@@ -5930,7 +5930,7 @@ defmodule BorsNG.Worker.BatcherTest do
                  "iniNO" => %{"bors" => :error},
                  "iniN" => %{"bors" => :error},
                  "N" => %{"bors" => :error},
-                 "O" => %{"bors" => :error}
+                 "O" => %{"bors" => :running}
                },
                files: %{"staging.tmp" => %{"bors.toml" => ~s/status = [ "ci" ]/}},
                pulls: %{
@@ -6918,8 +6918,8 @@ defmodule BorsNG.Worker.BatcherTest do
                },
                statuses: %{
                  "iniNO" => %{"bors" => :error},
-                 "N" => %{"bors" => :error},
-                 "O" => %{"bors" => :error}
+                 "N" => %{"bors" => :running},
+                 "O" => %{"bors" => :running}
                },
                files: %{"staging.tmp" => %{"bors.toml" => ~s/status = [ "ci" ]/}},
                pulls: %{
@@ -7003,7 +7003,7 @@ defmodule BorsNG.Worker.BatcherTest do
                statuses: %{
                  "iniNO" => %{"bors" => :error},
                  "N" => %{"bors" => :running},
-                 "O" => %{"bors" => :error}
+                 "O" => %{"bors" => :running}
                },
                files: %{"staging.tmp" => %{"bors.toml" => ~s/status = [ "ci" ]/}},
                pulls: %{
@@ -7089,7 +7089,7 @@ defmodule BorsNG.Worker.BatcherTest do
                  "iniNO" => %{"bors" => :error},
                  "iniN" => %{"bors" => :error},
                  "N" => %{"bors" => :error},
-                 "O" => %{"bors" => :error}
+                 "O" => %{"bors" => :running}
                },
                files: %{"staging.tmp" => %{"bors.toml" => ~s/status = [ "ci" ]/}},
                pulls: %{
@@ -7678,6 +7678,20 @@ defmodule BorsNG.Worker.BatcherTest do
     assert length(batches) == 3
     patch1Batches = patch1.id |> Batch.all_for_patch() |> Repo.all()
     assert length(Enum.reject(patch1Batches, &(&1.state == :error))) == 1
+
+    # Every member was re-queued by the bisection, so no PR reports a failed
+    # bors check while it waits for its retry; the tested commit still fails.
+    statuses = GitHub.ServerMock.get_state()[{{:installation, 91}, 14}].statuses
+
+    for sha <- ~w(N O P Q) do
+      assert statuses[sha]["bors"] == :running
+    end
+
+    assert statuses["iniNOPQ"]["bors"] == :error
+
+    retries = Batcher.retry_batches(batch.id, [patch1, patch2, patch3, patch4])
+    assert map_size(retries) == 4
+    assert Enum.all?(Map.values(retries), &(&1 > batch.id))
   end
 
   test "max_batch_size is enforced", %{proj: proj} do

@@ -2986,6 +2986,7 @@ defmodule BorsNG.Worker.Batcher do
                   )
 
                   current |> Batch.changeset(%{state: :canceled}) |> Repo.update!()
+                  send_requeued_status(current.id)
 
                 _ ->
                   :ok
@@ -5316,15 +5317,29 @@ defmodule BorsNG.Worker.Batcher do
   end
 
   defp send_status(repo_conn, batch_id, patches, message) do
-    {msg, status} = Batcher.Message.generate_status(message)
     batch = Repo.get(Batch, batch_id)
     tested_commit = if batch, do: batch.commit
 
+    # A member that already sits in a newer queued batch is being retried. Its
+    # PR status describes that retry and links to the retry batch, so the PR
+    # does not show a failure (or a stale "Running") while it waits again.
+    retries =
+      if message in [:running, :ok], do: %{}, else: retry_batches(batch_id, patches)
+
     Enum.each(patches, fn patch ->
+      {status_batch_id, {msg, status}} =
+        case Map.fetch(retries, patch.id) do
+          {:ok, retry_id} ->
+            {retry_id, Batcher.Message.generate_status({:retrying, message, retry_id})}
+
+          :error ->
+            {batch_id, Batcher.Message.generate_status(message)}
+        end
+
       case post_bors_status(
              repo_conn,
-             {patch.commit, status, msg, batch_url(Endpoint, :show, batch_id)},
-             batch_id,
+             {patch.commit, status, msg, batch_url(Endpoint, :show, status_batch_id)},
+             status_batch_id,
              tested_commit
            ) do
         :ok ->
@@ -5336,6 +5351,45 @@ defmodule BorsNG.Worker.Batcher do
           )
       end
     end)
+  end
+
+  @doc """
+  The newest queued (waiting or running) batch, newer than `batch_id`, that
+  holds each patch at its current head. Patches with no such batch are absent.
+  """
+  def retry_batches(_batch_id, []), do: %{}
+
+  def retry_batches(batch_id, patches) do
+    heads = Map.new(patches, &{&1.id, &1.commit})
+
+    from(l in LinkPatchBatch,
+      join: b in Batch,
+      on: b.id == l.batch_id,
+      where:
+        l.patch_id in ^Map.keys(heads) and b.id > ^batch_id and
+          b.state in [:waiting, :running],
+      select: {l.patch_id, l.head_sha, b.id}
+    )
+    |> Repo.all()
+    |> Enum.filter(fn {patch_id, head, _} -> is_nil(head) or head == heads[patch_id] end)
+    |> Enum.reduce(%{}, fn {patch_id, _, id}, acc ->
+      Map.update(acc, patch_id, id, &max(&1, id))
+    end)
+  end
+
+  @doc """
+  Report a batch that was canceled and re-queued without a status of its own,
+  such as an invalidated speculative candidate. Members point at their retry.
+  """
+  def send_requeued_status(batch_id) do
+    case Repo.get(Batch, batch_id) do
+      %Batch{state: :canceled} = batch ->
+        batch = Repo.preload(batch, :project)
+        send_status(get_repo_conn(batch.project), batch, :canceled)
+
+      _ ->
+        :ok
+    end
   end
 
   defp post_bors_status(conn, data, batch_id, tested_commit) do
