@@ -911,8 +911,23 @@ defmodule BorsNG.Worker.SourceCompatibility do
             |> Enum.uniq()
             |> Enum.take(8)
 
+          hop =
+            provisional["diagnostics"]["jobs"]
+            |> Enum.flat_map(& &1["observations"])
+            |> Enum.map(& &1["attributed_via"])
+            |> Enum.find(&is_map/1)
+            |> case do
+              %{"path" => via, "imports" => imports} when is_list(imports) ->
+                "\n\nThe failure was reported in `#{via}`, which imports this PR's " <>
+                  Enum.map_join(imports, ", ", &"`#{&1}`") <> "."
+
+              _ ->
+                ""
+            end
+
           "A batch containing this PR failed, with errors in:\n\n" <>
             Enum.map_join(paths, "\n", &"- `#{&1}`") <>
+            hop <>
             "\n\nThis PR has not been tested on its own, so we haven't confirmed whether it caused the failure. " <>
             "[Build log](#{result["run_url"]}).\n\n" <>
             "Bors is continuing with the other PRs while this one is checked."

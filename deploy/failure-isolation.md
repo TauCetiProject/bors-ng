@@ -194,3 +194,34 @@ The provider is checked at the assembled tree, not the PR's old base/head.
 Batches 634 and 622 supply no direct import/path interaction explaining their
 proof failure; ordinary deterministic bisection remains the fallback. These
 are source diagnostics, not proof replay or production latency promises.
+
+## One import hop for lint findings in unchanged modules
+
+The environment lint also checks transitive importers of the changed modules,
+so a finding can sit in a file no member changed. Owner mapping attributes a
+path only to a member that changed it or lists it as a direct dependency, and
+the private-origin helper requires the derived path to be changed by exactly
+one member; such a finding therefore had no owner and the batch bisected.
+Candidates 1957, 1960 and 1963 (2026-11-04, 123 → 61 → 31 members) each did
+so on `_private.TauCeti.LowDimTopology.DehnSurgery.Slope.0.TauCeti.slopeSetoid`,
+although `Slope.lean` has one project import, `TauCeti.Algebra.Module.Primitive`,
+and exactly one member of 1963, #26093, changed `Primitive.lean`.
+
+`ImporterOrigins` now takes that one hop after the private-origin resolution.
+For an `environment_linter` observation whose single listed path, or the module
+named by its private declaration, has no owner, the existing offline
+`import_providers` lookup reads the file's direct project imports at the exact
+candidate commit (it refuses a file that differs between base and candidate,
+reads at most 512 KiB in five seconds, and never evaluates source). When exactly
+one member's changed files contain one of those imports, the observation is
+rewritten to that member's changed import with `origin: importer_hop` and
+`attributed_via: {path, imports, pr}`, and the ordinary owner mapping, journal
+record and provisional repair handoff follow; the repair request adds one
+sentence naming the unchanged module and the imported file. Zero or several
+matching members, an unowned path in a compiler error, a bundle, or any
+incomplete or unbound lookup leave the observation unchanged and today's
+fallback applies. Two hops are not attempted. The `failure_diagnostics` event
+records `importer_origin_policy` and `importer_origin_sources` beside the
+private-origin fields. The hop is a scheduling hint with retry-only authority:
+the handed-off PR is still checked on its own, exactly as other provisional
+suspects are.
