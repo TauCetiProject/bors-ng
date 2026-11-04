@@ -148,7 +148,7 @@ defmodule BorsNG.Worker.BatcherMessageTest do
     assert Message.bundle_link_footer(nil) == ""
 
     assert Message.bundle_link_footer("http://localhost/bundles/42") ==
-             "\n\n[View this bundle in bors](http://localhost/bundles/42) (sign in with GitHub to view)."
+             "\n\n[View this bundle in bors](http://localhost/bundles/42)."
   end
 
   test "generate_message/2 appends the footer only to bundle-page messages" do

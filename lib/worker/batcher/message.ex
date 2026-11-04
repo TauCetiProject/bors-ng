@@ -626,15 +626,20 @@ defmodule BorsNG.Worker.Batcher.Message do
   built by the caller. A nil url yields an empty string so callers can append
   it unconditionally.
 
-  The note about signing in is deliberate: the bundle page sits behind the bors
-  dashboard's login, so any signed-in GitHub user can open it, but a signed-out
-  reader following the link is bounced to a GitHub OAuth prompt rather than the
-  page they expected.
+  The bundle page is public unless the deployment allows private
+  repositories. Only then does it sit behind the dashboard's login, and the
+  footer warns that a signed-out reader will be sent to a GitHub sign-in prompt.
   """
   def bundle_link_footer(nil), do: ""
 
-  def bundle_link_footer(url),
-    do: "\n\n[View this bundle in bors](#{url}) (sign in with GitHub to view)."
+  def bundle_link_footer(url) do
+    note =
+      if Confex.fetch_env!(:bors, BorsNG)[:allow_private_repos],
+        do: " (sign in with GitHub to view)",
+        else: ""
+
+    "\n\n[View this bundle in bors](#{url})#{note}."
+  end
 
   @doc """
   Like `generate_message/1`, but appends the bundle-page link footer when
