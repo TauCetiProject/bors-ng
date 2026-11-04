@@ -23,9 +23,12 @@ defmodule BorsNG.Worker.PrivateOriginsTest do
         "declaration" => "TauCeti.unlocated"
       }
 
+      # An unlocated finding beside the located one no longer voids the
+      # mapping: the located owner is handed off and the remainder's next
+      # build reports what the unlocated finding was about.
       partial = update_in(f["logs"], ["jobs", Access.at(0), "observations"], &[unknown | &1])
       resolved = PrivateOrigins.resolve(f["hints"], partial, f["binding"], f["source_lookup"])
-      assert :unavailable = FailureDiagnostics.map_paths(f["hints"], resolved)
+      assert {:ok, [26212]} = FailureDiagnostics.map_paths(f["hints"], resolved)
     end
   end
 

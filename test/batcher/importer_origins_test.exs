@@ -106,10 +106,13 @@ defmodule BorsNG.Worker.ImporterOriginsTest do
         %{"kind" => "compiler_error", "paths" => [@slope]}
       ])
 
-    assert :unavailable = ImporterOrigins.paths(f["hints"], compiler)
+    # An unowned compile failure takes the same hop as a lint finding.
+    assert {:ok, [@slope]} = ImporterOrigins.paths(f["hints"], compiler)
 
-    assert ImporterOrigins.resolve(f["hints"], compiler, f["binding"], f["importer_lookup"]) ==
-             compiler
+    hopped = ImporterOrigins.resolve(f["hints"], compiler, f["binding"], f["importer_lookup"])
+    [observation] = get_in(hopped, ["jobs", Access.at(0), "observations"])
+    assert observation["attributed_via"]["path"] == @slope
+    assert observation["attributed_via"]["pr"] == 26093
   end
 
   test "a non-private finding that names an unchanged module takes the same hop" do
