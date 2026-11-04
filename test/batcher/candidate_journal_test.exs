@@ -362,12 +362,72 @@ defmodule BorsNG.Worker.CandidateJournalTest do
     assert third.snapshot["inherited_handoff"]["event_id"] == later_event.id
   end
 
-  test "the same head, other PRs, retry clones and unusable records inherit nothing", ctx do
+  defp request(ctx, head, active?) do
+    Repo.get!(Patch, ctx.patch.id)
+    |> Ecto.Changeset.change(
+      source_compatibility:
+        if(active?,
+          do: %{
+            "head_sha" => head,
+            "status" => "conflict",
+            "policy" => "local-source-v3",
+            "repair_head" => head,
+            "repair_base" => "base",
+            "repair_policy" => "local-source-v3"
+          },
+          else: %{"head_sha" => head, "status" => "pass", "policy" => "local-source-v3"}
+        )
+    )
+    |> Repo.update!()
+  end
+
+  test "the same head inherits once after its request is lifted, never while it is active", ctx do
     link = member(ctx.batch, ctx.patch)
     original = Journal.admission(link.id)
     {candidate, event} = handoff(ctx, link)
+    request(ctx, "head", true)
 
-    # Same head: the request rules decide; the handoff stays unconsumed.
+    # A human r+ of the withdrawn head is ejected at assembly; it consumes nothing.
+    {active_batch, _, active} = readmit(ctx, "head")
+    refute Map.has_key?(active.snapshot, "inherited_handoff")
+    assert active.snapshot["original_admitted_at"] == active.observed_at
+    refute Repo.exists?(from(e in CandidateEvent, where: e.kind == "suspect_readmitted"))
+    active_batch |> Batch.changeset(%{state: :error}) |> Repo.update!()
+
+    # main moved and the conflict request was lifted at the unchanged head.
+    request(ctx, "head", false)
+    {lifted_batch, _, lifted} = readmit(ctx, "head")
+    assert lifted.snapshot["head_sha"] == "head"
+    assert lifted.snapshot["original_admitted_at"] == original.snapshot["original_admitted_at"]
+    assert lifted.snapshot["inherited_handoff"]["event_id"] == event.id
+    assert lifted.snapshot["inherited_handoff"]["candidate_id"] == candidate.id
+    assert lifted.snapshot["inherited_handoff"]["head_sha"] == "head"
+    [readmitted] = Repo.all(from(e in CandidateEvent, where: e.kind == "suspect_readmitted"))
+    assert readmitted.details["head_sha"] == "head"
+    assert readmitted.details["handoff_head_sha"] == "head"
+
+    # Once per handoff, at the same head as at a new one.
+    lifted_batch |> Batch.changeset(%{state: :error}) |> Repo.update!()
+    {_, _, again} = readmit(ctx, "head")
+    refute Map.has_key?(again.snapshot, "inherited_handoff")
+    assert again.snapshot["original_admitted_at"] == again.observed_at
+    {_, _, moved} = readmit(ctx, "repaired")
+    refute Map.has_key?(moved.snapshot, "inherited_handoff")
+
+    assert Repo.aggregate(
+             from(e in CandidateEvent, where: e.kind == "suspect_readmitted"),
+             :count,
+             :id
+           ) == 1
+  end
+
+  test "an active request, other PRs, retry clones and unusable records inherit nothing", ctx do
+    link = member(ctx.batch, ctx.patch)
+    original = Journal.admission(link.id)
+    {candidate, event} = handoff(ctx, link)
+    request(ctx, "head", true)
+
+    # Same head while requested: nothing is inherited and nothing is consumed.
     {same_batch, _, same} = readmit(ctx, "head")
     refute Map.has_key?(same.snapshot, "inherited_handoff")
     assert same.snapshot["original_admitted_at"] == same.observed_at
@@ -404,6 +464,7 @@ defmodule BorsNG.Worker.CandidateJournalTest do
 
     # The handoff is still unconsumed, so the next different head inherits.
     clone |> Batch.changeset(%{state: :error}) |> Repo.update!()
+    request(ctx, "repaired", false)
     {_, _, inherited} = readmit(ctx, "repaired")
     assert inherited.snapshot["original_admitted_at"] == original.snapshot["original_admitted_at"]
     assert inherited.snapshot["inherited_handoff"]["event_id"] == event.id

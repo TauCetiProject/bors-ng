@@ -34,13 +34,15 @@ labels and stale bindings keep the previous retry-batch behaviour.
 Each `suspects` entry of the `provisional_repair` event also records the
 suspect's `patch_id`, `link_id`, `admission_id`, `original_admitted_at` and
 `queue_age_retries`, read from its admission in the retired parent. When the
-same PR is next admitted at a different head, `CandidateJournal.admit` takes
-that age and counter for the new admission, marks the snapshot with
-`inherited_handoff` and appends `suspect_readmitted` to the handoff candidate,
-so the repaired PR returns to the queue position it held instead of behind
-everything approved during the repair. Each handoff grants this once; the same
-head, a second fresh admission and retry clones inherit nothing new. The rule
-and the record choice are described in deploy/queue-age.md.
+same PR is next admitted after the handoff, at a repaired head or at the
+unchanged head once `maybe_resolve` has lifted a conflict request,
+`CandidateJournal.admit` takes that age and counter for the new admission,
+marks the snapshot with `inherited_handoff` and appends `suspect_readmitted` to
+the handoff candidate, so the PR returns to the queue position it held instead
+of behind everything approved during the repair. Each handoff grants this once;
+a head whose request is still active, a second fresh admission and retry clones
+inherit nothing new. The rule, the record choice and why an admission of a
+still-requested head cannot spend the grant are described in deploy/queue-age.md.
 
 `provisional_fallback/4`, `fallback_due?`, `fallback_active?`, `fallback_member?`
 and the 95-minute grace are removed, as is the request sentence promising an
@@ -58,7 +60,7 @@ child, that the next `local_conflict` is followed by `provisional_repair` with
 `conflict.paths` and no one-member retry batch, and that no `provisional_unconfirmed`
 event appears again. For readmission age, verify that the `provisional_repair`
 carries `original_admitted_at` for each suspect and that the suspect's next
-fresh admission at a new head has `inherited_handoff` naming that event, the
+fresh admission after the handoff has `inherited_handoff` naming that event, the
 same `original_admitted_at`, and a `suspect_readmitted` event on the handoff
 candidate; the TauCetiWorker journal report measures handoff-to-readmission
 time from these fields.
