@@ -13,7 +13,7 @@ defmodule BorsNG.Worker.Batcher.Message do
   # is usual there, not guaranteed, so the hints say what pauses it.
   @automatic_repair "In this repository automatic repair usually takes this on, and the review bot re-queues a repaired head once it passes review, so a manual `bors r+` is not normally needed. A `keep`, `hold`, `wip` or `human` label pauses automatic repair; then the author or a maintainer needs to fix it."
 
-  @automatic_eligibility "In this repository the review bot re-queues the PR once its current head is approved and eligible again, so a manual `bors r+` is not normally needed."
+  @automatic_eligibility "In this repository the review bot can normally re-queue this PR after fresh approval and eligibility checks, and a `keep`, `hold`, `wip` or `human` label pauses that. If it stays out of the queue, someone with permission can run `bors r+`."
 
   @doc "Whether this deployment repairs and re-queues failed PRs without a manual `bors r+`."
   def automatic_requeue?, do: System.get_env("BORS_AUTOMATIC_REQUEUE", "false") == "true"
@@ -585,14 +585,12 @@ defmodule BorsNG.Worker.Batcher.Message do
     "bors could not restore this pull request's base branch to `#{branch}` (it was changed when its bundle was queued). Please check the base branch."
   end
 
-  # A batch member that failure diagnostics withdrew for repair instead of
-  # retrying: it has no smaller retry batch, so it must not be told it does.
+  # A member of a failed batch with no smaller retry batch: usually a suspect
+  # that failure diagnostics withdrew for repair, but not always, so the
+  # comment neither promises a retry nor assigns blame.
   def generate_message({:withdrawn_suspect, statuses}) do
     (["Build failed:" | Enum.map(statuses, &"  * #{gen_status_link(&1)}")] |> Enum.join("\n")) <>
-      "\n\nThis PR was tested together with other PRs, that batch failed, and bors's diagnostics point at this PR as a likely cause, so it has left the merge queue. If merge-queue recovery takes it on, a recovery comment on this PR says what happens next. " <>
-      repair_hint(
-        "Fix the failure if needed, then someone with permission can run `bors r+` or `bors retry`."
-      )
+      "\n\nThis PR was tested together with other PRs and that batch failed. It was not put into a smaller retry batch, so it has left the merge queue for now; that alone does not mean it caused the failure. If merge-queue recovery takes it on, a recovery comment on this PR says what happens next. Otherwise someone with permission can run `bors r+` or `bors retry`."
   end
 
   def generate_message({state, statuses}) do

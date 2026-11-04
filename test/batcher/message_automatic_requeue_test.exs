@@ -18,8 +18,7 @@ defmodule BorsNG.Worker.BatcherMessageAutomaticRequeueTest do
   test "repairable failures do not ask for a manual bors r+" do
     for message <- [
           {:failed, [%{identifier: "ci", url: nil}]},
-          {:conflict, :failed, "main"},
-          {:withdrawn_suspect, [%{identifier: "ci", url: nil}]}
+          {:conflict, :failed, "main"}
         ] do
       text = Message.generate_message(message)
       assert text =~ "automatic repair usually takes this on", inspect(message)
@@ -28,10 +27,17 @@ defmodule BorsNG.Worker.BatcherMessageAutomaticRequeueTest do
     end
   end
 
-  test "eligibility cancellations say the review bot re-queues the PR" do
+  test "eligibility cancellations say the review bot can re-queue the PR" do
     text = Message.generate_message({:canceled, :failed, :eligibility_changed})
-    assert text =~ "the review bot re-queues the PR"
-    refute text =~ "someone with permission"
+    assert text =~ "the review bot can normally re-queue this PR"
+    assert text =~ "If it stays out of the queue"
+  end
+
+  test "a failed-batch member without a retry is neither promised a retry nor blamed" do
+    text = Message.generate_message({:withdrawn_suspect, [%{identifier: "ci", url: nil}]})
+    assert text =~ "not put into a smaller retry batch"
+    assert text =~ "does not mean it caused the failure"
+    refute text =~ "No action is needed"
   end
 
   test "timeouts and unknown cancellations keep the manual next step" do
