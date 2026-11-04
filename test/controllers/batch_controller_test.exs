@@ -71,6 +71,9 @@ defmodule BorsNG.BatchControllerTest do
     assert html =~ "Batch Details"
     assert html =~ "/pull/43"
     assert html =~ "Log in with GitHub"
+    # The history page needs a login; signed-out visitors get the public queue.
+    assert html =~ ~s(href="/repositories/#{batch.project_id}")
+    refute html =~ "/log"
   end
 
   test "needs a login when private repositories are allowed", %{conn: conn, batch: batch} do
