@@ -234,14 +234,16 @@ defmodule BorsNG.Worker.BatcherTest do
     %LinkPatchBatch{
       patch_id: patch.id,
       batch_id: batch.id,
-      reviewer: "nobody"
+      reviewer: "nobody",
+      head_sha: patch.commit
     }
     |> Repo.insert!()
 
     %LinkPatchBatch{
       patch_id: patch2.id,
       batch_id: batch.id,
-      reviewer: "nobody"
+      reviewer: "nobody",
+      head_sha: patch2.commit
     }
     |> Repo.insert!()
 
@@ -7692,6 +7694,28 @@ defmodule BorsNG.Worker.BatcherTest do
     retries = Batcher.retry_batches(batch.id, [patch1, patch2, patch3, patch4])
     assert map_size(retries) == 4
     assert Enum.all?(Map.values(retries), &(&1 > batch.id))
+  end
+
+  test "retry_batches needs a known matching head in a newer queued batch", %{proj: proj} do
+    patch =
+      Repo.insert!(%Patch{project_id: proj.id, pr_xref: 1, commit: "N", into_branch: "master"})
+
+    old = Repo.insert!(%Batch{project_id: proj.id, into_branch: "master", state: :error})
+    Repo.insert!(%LinkPatchBatch{batch_id: old.id, patch_id: patch.id, head_sha: "N"})
+
+    unknown = Repo.insert!(%Batch{project_id: proj.id, into_branch: "master", state: :waiting})
+    Repo.insert!(%LinkPatchBatch{batch_id: unknown.id, patch_id: patch.id, head_sha: nil})
+
+    stale = Repo.insert!(%Batch{project_id: proj.id, into_branch: "master", state: :waiting})
+    Repo.insert!(%LinkPatchBatch{batch_id: stale.id, patch_id: patch.id, head_sha: "M"})
+
+    assert Batcher.retry_batches(old.id, [patch]) == %{}
+
+    retry = Repo.insert!(%Batch{project_id: proj.id, into_branch: "master", state: :waiting})
+    Repo.insert!(%LinkPatchBatch{batch_id: retry.id, patch_id: patch.id, head_sha: "N"})
+
+    assert Batcher.retry_batches(old.id, [patch]) == %{patch.id => retry.id}
+    assert Batcher.retry_batches(retry.id, [patch]) == %{}
   end
 
   test "max_batch_size is enforced", %{proj: proj} do

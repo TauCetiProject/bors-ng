@@ -30,7 +30,12 @@ defmodule BorsNG.Worker.Orchestration.Projections do
 
   defp deliver_status(conn, data, status, batch_id) do
     case Repo.get(Batch, batch_id) do
-      nil when status == :ok ->
+      nil when status in [:ok, :running] ->
+        :ok
+
+      # A pending status ("Waiting in queue", "Running", or a retry) for a
+      # batch that has left the queue would stay pending on the PR forever.
+      %Batch{state: state} when status == :running and state not in [:waiting, :running] ->
         :ok
 
       nil ->

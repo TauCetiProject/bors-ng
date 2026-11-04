@@ -579,6 +579,9 @@ defmodule BorsNG.Worker.Batcher do
         {b.into_branch, b.id |> Patch.all_for_batch() |> Repo.all()}
       end)
 
+    waiting_members =
+      Enum.map(waiting, fn b -> {b.id, b.id |> Patch.all_for_batch() |> Repo.all()} end)
+
     # An emptied queue needs fresh review everywhere. A solo patch's approval
     # dies with its batch links; a bundle member's held approval must die
     # with them too, or one member's later r+ would silently re-queue its
@@ -599,7 +602,11 @@ defmodule BorsNG.Worker.Batcher do
       |> get_repo_conn()
 
     Enum.each(running, &send_status(repo_conn, &1, :canceled))
-    Enum.each(waiting, &send_status(repo_conn, &1, :canceled))
+    # The waiting batches and their links are deleted, so report the members
+    # captured above; otherwise a PR keeps a pending retry status forever.
+    Enum.each(waiting_members, fn {id, patches} ->
+      send_status(repo_conn, id, patches, :canceled)
+    end)
 
     Enum.each(affected, fn {branch, patches} ->
       Labeler.reconcile_queue(repo_conn, branch, patches)
@@ -1816,6 +1823,8 @@ defmodule BorsNG.Worker.Batcher do
     ejected_links = closed_links ++ draft_links ++ pulled_by_closed ++ pulled_by_draft
     Enum.each(ejected_links, &Repo.delete!/1)
     QueueApproval.stop(Enum.map(ejected_links, & &1.patch), :closed_or_draft)
+    # Replace any pending retry status: these PRs are off the queue now.
+    send_status(repo_conn, batch.id, Enum.map(ejected_links, & &1.patch), :canceled)
 
     closed_patches = Enum.map(closed_links, & &1.patch)
     drafted_patches = Enum.map(draft_links, & &1.patch)
@@ -5371,7 +5380,8 @@ defmodule BorsNG.Worker.Batcher do
       select: {l.patch_id, l.head_sha, b.id}
     )
     |> Repo.all()
-    |> Enum.filter(fn {patch_id, head, _} -> is_nil(head) or head == heads[patch_id] end)
+    # An unknown (nil) membership head proves nothing about the current head.
+    |> Enum.filter(fn {patch_id, head, _} -> not is_nil(head) and head == heads[patch_id] end)
     |> Enum.reduce(%{}, fn {patch_id, _, id}, acc ->
       Map.update(acc, patch_id, id, &max(&1, id))
     end)
