@@ -167,10 +167,13 @@ defmodule BorsNG.Worker.FailureIsolation do
               groups
 
             direct when not is_nil(conn) ->
-              remainder =
-                groups
-                |> Enum.map(fn group -> Enum.reject(group, &(&1 in direct)) end)
-                |> Enum.reject(&(&1 == []))
+              # The partition's groups were retry hints. Once the attributed
+              # owners leave, every remaining unit continues together: a
+              # shared-path neighbour must not become a one-member batch with
+              # a staging run of its own. Explicit singletons stay alone.
+              rest = Enum.flat_map(groups, fn group -> Enum.reject(group, &(&1 in direct)) end)
+              {single, other} = Enum.split_with(rest, & &1.patch.is_single)
+              remainder = Enum.map(single, &[&1]) ++ if(other == [], do: [], else: [other])
 
               case BorsNG.Worker.SourceCompatibility.provisional_failure(
                      batch,
