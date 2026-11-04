@@ -1956,6 +1956,54 @@ defmodule BorsNG.Worker.FailureIsolationTest do
       :ok
     end
 
+    test "a missing import found at assembly sends the importing head to repair, not to solo CI",
+         c do
+      conn = provisional_mock(c)
+
+      hints =
+        Map.put(c.hints, "missing_imports", [
+          %{
+            "pr" => 3,
+            "path" => "TauCeti/File3.lean",
+            "module" => "TauCeti.Absent",
+            "provider_path" => "TauCeti/Absent.lean"
+          }
+        ])
+
+      result = %{
+        commit: "assembled",
+        tree: "tree",
+        base_sha: "base",
+        evidence: %{"diagnostic_hints" => hints}
+      }
+
+      CandidateJournal.event(c.candidate, "local_assembled", "bors.local_git", result)
+      assert :partitioned = FailureIsolation.preflight(c.links, c.batch, result, conn)
+      assert Repo.get!(Batch, c.batch.id).state == :error
+      assert [child] = Repo.all(from(b in Batch, where: b.id != ^c.batch.id))
+      assert child.sealed
+      assert prs([stored_links(child.id)]) == [[1, 2, 4]]
+
+      suspect = Repo.get!(Patch, Enum.at(c.links, 2).patch_id)
+      assert suspect.queue_approval["state"] == "withdrawn"
+      assert suspect.source_compatibility["status"] == "missing_source"
+      assert suspect.source_compatibility["policy"] == "local-source-v3"
+      assert suspect.source_compatibility["repair_head"] == "head3"
+      assert [%{"module" => "TauCeti.Absent"}] = suspect.source_compatibility["missing_imports"]
+
+      [event] = Repo.all(from(e in CandidateEvent, where: e.kind == "provisional_repair"))
+      assert event.details["prs"] == [3]
+      assert [%{"pr" => 3}] = event.details["missing_imports"]
+      assert is_nil(event.details["binding"])
+      assert [%{payload: payload}] = Repo.all(BorsNG.Database.OrchestrationJob)
+      {_, 3, body, marker} = :erlang.binary_to_term(payload, [:safe])
+      assert body =~ "missing from `main`"
+      assert marker == "<!--tauceti-rebase:v1 head3-->"
+
+      # Without a connection the previous retry partition still applies.
+      assert Repo.aggregate(Batch, :count, :id) == 2
+    end
+
     test "one bound owner skips singleton CI, preserves remainder and deduplicates restart", c do
       {batch, conn} = provisional_candidate(c)
       assert BorsNG.Worker.SpeculativeTrain.tracked?(c.candidate)

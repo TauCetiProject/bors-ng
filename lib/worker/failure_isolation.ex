@@ -41,41 +41,100 @@ defmodule BorsNG.Worker.FailureIsolation do
 
   # Only a strict multi-unit retry is eligible for this shortcut. A singleton
   # still goes to authoritative CI; source inventory alone never quarantines.
-  def preflight(links, batch, result) do
+  def preflight(links, batch, result, conn \\ nil) do
     candidate = CandidateJournal.latest(batch.id)
     hints = validated_hints(candidate, result, get_in(result, [:evidence, "diagnostic_hints"]))
 
-    if enabled?() and is_map(hints) and hints["complete"] == true and
-         (hints["missing_imports"] || []) != [] and
-         match?({:ok, _, "missing_import"}, partition(links, hints, nil)) do
-      # There is no running CI binding to replay here. Retire the waiting
-      # parent in the same transaction as every child: after a crash it must
-      # never reconstruct beside live children against a newly advanced base.
-      {:ok, :partitioned} =
-        Repo.transaction(fn ->
-          parent = Repo.one!(from(b in Batch, where: b.id == ^batch.id, lock: "FOR UPDATE"))
-          candidate = CandidateJournal.latest(batch.id)
+    cond do
+      not (enabled?() and is_map(hints) and hints["complete"] == true and
+             (hints["missing_imports"] || []) != [] and
+               match?({:ok, _, "missing_import"}, partition(links, hints, nil))) ->
+        :dispatch
 
-          CandidateJournal.event(candidate, "local_import_failure", "bors.local_git", %{
-            assembly_identity: BorsNG.Worker.CandidateAssembler.identity(candidate),
+      # The importing heads go to repair with the ordinary missing-source
+      # request; the rest continue as one batch. No one-member retry batch.
+      conn != nil and preflight_handoff(links, batch, result, hints, conn) == :handed_off ->
+        :partitioned
+
+      true ->
+        preflight_split(links, batch, result, hints)
+    end
+  end
+
+  defp preflight_handoff(links, batch, result, hints, conn) do
+    findings = hints["missing_imports"] || []
+    owners = findings |> Enum.map(& &1["pr"]) |> Enum.uniq()
+    suspects = Enum.filter(links, &(&1.patch.pr_xref in owners))
+    rest = Enum.reject(links, &(&1 in suspects))
+    {single, other} = Enum.split_with(rest, & &1.patch.is_single)
+    remainder = Enum.map(single, &[&1]) ++ if(other == [], do: [], else: [other])
+
+    missing = %{
+      "kind" => "missing_import",
+      "base_sha" => Map.get(result, :base_sha),
+      "missing_imports" => findings
+    }
+
+    case BorsNG.Worker.SourceCompatibility.provisional_failure(
+           batch,
+           links,
+           suspects,
+           remainder,
+           hints,
+           conn,
+           missing
+         ) do
+      :handed_off ->
+        CandidateJournal.event(
+          CandidateJournal.latest(batch.id),
+          "local_import_failure",
+          "bors.local_git",
+          %{
             commit: result.commit,
             tree: result.tree,
-            missing_imports: hints["missing_imports"],
+            missing_imports: findings,
             authority: "retry_only",
             proof_authority: false,
             ci_dispatched: false,
-            parent_retired_atomically: true
-          })
+            handed_off: true
+          }
+        )
 
-          :retrying = split(links, batch)
-          parent |> Batch.changeset(%{state: :error, commit: nil}) |> Repo.update!()
-          :partitioned
-        end)
+        :handed_off
 
-      :partitioned
-    else
-      :dispatch
+      _ ->
+        :unavailable
     end
+  rescue
+    _ -> :unavailable
+  end
+
+  defp preflight_split(links, batch, result, hints) do
+    # There is no running CI binding to replay here. Retire the waiting
+    # parent in the same transaction as every child: after a crash it must
+    # never reconstruct beside live children against a newly advanced base.
+    {:ok, :partitioned} =
+      Repo.transaction(fn ->
+        parent = Repo.one!(from(b in Batch, where: b.id == ^batch.id, lock: "FOR UPDATE"))
+        candidate = CandidateJournal.latest(batch.id)
+
+        CandidateJournal.event(candidate, "local_import_failure", "bors.local_git", %{
+          assembly_identity: BorsNG.Worker.CandidateAssembler.identity(candidate),
+          commit: result.commit,
+          tree: result.tree,
+          missing_imports: hints["missing_imports"],
+          authority: "retry_only",
+          proof_authority: false,
+          ci_dispatched: false,
+          parent_retired_atomically: true
+        })
+
+        :retrying = split(links, batch)
+        parent |> Batch.changeset(%{state: :error, commit: nil}) |> Repo.update!()
+        :partitioned
+      end)
+
+    :partitioned
   end
 
   def hints(candidate) do
