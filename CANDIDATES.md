@@ -129,6 +129,14 @@ Every directly attributed suspect, and a head that conflicts during construction
 leaves for repair in one transaction and never receives a solo staging run; see
 [suspect handoff](deploy/suspect-handoff.md).
 
+## Declaration collisions
+
+Each admission stores the names its head adds (`declaration_names`, fetched in
+the background from the PR build's `DECLARATION-NAMES` record), and the
+planning pass can skip a batch-mate that adds a name another accepted unit adds
+in a different module. See [deferring declaration collisions](deploy/declaration-collisions.md)
+for the switch, bounds and rollout.
+
 ## Depth-two scheduling
 
 The disabled N canary uses `speculative_predecessor_id` to bind B's exact assembly

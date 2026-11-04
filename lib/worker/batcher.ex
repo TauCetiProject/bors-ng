@@ -765,6 +765,11 @@ defmodule BorsNG.Worker.Batcher do
     {:noreply, project_id}
   end
 
+  def handle_info({:declaration_names, admission_id}, project_id) do
+    BorsNG.Worker.DeclarationNames.fetch(project_id, admission_id)
+    {:noreply, project_id}
+  end
+
   def handle_info({:reconcile_construction, candidate_id, members}, project_id) do
     candidate = Repo.get(BorsNG.Database.Candidate, candidate_id)
 
@@ -1913,6 +1918,15 @@ defmodule BorsNG.Worker.Batcher do
 
       if selection,
         do: CandidateJournal.event(candidate, "merge_selection", "bors.local_git", selection)
+
+      for skip <- (selection || %{})["declaration_collisions"] || [] do
+        CandidateJournal.event(
+          candidate,
+          "declaration_collision",
+          "bors.declaration_names",
+          Map.put(skip["conflict"], "authority", "deferral_only")
+        )
+      end
 
       batch = %{batch | candidate_id: candidate.id}
 

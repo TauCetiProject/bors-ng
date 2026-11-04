@@ -37,7 +37,7 @@ test('catch-up budget refreshes the already activated warm container without cle
   container.running = false;
   stopped();
   await activation;
-  assert.equal(await storage.get(key), 'outbox-v2-train-canary-10-large-batches-2');
+  assert.equal(await storage.get(key), 'outbox-v3-declaration-names-record-1');
   assert.deepEqual(await storage.get('pending-work'), {reservation: 42, approval: 'retained'});
   container.running = true;
   await activateOrchestration(storage, container);
@@ -54,7 +54,7 @@ test('failed warm canary refresh retains the old epoch until a successful retry'
   assert.equal(await storage.get(key), 'outbox-v1');
   container.destroy = async () => {container.running = false;};
   await activateOrchestration(storage, container, async () => {});
-  assert.equal(await storage.get(key), 'outbox-v2-train-canary-10-large-batches-2');
+  assert.equal(await storage.get(key), 'outbox-v3-declaration-names-record-1');
 });
 
 test('a fresh stopped container needs no restart', async () => {

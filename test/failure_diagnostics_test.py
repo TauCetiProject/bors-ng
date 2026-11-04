@@ -432,5 +432,88 @@ class DiagnosticsTest(unittest.TestCase):
         self.assertEqual(diagnostics.http_reason(302, {}), 'unexpected_redirect')
 
 
+    # --- DECLARATION-NAMES: the names a PR adds, consumed before assembly ---
+
+    HEAD = '1' * 40
+
+    def declaration(self, **overrides):
+        record = {'version': 1, 'head': self.HEAD, 'base': '2' * 40, 'tested': '3' * 40,
+                  'complete': True, 'added': {'TauCeti.A.B': ['TauCeti.foo', 'TauCeti.bar']}}
+        record.update(overrides)
+        return json.dumps(record)
+
+    def test_declaration_lines_keep_only_payloads_and_at_most_two(self):
+        lines = ['2026-11-04T00:00:00.0000000Z noise\n',
+                 '2026-11-04T00:00:00.0000000Z DECLARATION-NAMES {"a":1}\n',
+                 'DECLARATION-NAMES {"b":2}\n', 'DECLARATION-NAMES {"c":3}\n']
+        self.assertEqual(diagnostics.declaration_lines(iter(lines)), ['{"a":1}', '{"b":2}'])
+
+    def test_declaration_record_known_empty_incomplete(self):
+        known = diagnostics.declaration_record([self.declaration()], self.HEAD)
+        self.assertEqual(known, {'state': 'known', 'added': {'TauCeti.A.B': ['TauCeti.bar', 'TauCeti.foo']}})
+        empty = diagnostics.declaration_record([self.declaration(added={})], self.HEAD)
+        self.assertEqual(empty, {'state': 'empty', 'added': {}})
+        empty_lists = diagnostics.declaration_record([self.declaration(added={'TauCeti.A': []})], self.HEAD)
+        self.assertEqual(empty_lists['state'], 'empty')
+        incomplete = diagnostics.declaration_record([self.declaration(complete=False, added={})], self.HEAD)
+        self.assertEqual(incomplete['state'], 'incomplete')
+
+    def test_declaration_record_unknown_on_anything_doubtful(self):
+        cases = {
+            'records=0': [],
+            'records=2': [self.declaration(), self.declaration()],
+            'invalid_json': ['{'],
+            'head_mismatch': [self.declaration(head='9' * 40)],
+            'invalid_record': [self.declaration(version=2)],
+        }
+        for reason, records in cases.items():
+            result = diagnostics.declaration_record(records, self.HEAD)
+            self.assertEqual((result['state'], result['reason']), ('unknown', reason), reason)
+        for bad in [self.declaration(extra=1), self.declaration(complete='yes'),
+                    self.declaration(complete=False),  # incomplete must carry no names
+                    self.declaration(added={'NotProject.M': ['x']}),
+                    self.declaration(added={'TauCeti.M': ['bad name']}),
+                    self.declaration(added={'TauCeti.M': [1]}),
+                    self.declaration(added=['TauCeti.M']),
+                    '{"version":1,"version":1}']:
+            self.assertEqual(diagnostics.declaration_record([bad], self.HEAD)['state'], 'unknown', bad[:60])
+        many = {'TauCeti.M%d' % i: ['TauCeti.n%d' % i] for i in range(diagnostics.DECLARATION_MAX_MODULES + 1)}
+        self.assertEqual(diagnostics.declaration_record([self.declaration(added=many)], self.HEAD)['reason'], 'record_limit')
+        wide = {'TauCeti.M': ['TauCeti.n%d' % i for i in range(diagnostics.DECLARATION_MAX_NAMES + 1)]}
+        self.assertEqual(diagnostics.declaration_record([self.declaration(added=wide)], self.HEAD)['reason'], 'record_limit')
+
+    def test_collect_declaration_names_reads_one_record_and_reports_failures_as_unknown(self):
+        body = ('2026-11-04T00:00:00.0000000Z building\n'
+                '2026-11-04T00:00:00.0000000Z DECLARATION-NAMES ' + self.declaration() + '\n').encode()
+
+        class Response(io.BytesIO):
+            status = 200
+            headers = {'Content-Length': str(len(body))}
+
+        class Opener:
+            def open(self, *_args, **_kwargs):
+                return Response(body)
+
+        request = {'mode': 'declaration_names', 'repository_id': 1, 'job_ids': [2],
+                   'head': self.HEAD, 'time_budget': 5}
+        with patch.object(diagnostics.urllib.request, 'build_opener', return_value=Opener()), \
+                patch.dict(diagnostics.os.environ, {'BORS_DIAGNOSTICS_TOKEN': 'secret'}):
+            result = diagnostics.collect(request)
+        self.assertEqual(result['record']['state'], 'known')
+        self.assertEqual(result['job_id'], 2)
+
+        class Failing:
+            def open(self, request, **_kwargs):
+                raise diagnostics.urllib.error.HTTPError(request.full_url, 404, '', {}, None)
+
+        with patch.object(diagnostics.urllib.request, 'build_opener', return_value=Failing()), \
+                patch.dict(diagnostics.os.environ, {'BORS_DIAGNOSTICS_TOKEN': 'secret'}):
+            result = diagnostics.collect(request)
+        self.assertEqual(result['record']['state'], 'unknown')
+        for bad in [dict(request, job_ids=[2, 3]), dict(request, head='short'), dict(request, job_ids=[0])]:
+            with self.assertRaises(ValueError):
+                diagnostics.collect(bad)
+
+
 if __name__ == '__main__':
     unittest.main()

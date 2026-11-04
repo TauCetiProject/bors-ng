@@ -82,6 +82,13 @@ defmodule BorsNG.Worker.CandidateJournal do
         )
     }
 
+    # The record of names this head adds follows the exact head through
+    # retries; a fresh admission has none yet and schedules its fetch below.
+    snapshot =
+      if original && is_map(original.snapshot["declaration_names"]),
+        do: Map.put(snapshot, "declaration_names", original.snapshot["declaration_names"]),
+        else: snapshot
+
     # Additive: ordinary admissions keep their exact previous shape.
     snapshot =
       if handoff,

@@ -369,6 +369,14 @@ defmodule BorsNG.GitHub do
     call_with_retry(:staging_failure, repo_conn, {head, repo, batch, branch, base})
   end
 
+  @doc "The `sandboxed-build` job of the trusted PR build that posted a head's `build` status."
+  @spec pr_build_job(tconn, binary) ::
+          {:ok, %{run_id: integer, run_attempt: integer, job_id: integer} | :unavailable}
+          | {:error, term}
+  def pr_build_job(repo_conn, head) do
+    call_with_retry(:pr_build_job, repo_conn, {head})
+  end
+
   def staging_failure(repo_conn, head, repo, batch, branch, base, since) do
     call_with_retry(:staging_failure, repo_conn, {head, repo, batch, branch, base, since})
   end

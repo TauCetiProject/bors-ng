@@ -2,16 +2,51 @@ defmodule BorsNG.Worker.Batcher.ConflictSelection do
   @moduledoc "Skip conflicting atomic units before immutable candidate construction."
   import Ecto.Query
   alias BorsNG.Database.{Batch, LinkPatchBatch, Patch, Repo}
-  alias BorsNG.Worker.{CandidateJournal, LocalGit}
+  alias BorsNG.Worker.{CandidateJournal, DeclarationNames, LocalGit}
   alias BorsNG.Worker.Batcher.{Bundles, Divider}
 
   def select(batch, links, base, conn) do
     units = Divider.group_units(links)
     identity = identity(batch, links, base)
 
-    result = LocalGit.select(batch.project, conn, base, Enum.map(units, &members/1), identity)
+    # Known batch-mate declaration collisions leave before the Git probe. A
+    # unit without a known record is probed as before; the first unit can
+    # never be skipped here, so the Git selection always has input.
+    DeclarationNames.schedule(batch.project_id, links)
+    skips = if DeclarationNames.enabled?(), do: declaration_skips(units, links), else: []
+    rejected = Enum.flat_map(skips, & &1["members"])
+    probed = Enum.reject(units, &(hd(members(&1)) in rejected))
+
+    result =
+      LocalGit.select(batch.project, conn, base, Enum.map(probed, &members/1), identity)
+      |> merge_skips(skips)
+
     reconcile(batch, links, base, identity, result)
+    |> tap(fn
+      {:ok, _selected, %{"deferred_batch_id" => _}} ->
+        Enum.each(skips, &DeclarationNames.notify(batch.project_id, conn, &1))
+
+      _ ->
+        :ok
+    end)
   end
+
+  @doc false
+  def declaration_skips(units, links),
+    do: DeclarationNames.collisions(units, DeclarationNames.records(links))
+
+  # The pre-check's skips join the Git selection's own, ahead of them, as one
+  # skipped list; the evidence keeps them apart for the journal.
+  @doc false
+  def merge_skips(result, []), do: result
+
+  def merge_skips(%{"skipped" => skipped} = result, skips) when is_list(skipped) do
+    result
+    |> Map.put("skipped", skips ++ skipped)
+    |> Map.put("declaration_collisions", skips)
+  end
+
+  def merge_skips(result, _), do: result
 
   @doc false
   def reconcile(batch, links, base, identity, result) do
@@ -65,7 +100,7 @@ defmodule BorsNG.Worker.Batcher.ConflictSelection do
         Enum.all?(skipped, fn
           %{"members" => unit, "conflict" => %{"pr" => pr, "head_sha" => head, "kind" => kind}} ->
             unit in input and %{"pr" => pr, "head_sha" => head} in unit and
-              kind in ["merge_conflict", "already_merged"]
+              kind in ["merge_conflict", "already_merged", "declaration_collision"]
 
           _ ->
             false

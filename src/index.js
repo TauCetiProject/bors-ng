@@ -78,6 +78,8 @@ export class BorsContainer extends Container {
     // including the one already consumed by the October failure canary.
     BORS_SPECULATIVE_TRAINS: workerEnv.BORS_SPECULATIVE_TRAINS ?? (workerEnv.BORS_PROJECT && workerEnv.BORS_PROJECT !== "TauCetiProject/TauCeti" ? "false" : "true"),
     BORS_SPECULATION_CANARY_SUCCESSORS: "10",
+    // Declaration-collision records: "off", "record" (store only) or "on" (defer).
+    BORS_DECLARATION_COLLISIONS: workerEnv.BORS_DECLARATION_COLLISIONS ?? "record",
     BORS_SPECULATION_GATE_16231: "https://github.com/TauCetiProject/TauCeti/issues/16231#issuecomment-6179935551",
     BORS_SPECULATION_GATE_16232: "https://github.com/TauCetiProject/TauCeti/issues/16232#issuecomment-6163837222",
     BORS_SPECULATION_GATE_16234: "https://github.com/TauCetiProject/TauCeti/issues/16234#issuecomment-6167663957",

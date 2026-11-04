@@ -849,6 +849,27 @@ defmodule BorsNG.GitHub.Server do
          do: {:ok, Map.merge(status, check)}
   end
 
+  # Read-only: statuses, one run, one attempt's jobs. Anything unexpected is
+  # :unavailable; the caller records an unknown and never retries by itself.
+  def do_handle_call(:pr_build_job, repo_conn, {head}) do
+    with %{status: 200, body: raw} <- get!(repo_conn, "commits/#{head}/statuses?per_page=100"),
+         {:ok, statuses} when is_list(statuses) <- Jason.decode(raw),
+         {:lookup, run_id} <-
+           BorsNG.Worker.DeclarationNames.build_run(statuses, BorsNG.ProjectConfig.repo()),
+         %{status: 200, body: run_raw} <- get!(repo_conn, "actions/runs/#{run_id}"),
+         {:ok, %{"path" => ".github/workflows/pr-build.yml", "run_attempt" => attempt}}
+         when is_integer(attempt) and attempt > 0 <- Jason.decode(run_raw),
+         %{status: 200, body: jobs_raw} <-
+           get!(repo_conn, "actions/runs/#{run_id}/attempts/#{attempt}/jobs?per_page=100"),
+         {:ok, %{"jobs" => jobs}} when is_list(jobs) <- Jason.decode(jobs_raw),
+         [%{"id" => job_id}] when is_integer(job_id) <-
+           Enum.filter(jobs, &(is_map(&1) and &1["name"] == "sandboxed-build")) do
+      {:ok, %{run_id: run_id, run_attempt: attempt, job_id: job_id}}
+    else
+      _ -> {:ok, :unavailable}
+    end
+  end
+
   def do_handle_call(:staging_failure, repo_conn, {head, repo, batch, branch, base}) do
     alias BorsNG.Worker.StagingFailure
 
