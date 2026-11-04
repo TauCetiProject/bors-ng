@@ -5,6 +5,7 @@ function fetchSocketToken(onOk, onFail) {
   let page_current_user = document.querySelector("meta[name='bors-current-user']");
   if (page_current_user === null) {
     setTimeout(() => onFail("current user"), 0);
+    return;
   }
   page_current_user = Number(page_current_user.content);
   let current_token = sessionStorage.getItem("bors-socket-token");
