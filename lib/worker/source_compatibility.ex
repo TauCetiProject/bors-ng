@@ -618,6 +618,7 @@ defmodule BorsNG.Worker.SourceCompatibility do
                  base_sha: base,
                  binding: evidence["binding"],
                  conflict: if(conflict, do: Map.take(conflict, ~w(paths merge_head))),
+                 missing_imports: if(conflict, do: conflict["missing_imports"]),
                  remainder: Enum.map(remainder, &Enum.map(&1, fn l -> l.patch.pr_xref end)),
                  authority: "provisional_suspect",
                  proof_authority: false,
@@ -658,6 +659,23 @@ defmodule BorsNG.Worker.SourceCompatibility do
     end
   end
 
+  # A missing import found at assembly names the importing heads directly;
+  # the request is the ordinary missing-source one, so the sweep lifts it
+  # once main provides the module.
+  defp suspect_evidence(_batch, _candidate, _hints, prs, %{"kind" => "missing_import"} = m) do
+    findings = m["missing_imports"]
+
+    with true <- is_list(findings) and findings != [],
+         true <-
+           Enum.all?(findings, &(is_map(&1) and is_integer(&1["pr"]) and is_binary(&1["path"]))),
+         true <- findings |> Enum.map(& &1["pr"]) |> Enum.uniq() |> Enum.sort() == prs,
+         base when is_binary(base) <- m["base_sha"] do
+      {:ok, base, %{"binding" => nil, "missing_imports" => findings}}
+    else
+      _ -> :unavailable
+    end
+  end
+
   defp suspect_evidence(_batch, _candidate, _hints, prs, conflict) do
     with "merge_conflict" <- conflict["kind"],
          [pr] <- prs,
@@ -691,6 +709,26 @@ defmodule BorsNG.Worker.SourceCompatibility do
           "requested_at" => Outbox.now(),
           "proof_authority" => false
         })
+    }
+  end
+
+  defp suspect_result(patch, link, batch, candidate, base, %{"missing_imports" => f}, _m) do
+    %{
+      "pr" => patch.pr_xref,
+      "head_sha" => link.head_sha,
+      "base_sha" => base,
+      "policy" => @policy,
+      "status" => "missing_source",
+      "missing_imports" => f |> Enum.filter(&(&1["pr"] == patch.pr_xref)) |> Enum.take(8),
+      "provisional" => %{
+        "candidate_id" => candidate.id,
+        "batch_id" => batch.id,
+        "source_link_id" => link.id,
+        "head_sha" => link.head_sha,
+        "base_sha" => base,
+        "requested_at" => Outbox.now(),
+        "proof_authority" => false
+      }
     }
   end
 

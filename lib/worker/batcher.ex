@@ -2100,7 +2100,7 @@ defmodule BorsNG.Worker.Batcher do
             admission.snapshot["patch_id"] != link.patch_id))
   end
 
-  defp local_import_preflight(batch, links, candidate, result) do
+  defp local_import_preflight(batch, links, candidate, result, conn) do
     # A reservation also tracks ordinary roots. Only descendants depend on an
     # unpromoted predecessor and need the conservative train fallback here.
     if candidate.snapshot["speculative_predecessor_id"] do
@@ -2109,7 +2109,7 @@ defmodule BorsNG.Worker.Batcher do
       if Process.get(:orchestration_executor, false),
         do: ensure_no_withdrawal!(batch, patch_ids(candidate))
 
-      BorsNG.Worker.FailureIsolation.preflight(links, batch, result)
+      BorsNG.Worker.FailureIsolation.preflight(links, batch, result, conn)
     end
   end
 
@@ -2130,7 +2130,7 @@ defmodule BorsNG.Worker.Batcher do
            phase(batch, :assembly_live_heads, fn ->
              local_live_heads(conn, links, batch.project)
            end),
-         :dispatch <- local_import_preflight(batch, links, candidate, result) do
+         :dispatch <- local_import_preflight(batch, links, candidate, result, conn) do
       if Train.tracked?(candidate) do
         CandidateJournal.event(candidate, "train_barrier_checked", "bors.local_git", %{
           commit: result.commit,
