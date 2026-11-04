@@ -2,9 +2,9 @@ defmodule BorsNG.Worker.MergeEligibility do
   @moduledoc "Consumes App-owned policy checks inside the project's serialized batcher."
   import Ecto.Query
   require Logger
-  alias BorsNG.Database.{Batch, LinkPatchBatch, Patch, Project, Repo}
+  alias BorsNG.Database.{Batch, Candidate, CandidateEvent, LinkPatchBatch, Patch, Project, Repo}
   alias BorsNG.GitHub
-  alias BorsNG.Worker.{Batcher, BumpRecovery, QueueApproval, Syncer}
+  alias BorsNG.Worker.{Batcher, BumpRecovery, QueueApproval, SourceCompatibility, Syncer}
 
   @name "merge eligibility"
   @schema "tauceti-merge.eligibility/v1"
@@ -168,6 +168,11 @@ defmodule BorsNG.Worker.MergeEligibility do
       QueueApproval.blocked?(patch) and is_nil(retry) ->
         :ok
 
+      # A head under an active source repair request is never offered; the
+      # sweep's `maybe_resolve` lifts the request and clears the decision id.
+      SourceCompatibility.requested?(patch, patch.commit) and is_nil(retry) ->
+        :ok
+
       patch.merge_eligibility_id == d["id"] and is_nil(retry) ->
         :ok
 
@@ -211,15 +216,31 @@ defmodule BorsNG.Worker.MergeEligibility do
     end
   end
 
+  # Never loop failed heads or add a duplicate membership. Human retry remains
+  # available. A parent retired by a repair handoff (deploy/suspect-handoff.md)
+  # keeps its links as history: its `provisional_repair` event names this PR,
+  # and the withdrawn head was never proven to fail there, so once the request
+  # is lifted the unchanged head is offered again like any other.
   defp represented_or_terminal?(patch) do
-    # Never loop failed heads or add a duplicate membership. Human retry remains available.
+    handoff_parents =
+      from(e in CandidateEvent,
+        join: c in Candidate,
+        on: c.id == e.candidate_id,
+        where:
+          c.project_id == ^patch.project_id and e.kind == "provisional_repair" and
+            e.source == "bors.failure_isolation" and
+            fragment("? @> ?::jsonb", e.details, ^%{"prs" => [patch.pr_xref]}),
+        select: c.batch_id
+      )
+
     Repo.exists?(
       from(l in LinkPatchBatch,
         join: b in Batch,
         on: b.id == l.batch_id,
         where:
           l.patch_id == ^patch.id and (l.head_sha == ^patch.commit or is_nil(l.head_sha)) and
-            b.state != :canceled
+            b.state != :canceled and
+            not (b.state == :error and b.id in subquery(handoff_parents))
       )
     ) or
       not is_nil(patch.bundle_reviewer)

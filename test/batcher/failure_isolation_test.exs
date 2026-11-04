@@ -2828,6 +2828,171 @@ defmodule BorsNG.Worker.FailureIsolationTest do
       refute Map.has_key?(CandidateJournal.admission(later_link.id).snapshot, "inherited_handoff")
     end
 
+    test "a conflict-peeled head is re-offered automatically once its request is lifted", c do
+      alias BorsNG.Worker.{MergeEligibility, SourceCompatibility}
+      conn = provisional_mock(c)
+      merge_base = String.duplicate("b", 40)
+      old = System.get_env("TAUCETI_REVIEW_APP_ID")
+      System.put_env("TAUCETI_REVIEW_APP_ID", "3947238")
+
+      on_exit(fn ->
+        if old,
+          do: System.put_env("TAUCETI_REVIEW_APP_ID", old),
+          else: System.delete_env("TAUCETI_REVIEW_APP_ID")
+      end)
+
+      decision = fn id ->
+        data = %{
+          "schema" => "tauceti-merge.eligibility/v1",
+          "repo" => "TauCetiProject/TauCeti",
+          "pr" => 3,
+          "eligible" => true,
+          "review_safe" => true,
+          "single" => false,
+          "merge_base_sha" => merge_base
+        }
+
+        %{
+          "id" => id,
+          "name" => "merge eligibility",
+          "app" => %{"id" => 3_947_238},
+          "status" => "completed",
+          "conclusion" => "success",
+          "head_sha" => "head3",
+          "external_id" => Jason.encode!(data)
+        }
+      end
+
+      toml = "status = [\"build\"]\npr_status = [\"build\"]\n"
+      state = GitHub.ServerMock.get_state()
+
+      pr = %{
+        state[conn].pulls[3]
+        | user: %GitHub.User{id: 6, login: "author", avatar_url: "avatar"}
+      }
+
+      state
+      |> put_in([conn, :pulls, 3], pr)
+      |> put_in([conn, :eligibility_checks], %{"head3" => {:ok, [decision.(10)]}})
+      |> put_in([conn, :merge_bases], %{{3, "head3"} => {:ok, merge_base}})
+      |> put_in([conn, :backend_snapshot], {:ok, %{backend: "bors", github_count: 0}})
+      |> put_in([conn, :statuses], %{"head3" => %{"build" => :ok}})
+      |> put_in([conn, :files], %{
+        "head3" => %{"bors.toml" => toml},
+        "main" => %{"bors.toml" => toml}
+      })
+      |> GitHub.ServerMock.put_state()
+
+      # The head was admitted on this decision before the handoff.
+      Repo.get!(Patch, Enum.at(c.links, 2).patch_id)
+      |> Patch.changeset(%{merge_eligibility_id: 10})
+      |> Repo.update!()
+
+      conflict = %{
+        "kind" => "merge_conflict",
+        "pr" => 3,
+        "head_sha" => "head3",
+        "base_sha" => "base",
+        "merge_head" => "merged12",
+        "paths" => ["TauCeti/File3.lean"]
+      }
+
+      hints = Map.merge(c.hints, %{"ownership_complete" => true, "dependencies_complete" => true})
+
+      CandidateJournal.event(c.candidate, "local_conflict", "bors.local_git", %{
+        pr: 3,
+        head_sha: "head3",
+        base_sha: "base",
+        kind: "merge_conflict",
+        merge_head: "merged12",
+        paths: ["TauCeti/File3.lean"],
+        hints: hints
+      })
+
+      assert :retrying = FailureIsolation.split(c.links, c.batch, conflict, conn)
+      assert Repo.get!(Batch, c.batch.id).state == :error
+      suspect = Repo.get!(Patch, Enum.at(c.links, 2).patch_id)
+      assert SourceCompatibility.requested?(suspect, "head3")
+      assert suspect.queue_approval["state"] == "withdrawn"
+      refute suspect.queue_pending
+      [event] = Repo.all(from(e in CandidateEvent, where: e.kind == "provisional_repair"))
+
+      links_at_head = fn ->
+        Repo.all(
+          from(l in LinkPatchBatch,
+            join: b in Batch,
+            on: b.id == l.batch_id,
+            where: l.patch_id == ^suspect.id and l.head_sha == "head3",
+            select: {b.id, b.state}
+          )
+        )
+      end
+
+      assert links_at_head.() == [{c.batch.id, :error}]
+
+      # While the request is active, neither the original decision nor a fresh
+      # one from the review App re-offers the head.
+      MergeEligibility.reconcile(c.project, 3)
+      assert links_at_head.() == [{c.batch.id, :error}]
+      refute Repo.get!(Patch, suspect.id).queue_pending
+
+      GitHub.ServerMock.put_state(
+        put_in(GitHub.ServerMock.get_state(), [conn, :eligibility_checks], %{
+          "head3" => {:ok, [decision.(10), decision.(11)]}
+        })
+      )
+
+      MergeEligibility.reconcile(c.project, 3)
+      assert links_at_head.() == [{c.batch.id, :error}]
+      refute Repo.get!(Patch, suspect.id).queue_pending
+      assert SourceCompatibility.requested?(Repo.get!(Patch, suspect.id), "head3")
+
+      # main moves, the head merges cleanly and the ordinary sweep lifts the request.
+      new_main = String.duplicate("d", 40)
+
+      GitHub.ServerMock.put_state(
+        put_in(GitHub.ServerMock.get_state(), [conn, :branches], %{"main" => new_main})
+      )
+
+      SourceCompatibility.apply_results(c.project, conn, new_main, [suspect], [
+        %{
+          "pr" => 3,
+          "head_sha" => "head3",
+          "base_sha" => new_main,
+          "policy" => "local-source-v3",
+          "status" => "pass"
+        }
+      ])
+
+      suspect = Repo.get!(Patch, suspect.id)
+      refute SourceCompatibility.requested?(suspect, "head3")
+      assert suspect.commit == "head3"
+      assert suspect.merge_eligibility_id == nil
+      refute suspect.queue_pending
+
+      # The eligibility heartbeat re-offers the unchanged head through the
+      # ordinary automatic admission.
+      MergeEligibility.reconcile(c.project, 3)
+
+      suspect = Repo.get!(Patch, suspect.id)
+      assert suspect.queue_pending
+      assert suspect.queue_approval["state"] == "approved"
+      assert suspect.merge_eligibility_id == 11
+
+      parent_id = c.batch.id
+
+      assert [{^parent_id, :error}, {returned_id, :waiting}] = Enum.sort(links_at_head.())
+      refute returned_id == parent_id
+      [link] = Repo.all(from(l in LinkPatchBatch, where: l.batch_id == ^returned_id))
+      assert link.patch_id == suspect.id
+      admission = CandidateJournal.admission(link.id)
+      assert admission.snapshot["inherited_handoff"]["event_id"] == event.id
+
+      # A repeat heartbeat with the same decision adds no second membership.
+      MergeEligibility.reconcile(c.project, 3)
+      assert length(links_at_head.()) == 2
+    end
+
     test "a bundled conflicting head keeps the conservative retry batches", c do
       conn = provisional_mock(c)
       [a, b | _] = c.links

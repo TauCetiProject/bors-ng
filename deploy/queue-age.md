@@ -97,8 +97,9 @@ broken, and when `main` moves and the head merges cleanly the ordinary sweep's
 the unchanged head; that admission inherits like a repaired one. A head whose
 request is still active inherits nothing: `CandidateJournal.admit` checks
 `SourceCompatibility.requested?` for the admitted head. Automatic admission
-never offers such a head (`MergeEligibility.apply_decision` sees an unchanged
-decision id until `maybe_resolve` clears it), and a human `r+` of it does reach
+never offers such a head (`MergeEligibility.apply_decision` refuses while
+`SourceCompatibility.requested?` holds, and sees an unchanged decision id until
+`maybe_resolve` clears it), and a human `r+` of it does reach
 `insert_member` but is ejected at assembly by `SourceCompatibility.admit`, which
 deletes the link and withdraws the approval; the `requested?` check keeps that
 ejected admission from consuming the grant. The handoff is
