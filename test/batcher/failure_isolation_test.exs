@@ -2598,7 +2598,7 @@ defmodule BorsNG.Worker.FailureIsolationTest do
                "withdrawn"
     end
 
-    test "shared-path and import neighbours are retried, never handed off", c do
+    test "shared-path and import neighbours stay in the one remainder, never handed off", c do
       {batch, conn} = provisional_candidate(c)
 
       hints =
@@ -2615,9 +2615,9 @@ defmodule BorsNG.Worker.FailureIsolationTest do
       assert :retrying = FailureIsolation.split(c.links, batch, nil, conn)
       [event] = Repo.all(from(e in CandidateEvent, where: e.kind == "provisional_repair"))
       assert event.details["prs"] == [3]
-      assert event.details["remainder"] == [[2], [1, 4]]
+      assert event.details["remainder"] == [[2, 1, 4]]
       children = Repo.all(from(b in Batch, where: b.id != ^batch.id, order_by: b.id))
-      assert prs(Enum.map(children, &stored_links(&1.id))) == [[2], [1, 4]]
+      assert prs(Enum.map(children, &stored_links(&1.id))) == [[2, 1, 4]]
       assert Repo.get!(Patch, Enum.at(c.links, 1).patch_id).queue_approval["state"] == "approved"
       assert Repo.get!(Patch, Enum.at(c.links, 2).patch_id).queue_approval["state"] == "withdrawn"
     end
