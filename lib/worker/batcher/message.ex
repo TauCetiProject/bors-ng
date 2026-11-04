@@ -5,6 +5,24 @@ defmodule BorsNG.Worker.Batcher.Message do
 
   alias BorsNG.Worker.Batcher.BorsToml
 
+  @no_action "No action is needed: the bors check on this PR links to the batch it is waiting in."
+
+  # On a deployment whose review bot and repair workers re-queue PRs
+  # (`BORS_AUTOMATIC_REQUEUE=true`), telling an author to find someone to run
+  # `bors r+` sends them to ask for a command nobody needs to type. Recovery
+  # is usual there, not guaranteed, so the hints say what pauses it.
+  @automatic_repair "In this repository automatic repair usually takes this on, and the review bot re-queues a repaired head once it passes review, so a manual `bors r+` is not normally needed. A `keep`, `hold`, `wip` or `human` label pauses automatic repair; then the author or a maintainer needs to fix it."
+
+  @automatic_eligibility "In this repository the review bot can normally re-queue this PR after fresh approval and eligibility checks, and a `keep`, `hold`, `wip` or `human` label pauses that. If it stays out of the queue, someone with permission can run `bors r+`."
+
+  @doc "Whether this deployment repairs and re-queues failed PRs without a manual `bors r+`."
+  def automatic_requeue?, do: System.get_env("BORS_AUTOMATIC_REQUEUE", "false") == "true"
+
+  defp repair_hint(manual), do: if(automatic_requeue?(), do: @automatic_repair, else: manual)
+
+  defp eligibility_hint(manual),
+    do: if(automatic_requeue?(), do: @automatic_eligibility, else: manual)
+
   def generate_status(:waiting) do
     {"Waiting in queue", :running}
   end
@@ -146,7 +164,10 @@ defmodule BorsNG.Worker.Batcher.Message do
   end
 
   def generate_message({:conflict, :failed, branch}) do
-    "Merge conflict.\n\nMerge or rebase `#{branch}` into this PR and resolve the conflict, then someone with permission can run `bors r+` or `bors retry`."
+    "Merge conflict.\n\nThis PR conflicts with `#{branch}`, so it has left the merge queue. " <>
+      repair_hint(
+        "Merge or rebase `#{branch}` into this PR and resolve the conflict, then someone with permission can run `bors r+` or `bors retry`."
+      )
   end
 
   def generate_message({:conflict, :retrying}) do
@@ -166,11 +187,11 @@ defmodule BorsNG.Worker.Batcher.Message do
   end
 
   def generate_message({:timeout, :failed}) do
-    "Timed out.\n\nFix if necessary, and then someone with permission can run `bors r+` or `bors retry`."
+    "Timed out.\n\nCI did not finish for this PR within the time limit, so it has left the merge queue. Fix anything that needs fixing, then someone with permission can run `bors r+` or `bors retry`."
   end
 
   def generate_message({:timeout, :retrying}) do
-    "This PR was included in a batch that timed out, it will be automatically retried"
+    "This PR was in a batch that timed out before CI finished. Bors has put it back in the queue and will retry it automatically. #{@no_action}"
   end
 
   # `bors try` is a trial build, not a merge attempt, so its failure/timeout
@@ -199,12 +220,35 @@ defmodule BorsNG.Worker.Batcher.Message do
     nil
   end
 
+  # Merge-queue recovery posts its own comment when it takes a PR on, but not
+  # for a head held by a label, so this one cannot promise that comment.
+  def generate_message({:canceled, :failed, :source_compatibility}) do
+    "Bors build canceled.\n\nThis PR left the merge queue because bors found it needs repair before it can merge, for example because it conflicts with the base branch. If merge-queue recovery takes it on, a recovery comment on this PR says what happens next. A `keep`, `hold`, `wip` or `human` label pauses automatic repair; then the author or a maintainer needs to fix it."
+  end
+
+  def generate_message({:canceled, :failed, reason}) when reason in [:requested, :cancel_all] do
+    "Bors build canceled.\n\nThis PR left the merge queue because bors was asked to stop merging it. Someone with permission can run `bors r+` when it is ready."
+  end
+
+  def generate_message({:canceled, :failed, reason})
+      when reason in [
+             :changed_head,
+             :eligibility_changed,
+             :automatic_review_rejected,
+             :review_unsafe
+           ] do
+    "Bors build canceled.\n\nThis PR's approval no longer applies to its current state (for example its head commit or merge requirements changed), so it has left the merge queue. " <>
+      eligibility_hint(
+        "Address comments or fix if necessary, then someone with permission can run `bors r+`."
+      )
+  end
+
   def generate_message({:canceled, :failed, _reason}) do
-    "Bors build canceled.\n\nAddress comments or fix if necessary, and then someone with permission can run `bors r+`."
+    "Bors build canceled.\n\nThis PR has left the merge queue. Address comments or fix if necessary, then someone with permission can run `bors r+`."
   end
 
   def generate_message({:canceled, :retrying}) do
-    "This PR was included in a batch that was canceled, it will be automatically retried"
+    "Another PR left this PR's batch, so bors canceled the batch. This PR is back in the queue and will be retried automatically. #{@no_action}"
   end
 
   def generate_message({:push_failed_non_ff, target_branch}) do
@@ -541,6 +585,14 @@ defmodule BorsNG.Worker.Batcher.Message do
     "bors could not restore this pull request's base branch to `#{branch}` (it was changed when its bundle was queued). Please check the base branch."
   end
 
+  # A member of a failed batch with no smaller retry batch: usually a suspect
+  # that failure diagnostics withdrew for repair, but not always, so the
+  # comment neither promises a retry nor assigns blame.
+  def generate_message({:withdrawn_suspect, statuses}) do
+    (["Build failed:" | Enum.map(statuses, &"  * #{gen_status_link(&1)}")] |> Enum.join("\n")) <>
+      "\n\nThis PR was tested together with other PRs and that batch failed. It was not put into a smaller retry batch, so it has left the merge queue for now; that alone does not mean it caused the failure. If merge-queue recovery takes it on, a recovery comment on this PR says what happens next. Otherwise someone with permission can run `bors r+` or `bors retry`."
+  end
+
   def generate_message({state, statuses}) do
     is_new_year = get_is_new_year()
     is_public = get_is_public()
@@ -586,7 +638,14 @@ defmodule BorsNG.Worker.Batcher.Message do
     case state do
       :failed ->
         body <>
-          "\n\nFix if necessary, and then someone with permission can run `bors r+` or `bors retry`."
+          "\n\nThis PR failed on its own, not because of another PR in its batch, so it has left the merge queue. " <>
+          repair_hint(
+            "Fix the failure, then someone with permission can run `bors r+` or `bors retry`."
+          )
+
+      :retrying ->
+        body <>
+          "\n\nThis PR was tested together with other PRs, and that batch failed. Bors is retrying it in a smaller batch to find the PR that caused the failure. #{@no_action} Bors will comment again if this PR turns out to be the cause."
 
       :try_failed ->
         body <> "\n\nFix if necessary, and then run `bors try` again."

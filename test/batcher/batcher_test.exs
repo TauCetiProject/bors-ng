@@ -201,7 +201,7 @@ defmodule BorsNG.Worker.BatcherTest do
                commits: %{},
                comments: %{
                  1 => [
-                   "Bors build canceled.\n\nAddress comments or fix if necessary, and then someone with permission can run `bors r+`."
+                   "Bors build canceled.\n\nThis PR left the merge queue because bors was asked to stop merging it. Someone with permission can run `bors r+` when it is ready."
                  ],
                  2 => []
                },
@@ -252,7 +252,7 @@ defmodule BorsNG.Worker.BatcherTest do
                commits: %{},
                comments: %{
                  1 => [
-                   "Bors build canceled.\n\nAddress comments or fix if necessary, and then someone with permission can run `bors r+`."
+                   "Bors build canceled.\n\nThis PR left the merge queue because bors was asked to stop merging it. Someone with permission can run `bors r+` when it is ready."
                  ]
                },
                statuses: %{"N" => %{"bors" => :error}},
@@ -328,7 +328,7 @@ defmodule BorsNG.Worker.BatcherTest do
                    "Bors build canceled because the PR branch was pushed to.\n\nThis cancels the in-progress bors run; if the push also touched a delegation-restricted path, any affected delegation is revoked in a separate comment. Address comments or fix if necessary, and then someone with permission can re-run `bors r+` once the PR is ready."
                  ],
                  2 => [
-                   "This PR was included in a batch that was canceled, it will be automatically retried"
+                   "Another PR left this PR's batch, so bors canceled the batch. This PR is back in the queue and will be retried automatically. No action is needed: the bors check on this PR links to the batch it is waiting in."
                  ]
                },
                statuses: %{
@@ -2594,7 +2594,7 @@ defmodule BorsNG.Worker.BatcherTest do
              &String.contains?(&1, "left the queue without merging because it is a draft")
            )
 
-    assert Enum.any?(state.comments[2], &String.contains?(&1, "automatically retried"))
+    assert Enum.any?(state.comments[2], &String.contains?(&1, "retried automatically"))
     refute Enum.any?(state.comments[2], &String.contains?(&1, "is a draft"))
   end
 
@@ -2964,7 +2964,7 @@ defmodule BorsNG.Worker.BatcherTest do
 
     assert hd(state.comments[1]) =~ "left the queue without merging because it is a draft"
     assert hd(state.comments[2]) =~ "linked with #1, which was converted to draft"
-    assert hd(state.comments[3]) =~ "automatically retried"
+    assert hd(state.comments[3]) =~ "retried automatically"
 
     # A dropped bundle needs a fresh r+ on every member.
     assert Repo.get!(Patch, p1.id).bundle_reviewer == nil
@@ -3043,7 +3043,7 @@ defmodule BorsNG.Worker.BatcherTest do
     # Both drafts hear why, and the unrelated #4 is re-queued untouched.
     assert hd(state.comments[1]) =~ "without merging because it is a draft"
     assert hd(state.comments[2]) =~ "without merging because it is a draft"
-    assert hd(state.comments[4]) =~ "automatically retried"
+    assert hd(state.comments[4]) =~ "retried automatically"
   end
 
   test "full runthrough (with zero patches)", %{proj: proj} do
@@ -3990,7 +3990,7 @@ defmodule BorsNG.Worker.BatcherTest do
                },
                comments: %{
                  1 => [
-                   "Merge conflict.\n\nMerge or rebase `master` into this PR and resolve the conflict, then someone with permission can run `bors r+` or `bors retry`."
+                   "Merge conflict.\n\nThis PR conflicts with `master`, so it has left the merge queue. Merge or rebase `master` into this PR and resolve the conflict, then someone with permission can run `bors r+` or `bors retry`."
                  ]
                },
                statuses: %{"N" => %{"bors" => :error}, "iniN" => %{}},
@@ -5835,8 +5835,12 @@ defmodule BorsNG.Worker.BatcherTest do
                  }
                },
                comments: %{
-                 1 => ["Build failed (retrying...):\n  * ci"],
-                 2 => ["Build failed (retrying...):\n  * ci"]
+                 1 => [
+                   "Build failed (retrying...):\n  * ci\n\nThis PR was tested together with other PRs, and that batch failed. Bors is retrying it in a smaller batch to find the PR that caused the failure. No action is needed: the bors check on this PR links to the batch it is waiting in. Bors will comment again if this PR turns out to be the cause."
+                 ],
+                 2 => [
+                   "Build failed (retrying...):\n  * ci\n\nThis PR was tested together with other PRs, and that batch failed. Bors is retrying it in a smaller batch to find the PR that caused the failure. No action is needed: the bors check on this PR links to the batch it is waiting in. Bors will comment again if this PR turns out to be the cause."
+                 ]
                },
                statuses: %{
                  "iniNO" => %{"bors" => :error},
@@ -5915,8 +5919,12 @@ defmodule BorsNG.Worker.BatcherTest do
                  }
                },
                comments: %{
-                 1 => ["Build failed (retrying...):\n  * ci"],
-                 2 => ["Build failed (retrying...):\n  * ci"]
+                 1 => [
+                   "Build failed (retrying...):\n  * ci\n\nThis PR was tested together with other PRs, and that batch failed. Bors is retrying it in a smaller batch to find the PR that caused the failure. No action is needed: the bors check on this PR links to the batch it is waiting in. Bors will comment again if this PR turns out to be the cause."
+                 ],
+                 2 => [
+                   "Build failed (retrying...):\n  * ci\n\nThis PR was tested together with other PRs, and that batch failed. Bors is retrying it in a smaller batch to find the PR that caused the failure. No action is needed: the bors check on this PR links to the batch it is waiting in. Bors will comment again if this PR turns out to be the cause."
+                 ]
                },
                statuses: %{
                  "iniNO" => %{"bors" => :error},
@@ -5992,10 +6000,12 @@ defmodule BorsNG.Worker.BatcherTest do
                },
                comments: %{
                  1 => [
-                   "Build failed:\n  * ci\n\nFix if necessary, and then someone with permission can run `bors r+` or `bors retry`.",
-                   "Build failed (retrying...):\n  * ci"
+                   "Build failed:\n  * ci\n\nThis PR failed on its own, not because of another PR in its batch, so it has left the merge queue. Fix the failure, then someone with permission can run `bors r+` or `bors retry`.",
+                   "Build failed (retrying...):\n  * ci\n\nThis PR was tested together with other PRs, and that batch failed. Bors is retrying it in a smaller batch to find the PR that caused the failure. No action is needed: the bors check on this PR links to the batch it is waiting in. Bors will comment again if this PR turns out to be the cause."
                  ],
-                 2 => ["Build failed (retrying...):\n  * ci"]
+                 2 => [
+                   "Build failed (retrying...):\n  * ci\n\nThis PR was tested together with other PRs, and that batch failed. Bors is retrying it in a smaller batch to find the PR that caused the failure. No action is needed: the bors check on this PR links to the batch it is waiting in. Bors will comment again if this PR turns out to be the cause."
+                 ]
                },
                statuses: %{
                  "iniNO" => %{"bors" => :error},
@@ -6080,10 +6090,12 @@ defmodule BorsNG.Worker.BatcherTest do
                },
                comments: %{
                  1 => [
-                   "Build failed:\n  * ci\n\nFix if necessary, and then someone with permission can run `bors r+` or `bors retry`.",
-                   "Build failed (retrying...):\n  * ci"
+                   "Build failed:\n  * ci\n\nThis PR failed on its own, not because of another PR in its batch, so it has left the merge queue. Fix the failure, then someone with permission can run `bors r+` or `bors retry`.",
+                   "Build failed (retrying...):\n  * ci\n\nThis PR was tested together with other PRs, and that batch failed. Bors is retrying it in a smaller batch to find the PR that caused the failure. No action is needed: the bors check on this PR links to the batch it is waiting in. Bors will comment again if this PR turns out to be the cause."
                  ],
-                 2 => ["Build failed (retrying...):\n  * ci"]
+                 2 => [
+                   "Build failed (retrying...):\n  * ci\n\nThis PR was tested together with other PRs, and that batch failed. Bors is retrying it in a smaller batch to find the PR that caused the failure. No action is needed: the bors check on this PR links to the batch it is waiting in. Bors will comment again if this PR turns out to be the cause."
+                 ]
                },
                statuses: %{
                  "iniNO" => %{"bors" => :error},
@@ -6166,12 +6178,12 @@ defmodule BorsNG.Worker.BatcherTest do
                },
                comments: %{
                  1 => [
-                   "Build failed:\n  * ci\n\nFix if necessary, and then someone with permission can run `bors r+` or `bors retry`.",
-                   "Build failed (retrying...):\n  * ci"
+                   "Build failed:\n  * ci\n\nThis PR failed on its own, not because of another PR in its batch, so it has left the merge queue. Fix the failure, then someone with permission can run `bors r+` or `bors retry`.",
+                   "Build failed (retrying...):\n  * ci\n\nThis PR was tested together with other PRs, and that batch failed. Bors is retrying it in a smaller batch to find the PR that caused the failure. No action is needed: the bors check on this PR links to the batch it is waiting in. Bors will comment again if this PR turns out to be the cause."
                  ],
                  2 => [
-                   "Build failed:\n  * ci\n\nFix if necessary, and then someone with permission can run `bors r+` or `bors retry`.",
-                   "Build failed (retrying...):\n  * ci"
+                   "Build failed:\n  * ci\n\nThis PR failed on its own, not because of another PR in its batch, so it has left the merge queue. Fix the failure, then someone with permission can run `bors r+` or `bors retry`.",
+                   "Build failed (retrying...):\n  * ci\n\nThis PR was tested together with other PRs, and that batch failed. Bors is retrying it in a smaller batch to find the PR that caused the failure. No action is needed: the bors check on this PR links to the batch it is waiting in. Bors will comment again if this PR turns out to be the cause."
                  ]
                },
                statuses: %{
@@ -6981,10 +6993,10 @@ defmodule BorsNG.Worker.BatcherTest do
                },
                comments: %{
                  1 => [
-                   "This PR was included in a batch that timed out, it will be automatically retried"
+                   "This PR was in a batch that timed out before CI finished. Bors has put it back in the queue and will retry it automatically. No action is needed: the bors check on this PR links to the batch it is waiting in."
                  ],
                  2 => [
-                   "This PR was included in a batch that timed out, it will be automatically retried"
+                   "This PR was in a batch that timed out before CI finished. Bors has put it back in the queue and will retry it automatically. No action is needed: the bors check on this PR links to the batch it is waiting in."
                  ]
                },
                statuses: %{
@@ -7065,10 +7077,10 @@ defmodule BorsNG.Worker.BatcherTest do
                },
                comments: %{
                  1 => [
-                   "This PR was included in a batch that timed out, it will be automatically retried"
+                   "This PR was in a batch that timed out before CI finished. Bors has put it back in the queue and will retry it automatically. No action is needed: the bors check on this PR links to the batch it is waiting in."
                  ],
                  2 => [
-                   "This PR was included in a batch that timed out, it will be automatically retried"
+                   "This PR was in a batch that timed out before CI finished. Bors has put it back in the queue and will retry it automatically. No action is needed: the bors check on this PR links to the batch it is waiting in."
                  ]
                },
                statuses: %{
@@ -7149,11 +7161,11 @@ defmodule BorsNG.Worker.BatcherTest do
                },
                comments: %{
                  1 => [
-                   "Timed out.\n\nFix if necessary, and then someone with permission can run `bors r+` or `bors retry`.",
-                   "This PR was included in a batch that timed out, it will be automatically retried"
+                   "Timed out.\n\nCI did not finish for this PR within the time limit, so it has left the merge queue. Fix anything that needs fixing, then someone with permission can run `bors r+` or `bors retry`.",
+                   "This PR was in a batch that timed out before CI finished. Bors has put it back in the queue and will retry it automatically. No action is needed: the bors check on this PR links to the batch it is waiting in."
                  ],
                  2 => [
-                   "This PR was included in a batch that timed out, it will be automatically retried"
+                   "This PR was in a batch that timed out before CI finished. Bors has put it back in the queue and will retry it automatically. No action is needed: the bors check on this PR links to the batch it is waiting in."
                  ]
                },
                statuses: %{
@@ -7239,11 +7251,11 @@ defmodule BorsNG.Worker.BatcherTest do
                },
                comments: %{
                  1 => [
-                   "Timed out.\n\nFix if necessary, and then someone with permission can run `bors r+` or `bors retry`.",
-                   "This PR was included in a batch that timed out, it will be automatically retried"
+                   "Timed out.\n\nCI did not finish for this PR within the time limit, so it has left the merge queue. Fix anything that needs fixing, then someone with permission can run `bors r+` or `bors retry`.",
+                   "This PR was in a batch that timed out before CI finished. Bors has put it back in the queue and will retry it automatically. No action is needed: the bors check on this PR links to the batch it is waiting in."
                  ],
                  2 => [
-                   "This PR was included in a batch that timed out, it will be automatically retried"
+                   "This PR was in a batch that timed out before CI finished. Bors has put it back in the queue and will retry it automatically. No action is needed: the bors check on this PR links to the batch it is waiting in."
                  ]
                },
                statuses: %{
@@ -7331,12 +7343,12 @@ defmodule BorsNG.Worker.BatcherTest do
                },
                comments: %{
                  1 => [
-                   "Timed out.\n\nFix if necessary, and then someone with permission can run `bors r+` or `bors retry`.",
-                   "This PR was included in a batch that timed out, it will be automatically retried"
+                   "Timed out.\n\nCI did not finish for this PR within the time limit, so it has left the merge queue. Fix anything that needs fixing, then someone with permission can run `bors r+` or `bors retry`.",
+                   "This PR was in a batch that timed out before CI finished. Bors has put it back in the queue and will retry it automatically. No action is needed: the bors check on this PR links to the batch it is waiting in."
                  ],
                  2 => [
-                   "Timed out.\n\nFix if necessary, and then someone with permission can run `bors r+` or `bors retry`.",
-                   "This PR was included in a batch that timed out, it will be automatically retried"
+                   "Timed out.\n\nCI did not finish for this PR within the time limit, so it has left the merge queue. Fix anything that needs fixing, then someone with permission can run `bors r+` or `bors retry`.",
+                   "This PR was in a batch that timed out before CI finished. Bors has put it back in the queue and will retry it automatically. No action is needed: the bors check on this PR links to the batch it is waiting in."
                  ]
                },
                statuses: %{

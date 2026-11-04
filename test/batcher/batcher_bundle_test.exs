@@ -1682,7 +1682,7 @@ defmodule BorsNG.Worker.BatcherBundleTest do
 
       assert Enum.any?(comments_for(1), &(&1 =~ "canceled because the PR branch was pushed to"))
       assert Enum.any?(comments_for(2), &(&1 =~ "linked with #1, which was pushed to"))
-      assert Enum.any?(comments_for(3), &(&1 =~ "will be automatically retried"))
+      assert Enum.any?(comments_for(3), &(&1 =~ "will be retried automatically"))
     end
 
     test "canceling a member of a bundle-only running batch fails everything", %{proj: proj} do
