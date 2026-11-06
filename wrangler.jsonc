@@ -5,7 +5,10 @@
   "main": "src/index.js",
   "compatibility_date": "2026-09-25",
   "observability": { "enabled": true },
-  "routes": [{ "pattern": "bors.taucetiproject.org", "custom_domain": true }],
+  // bors.taucetiproject.org now carries externally managed DNS for the AI merge
+  // queue (2026-11-04 cut-over), so a custom-domain route fails every deploy.
+  // The worker stays reachable on its workers.dev hostname for feeds and the UI.
+  "workers_dev": true,
   "containers": [{
     "class_name": "BorsContainer",
     "image": "./Dockerfile",
