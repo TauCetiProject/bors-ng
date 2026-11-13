@@ -10,9 +10,7 @@ permissions:
 
 jobs:
   webhook-tests:
-    runs-on:
-      - nscloud-ubuntu-24.04-amd64-2x4-with-features
-      - namespace-features:github.run-id=${{ github.run_id }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     services:
       postgres:
@@ -49,9 +47,7 @@ jobs:
       - run: git diff --exit-code
 
   container:
-    runs-on:
-      - nscloud-ubuntu-24.04-amd64-4x8-with-features
-      - namespace-features:github.run-id=${{ github.run_id }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
@@ -85,9 +81,7 @@ jobs:
           '
 
   worker:
-    runs-on:
-      - nscloud-ubuntu-24.04-amd64-2x4-with-features
-      - namespace-features:github.run-id=${{ github.run_id }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
